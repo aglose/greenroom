@@ -39,6 +39,8 @@ This downloads the apksim release named in `engine.lock` (checked against the SH
 | `--version X.Y.Z` | the app's version |
 | `--check` | verify the signatures and run the smoke test |
 
+A release is cut by pushing a `v*` tag: [docs/RELEASING.md](docs/RELEASING.md) has the certificate and secrets it needs.
+
 `swift build` alone gives the bare executable; run it with `GREENROOM_ENGINE=/path/to/an/apksim/release`.
 
 ## How it is put together

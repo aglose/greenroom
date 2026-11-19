@@ -33,6 +33,7 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$(git rev-list --count HEAD 2>/dev/
 [[ -f Resources/AppIcon.icns ]] && cp Resources/AppIcon.icns "$C/Resources/"
 cp -Rc "$ENGINE" "$C/Resources/engine"
 cp "$TESTAPP" "$C/Resources/engine-testapp.apk"
+chmod -R u+w "$APP"   # a release's JDK files are read-only; signing rewrites them
 xattr -cr "$APP"
 
 # Signing, inner to outer. Every Mach-O gets the hardened runtime; only the engine's java gets entitlements
