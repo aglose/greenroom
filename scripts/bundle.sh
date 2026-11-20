@@ -68,4 +68,6 @@ if [[ -n "$CHECK" ]]; then
   "$C/MacOS/Greenroom" --smoke "$C/Resources/engine-testapp.apk" | tail -3
   # The workbench's path: the screen streamed to the app as H.264 and decoded, input over the control channel.
   "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
+  # The agent interface, as an agent uses it.
+  "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk"
 fi

@@ -17,6 +17,13 @@ inside the app instead.
 Network traffic you will see comes from the Android app you are running, which reaches the network as it would on
 a phone.
 
+## Agents
+
+If you connect a coding agent ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.md)), it reads the screens and logs
+of the apps you run and acts on them, on this Mac, through a connection only programs running as you can open (a
+token in a file only you can read; web pages are refused). What the agent's own provider receives is between you
+and that agent; Greenroom sends it nothing by itself.
+
 ## What will be added, and how
 
 - **Update checks**, when the app can update itself: a request for the list of versions, with no identifier, which

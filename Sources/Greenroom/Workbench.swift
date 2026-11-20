@@ -11,6 +11,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var sideBySide = false
     /// Input in one simulator, and the toolbar's commands, go to all of them.
     private(set) var mirror = false
+    /// What agents have done here, and the popover that shows it.
+    let agentActivity = AgentActivity()
+    var agentTools: AgentTools? { didSet { agentPanel = agentTools.map { AgentPanel(activity: agentActivity, tools: $0) } } }
+    private var agentPanel: AgentPanel?
+    private let agentPopover = NSPopover()
     private let status = NSTextField(labelWithString: "")
     private var rows: [Row] = []
     private var selected: Simulator?
@@ -58,7 +63,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     // MARK: Opening and selecting
 
     @discardableResult
-    func open(_ apk: URL, remember: Bool = true, options: [String] = []) -> Simulator? {
+    func open(_ apk: URL, remember: Bool = true, options: [String] = [], fromAgent: Bool = false) -> Simulator? {
         do {
             let sim = try Engine.shared.open(apk: apk, options: options)
             if remember {
@@ -74,10 +79,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 }
                 self.reload()
             }
-            select(sim)
+            if fromAgent, selected?.isAlive == true, Engine.shared.simulators.filter(\.isAlive).count > 1 {
+                sideBySide = true   // an agent's second simulator goes beside the first, not over it
+                reload()
+            } else {
+                select(sim)
+            }
             return sim
         } catch {
-            NSAlert(error: error).beginSheetModal(for: window)
+            if !fromAgent { NSAlert(error: error).beginSheetModal(for: window) }
             return nil
         }
     }
@@ -274,11 +284,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         Tool(id: "close", label: "Close Simulator", symbol: "xmark.circle", command: #selector(closeSelected(_:))),
         Tool(id: "grid", label: "Side by Side", symbol: "rectangle.split.2x1", command: #selector(toggleSideBySide(_:))),
         Tool(id: "mirror", label: "Mirror Input", symbol: "arrow.triangle.branch", command: #selector(toggleMirror(_:))),
+        Tool(id: "agent", label: "Agent", symbol: "sparkles", command: #selector(showAgent(_:))),
     ]
     private static let devices = ["phone", "foldable", "tablet", "desktop", "tv"]
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "flex", "shot", "restart", "close"].map {
+        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "agent", "flex", "shot", "restart", "close"].map {
             $0 == "flex" ? .flexibleSpace : NSToolbarItem.Identifier($0)
         }
     }
@@ -314,6 +325,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         }
         guard let tool = Self.tools.first(where: { $0.id == id.rawValue }) else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
+        if tool.id == "agent" {
+            let button = NSButton(image: NSImage(systemSymbolName: tool.symbol, accessibilityDescription: tool.label) ?? NSImage(),
+                                  target: self, action: tool.command)
+            button.bezelStyle = .toolbar
+            item.view = button
+            item.label = tool.label
+            item.toolTip = "Connect an agent"
+            return item
+        }
         item.label = tool.label
         item.toolTip = tool.label
         item.image = NSImage(systemSymbolName: tool.symbol, accessibilityDescription: tool.label)
@@ -333,6 +353,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             item.image = Self.toggleImage("arrow.triangle.branch", on: mirror, label: item.label)
             item.toolTip = mirror ? "Mirror Input: on. Touches, keys and toolbar commands go to every simulator" : "Mirror Input: send touches and keys to every simulator"
             return Engine.shared.simulators.count > 1 || mirror
+        case "agent":
+            (item.view as? NSButton)?.image = Self.toggleImage("sparkles", on: agentActivity.client != nil, label: item.label)
+            item.toolTip = agentActivity.client.map { "\($0) is connected" } ?? "Connect an agent"
+            return true
         case "close": return selected != nil
         default: return live != nil
         }
@@ -378,6 +402,28 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if let keep { selected = keep; window.subtitle = keep.name }
         reload()
         return sim
+    }
+
+    /// Shows where an agent touched a simulator.
+    func agentTouched(_ sim: Simulator, x: Int, y: Int) {
+        grid.view(for: sim)?.flashTouch(deviceX: x, deviceY: y)
+    }
+
+    @objc func showAgent(_ sender: Any?) {
+        guard let agentPanel else { return }
+        if agentPopover.isShown { agentPopover.close(); return }
+        agentPopover.contentViewController = agentPanel
+        agentPopover.behavior = .transient
+        let item = window.toolbar?.items.first { $0.itemIdentifier.rawValue == "agent" }
+        if let anchor = item?.view ?? window.contentView {
+            agentPopover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        }
+        agentPanel.refresh()
+    }
+
+    func agentChanged() {
+        agentPanel?.refresh()
+        window.toolbar?.validateVisibleItems()
     }
 
     /// A click made as the mouse would make it, at a fraction of the simulator view's size (for scripted checks).

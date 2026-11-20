@@ -107,6 +107,35 @@ final class SimulatorView: NSView {
 
     func setMessage(_ text: String) { message.stringValue = text }
 
+    /// A ring that fades at a device position: where an agent touched, so the person can follow it.
+    func flashTouch(deviceX: Int, deviceY: Int) {
+        guard let size = simulator?.deviceSize, size.width > 0, let host = layer else { return }
+        let r = pictureRect
+        let p = CGPoint(x: r.minX + CGFloat(deviceX) / size.width * r.width, y: r.minY + CGFloat(deviceY) / size.height * r.height)
+        let ring = CAShapeLayer()
+        ring.path = CGPath(ellipseIn: CGRect(x: -16, y: -16, width: 32, height: 32), transform: nil)
+        ring.position = p
+        ring.fillColor = NSColor.systemPink.withAlphaComponent(0.35).cgColor
+        ring.strokeColor = NSColor.systemPink.cgColor
+        ring.lineWidth = 2
+        host.addSublayer(ring)
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 0.4
+        grow.toValue = 1.5
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [grow, fade]
+        group.duration = 0.6
+        group.isRemovedOnCompletion = false
+        group.fillMode = .forwards
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { ring.removeFromSuperlayer() }
+        ring.add(group, forKey: "touch")
+        CATransaction.commit()
+    }
+
     private func updateCaption() {
         guard let sim = simulator else { caption.stringValue = ""; return }
         let size = sim.deviceSize

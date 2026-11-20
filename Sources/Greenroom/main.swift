@@ -3,6 +3,9 @@ import AppKit
 // `Greenroom --smoke APK` (CI and scripts/bundle.sh --check): runs the APK headless in the bundled engine until its
 // first frame, prints the engine's output, and exits with its status. No window, no app.
 let arguments = CommandLine.arguments
+
+// `Greenroom --mcp`: the agent interface on stdin and stdout, passed on to the running app (AgentShim).
+if arguments.contains("--mcp") { AgentShim.run() }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {

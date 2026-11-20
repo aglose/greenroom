@@ -8,7 +8,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenus()
         workbench = Workbench()
         workbench.window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        if !CommandLine.arguments.contains("--background") { NSApp.activate() }
+        startAgentServer()
+        // `kill` (and a script that started the app) quits it as the menu would: simulators stopped, nothing left behind.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { NSApp.terminate(nil) }
+        term.resume()
+        termSource = term
         windowShotIfAsked()
     }
 
@@ -76,6 +83,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file)
     }
 
+    private let agent = AgentServer()
+    private var termSource: DispatchSourceSignal?
+
+    private func startAgentServer() {
+        agent.tools.workbench = workbench
+        workbench.agentTools = agent.tools
+        agent.tools.onActivity = { [weak self] tool, summary, failed in
+            self?.workbench.agentActivity.add(tool, summary, failed: failed)
+        }
+        agent.onClient = { [weak self] name in self?.workbench.agentActivity.connected(name) }
+        workbench.agentActivity.onChange = { [weak self] in self?.workbench.agentChanged() }
+        do { try agent.start() } catch { NSLog("Greenroom: the agent interface could not start: \(error)") }
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         urls.forEach { workbench.open($0) }
     }
@@ -86,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        agent.stop()
         Engine.shared.stopAll()
     }
 
@@ -157,6 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.addItem(item("Workbench", #selector(showWorkbench(_:)), "0"))
         main.addItem(submenu(win, title: "Window"))
         NSApp.windowsMenu = win
+
+        win.addItem(to(workbench: #selector(Workbench.showAgent(_:)), "Agent Activity", "A", [.command, .option]))
 
         let help = NSMenu(title: "Help")
         help.addItem(item("Show Simulator Logs", #selector(showLogs(_:)), ""))

@@ -30,6 +30,13 @@ final class Simulator {
     private var pendingOutput = Data()
     private var port: Int?
 
+    /// What an agent was last told is on this screen, and the references it holds.
+    let tree = ScreenTree()
+    /// How much of the log an agent has already been given.
+    var logOffset: UInt64 = 0
+    /// The launch options this simulator was started with (shown to agents).
+    private(set) var options: [String] = []
+
     var name: String { apk.deletingPathExtension().lastPathComponent }
     var isAlive: Bool { if case .ended = state { return false }; return true }
 
@@ -46,8 +53,10 @@ final class Simulator {
         let pipe = Pipe()
         process.executableURL = launcher
         process.arguments = ["--headless", "--control", "auto"] + options + [apk.path]
+        self.options = options
         var env = ProcessInfo.processInfo.environment
         env["APKSIM_HOME"] = stateDir.path
+        env["APKSIM_LOGCAT"] = "1"   // the app's android.util.Log lines go to the simulator's log file
         process.environment = env
         process.currentDirectoryURL = stateDir
         process.standardOutput = pipe
@@ -124,6 +133,16 @@ final class Simulator {
     func send(_ command: String, reply: ((String) -> Void)? = nil) {
         guard let control else { reply?("error: the simulator is still starting"); return }
         control.send(command, reply: reply)
+    }
+
+    /// Sends a command and waits for its answer. Never on the main thread (answers are delivered there).
+    func sendSync(_ command: String, timeout: TimeInterval = 30) -> String {
+        precondition(!Thread.isMainThread)
+        let done = DispatchSemaphore(value: 0)
+        var answer = "error: no answer within \(Int(timeout)) s"
+        DispatchQueue.main.async { self.send(command) { answer = $0; done.signal() } }
+        _ = done.wait(timeout: .now() + timeout)
+        return answer
     }
 
     /// Text as typed, spaces and all.

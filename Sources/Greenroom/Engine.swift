@@ -136,7 +136,9 @@ final class Engine {
         p.environment = env
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
-        try? p.run()
-        p.waitUntilExit()
+        guard (try? p.run()) != nil else { return }
+        // Bounded: this runs as the app quits, and quitting must not hang on the engine.
+        let deadline = Date().addingTimeInterval(3)
+        while p.isRunning, Date() < deadline { usleep(50_000) }
     }
 }
