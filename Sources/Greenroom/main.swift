@@ -30,20 +30,31 @@ if let i = arguments.firstIndex(of: "--smoke-stream"), i + 1 < arguments.count {
         let started = Date()
         sim.onSample = { _ in samples += 1; if firstFrame == nil { firstFrame = Date().timeIntervalSince(started) } }
         var stats = "", activity = ""
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-            sim.send("tap 411 600")
-            sim.type("hi there")
-            sim.send("activity") { activity = $0 }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { sim.send("stats") { stats = $0 } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 9) {
+        func finish() {
             let size = sim.deviceSize
             print("[greenroom] smoke-stream: \(samples) frames decoded, first after \(String(format: "%.2f", firstFrame ?? -1)) s, device \(Int(size.width))x\(Int(size.height)), state \(sim.state)")
             print("[greenroom] activity: \(activity)")
             print("[greenroom] stats: \(stats.prefix(160))")
             let ok = samples > 0 && size.width > 0 && !activity.isEmpty && !activity.hasPrefix("error")
+            if !ok, let log = try? String(contentsOf: sim.log, encoding: .utf8) {
+                print("[greenroom] engine log, last lines:\n" + log.split(separator: "\n").suffix(25).joined(separator: "\n"))
+            }
             Engine.shared.stopAll()
             exit(ok ? 0 : 1)
+        }
+        // Wait for the first frame (a cold engine on a slow machine takes a while), then drive the app briefly.
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { timer in
+            waited += 0.25
+            let ended: Bool = { if case .ended = sim.state { return true }; return false }()
+            guard firstFrame != nil || waited >= 120 || ended else { return }
+            timer.invalidate()
+            guard firstFrame != nil else { finish(); return }
+            sim.send("tap 411 600")
+            sim.type("hi there")
+            sim.send("activity") { activity = $0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { sim.send("stats") { stats = $0 } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish() }
         }
         RunLoop.main.run()
     } catch {
