@@ -119,7 +119,10 @@ final class Engine {
         try prepare()
         let log = logs.appendingPathComponent("simulator-\(Int(Date().timeIntervalSince1970 * 1000)).log")
         let sim = Simulator(apk: apk, log: log)
-        try sim.start(launcher: launcher, stateDir: engineState, options: options, controlToken: supportsControlToken)
+        // The network inspector reads the app's own connections as they pass (no proxy, nothing changed), so the
+        // network pane and timeline have the requests from the first one on.
+        let inspect = options.contains("--network-inspect") ? options : options + ["--network-inspect"]
+        try sim.start(launcher: launcher, stateDir: engineState, options: inspect, controlToken: supportsControlToken)
         simulators.append(sim)
         onChange?()
         return sim

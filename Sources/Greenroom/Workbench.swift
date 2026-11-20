@@ -45,6 +45,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var recordButton: GlassButton!
     private var railButtons: [String: GlassButton] = [:]
     private var splitController: NSSplitViewController!
+    // The network pane (right, over the stage) and the timeline dock (bottom).
+    private let networkPane = NetworkPane(frame: .zero)
+    private let timeline = TimelineDock(frame: .zero)
+    private var gridTrailing: NSLayoutConstraint!
+    private var timelineHeight: NSLayoutConstraint!
+    private var networkLeading: NSLayoutConstraint!
+    private(set) var showingNetwork = false
+    private(set) var showingTimeline = false
+    private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
     private var selected: Simulator?
 
@@ -84,8 +93,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         compareBar.lineBreakMode = .byTruncatingTail
         compareBar.isSelectable = true
         let stack = StageBackground()
-        for v in [grid, compareBar, logPanel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        for v in [grid, compareBar, timeline, logPanel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        timeline.isHidden = true
         compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
+        timelineHeight = timeline.heightAnchor.constraint(equalToConstant: 0)
+        gridTrailing = grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -64)
         logHeight = logPanel.heightAnchor.constraint(equalToConstant: 0)
         logPanel.isHidden = true
         logPanel.wantsLayer = true   // a dock of glass along the bottom, as the timeline will be
@@ -98,20 +110,25 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         NSLayoutConstraint.activate([
             grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -64),
+            gridTrailing,
             grid.bottomAnchor.constraint(equalTo: compareBar.topAnchor),
             compareBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
             compareBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
-            compareBar.bottomAnchor.constraint(equalTo: logPanel.topAnchor, constant: -8),
+            compareBar.bottomAnchor.constraint(equalTo: timeline.topAnchor, constant: -8),
             compareHeight,
+            timeline.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
+            timeline.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            timeline.bottomAnchor.constraint(equalTo: logPanel.topAnchor, constant: -8),
+            timelineHeight,
             logPanel.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
-            logPanel.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -64),
+            logPanel.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
             logPanel.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: -Design.margin),
             logHeight,
         ])
         let drop = DropTarget(content: stack) { [weak self] in self?.open($0) }
         content.view = drop
         buildChrome(in: drop)
+        linkPanes()
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
         inspectorItem.minimumThickness = 240
@@ -210,6 +227,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
         refreshGrid()
         if showingLog { logPanel.follow(selected) }
+        if showingNetwork { networkPane.follow(selected) }
+        if showingTimeline { timeline.follow(selected) }
         rows = []
         if !sims.isEmpty {
             rows.append(.header("Running"))
@@ -277,6 +296,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
         let rails: [(String, String, String, Selector)] = [
             ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
+            ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
+            ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
             ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
             ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
         ]
@@ -291,7 +312,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         column.translatesAutoresizingMaskIntoConstraints = false
         rail.addSubview(column)
 
-        for v in [header, rail] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        for v in [networkPane, header, rail] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        networkPane.isHidden = true
+        // Hidden, the pane waits just off the window's right edge; shown, it slides in beside the rail.
+        networkLeading = networkPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: host.topAnchor, constant: 4),
             header.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 6),
@@ -301,6 +325,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             bar.trailingAnchor.constraint(equalTo: header.trailingAnchor),
             bar.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             rail.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            networkPane.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            networkPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            networkPane.widthAnchor.constraint(equalToConstant: Self.networkWidth),
+            networkLeading,
             rail.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
             column.topAnchor.constraint(equalTo: rail.topAnchor),
             column.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
@@ -342,7 +370,57 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         recordButton.isEnabled = live != nil
         railButtons["inspect"]?.isOn = inspecting
         railButtons["log"]?.isOn = showingLog
+        railButtons["network"]?.isOn = showingNetwork
+        railButtons["timeline"]?.isOn = showingTimeline
+        timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
+    }
+
+    @objc func toggleNetwork(_ sender: Any?) { setShowingNetwork(!showingNetwork) }
+    @objc func toggleTimeline(_ sender: Any?) { setShowingTimeline(!showingTimeline) }
+
+    /// The network pane slides in from the right; the stage makes room as it comes.
+    func setShowingNetwork(_ on: Bool) {
+        showingNetwork = on
+        networkPane.follow(on ? selected : nil)
+        guard let host = networkPane.superview else { return }
+        if on { networkPane.isHidden = false }
+        Design.animate(Design.move, {
+            self.networkLeading.animator().constant = on ? -(Self.networkWidth + 68) : 20
+            self.gridTrailing.animator().constant = on ? -(Self.networkWidth + 80) : -64
+            host.layoutSubtreeIfNeeded()
+        }, done: { if !self.showingNetwork { self.networkPane.isHidden = true } })
+        updateChrome()
+    }
+
+    /// The timeline docks along the bottom, under the stage.
+    func setShowingTimeline(_ on: Bool) {
+        showingTimeline = on
+        timeline.follow(on ? selected : nil)
+        timeline.setShown(on)
+        if on { timeline.isHidden = false }
+        Design.animate(Design.move, { self.timelineHeight.animator().constant = on ? 196 : 0 },
+                       done: { if !self.showingTimeline { self.timeline.isHidden = true } })
+        updateChrome()
+    }
+
+    /// The playhead dragged to a moment, as a person would (for scripted checks).
+    func debugScrub(to time: Date) { timeline.show(time); timeline.onScrub?(time) }
+
+    /// A request picked in the network pane, as a moment on the timeline (shown if it was not), and the other way round.
+    private func linkPanes() {
+        networkPane.onSelect = { [weak self] e in
+            guard let self else { return }
+            if !self.showingTimeline { self.setShowingTimeline(true) }
+            self.timeline.show(e.start)
+        }
+        timeline.onScrub = { [weak self] t in
+            guard let self else { return }
+            if !self.showingNetwork { self.setShowingNetwork(true) }
+            self.networkPane.reveal(at: t)
+        }
+        timeline.onSave = { [weak self] in self?.saveRecordingAndShow(nil) }
+        timeline.onClose = { [weak self] in self?.setShowingTimeline(false) }
     }
 
     @objc func toggleLibrary(_ sender: Any?) {

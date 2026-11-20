@@ -35,6 +35,9 @@ final class Simulator {
 
     /// What an agent was last told is on this screen, and the references it holds.
     let tree = ScreenTree()
+    /// Touches, frames, requests and log lines, for the timeline and the network pane.
+    let activity = Activity()
+    private var netFeed: NetFeed?
     /// Whether other programs on this Mac are kept off this simulator's control channel.
     var isPrivate: Bool { token != nil }
     /// How much of the log an agent has already been given.
@@ -88,6 +91,7 @@ final class Simulator {
             let data = handle.availableData
             guard !data.isEmpty, let self else { return }
             self.logHandle?.write(data)
+            self.activity.logged(data)
             self.scan(data)
         }
         process.terminationHandler = { [weak self] proc in
@@ -98,6 +102,7 @@ final class Simulator {
                 if let file = self.tokenFile { try? FileManager.default.removeItem(at: file) }
                 self.frames?.close()
                 self.control?.close()
+                self.netFeed?.close()
                 self.state = .ended(proc.terminationStatus)
             }
         }
@@ -135,12 +140,18 @@ final class Simulator {
             }
             if let sample = self.decoder.sampleBuffer(for: frame) {
                 self.framesShown += 1
+                self.activity.frameShown()
                 self.onSample?(sample)
             } else {
                 frames.requestKeyframe()
             }
         }
         self.frames = frames
+        // The app's requests, when the engine was started with its network inspector (a third connection; none otherwise).
+        if options.contains("--network-inspect"), let feed = NetFeed(port: port, token: token) {
+            netFeed = feed
+            feed.start(into: activity)
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.control = control

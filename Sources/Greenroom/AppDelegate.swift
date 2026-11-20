@@ -21,6 +21,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inspectCheckIfAsked()
         recordCheckIfAsked()
         stageCheckIfAsked()
+        networkCheckIfAsked()
+    }
+
+    /// `Greenroom --network-check DIR APK`: the test app's network screen makes a few requests (one to a host that
+    /// answers, others that fail); the network pane and timeline are captured, then with a request picked.
+    private func networkCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--network-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        workbench.window.setContentSize(NSSize(width: 1600, height: 1000))
+        workbench.window.center()
+        guard let sim = workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false, options: ["--appearance", "dark"]) else { return }
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
+            waited += 0.5
+            guard sim.framesShown > 0 || waited > 90 else { return }
+            timer.invalidate()
+            sim.send("open apksim://network?url=https://www.apple.com/")
+            let taps = ["Get", "Get URL", "Fetch", "Fetch other"]
+            for (n, t) in taps.enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3 + Double(n) * 2) { sim.send("tap-text \(t)") }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3 + Double(taps.count) * 2 + 3) { [self] in
+                workbench.setShowingNetwork(true)
+                workbench.setShowingTimeline(true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                    let reqs = sim.activity.requests
+                    print("[greenroom] network: \(reqs.count) requests: " + reqs.map { "\($0.method) \($0.shortURL.prefix(60)) \($0.status) \($0.ms)ms" }.joined(separator: " | "))
+                    print("[greenroom] timeline: touches \(sim.activity.touches.count) frames \(sim.activity.frames.count) log marks \(sim.activity.logs.count)")
+                    captureWindow(to: dir.appendingPathComponent("1-network-timeline.png"))
+                    if let first = reqs.first { workbench.debugScrub(to: first.start.addingTimeInterval(0.01)) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                        captureWindow(to: dir.appendingPathComponent("2-scrubbed.png"))
+                        NSApp.terminate(nil)
+                    }
+                }
+            }
+        }
     }
 
     /// `Greenroom --stage-check DIR APK`: the stage with a phone, a foldable and a watch side by side, captured once

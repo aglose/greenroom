@@ -19,6 +19,7 @@ extension Simulator {
         switch input {
         case .touch(let kind, let f):
             guard size.width > 0 else { return }
+            if kind == "down" { activity.touched() }
             let (x, y) = px(f)
             send(String(format: "touch %@ %.1f %.1f", kind, x, y))
         case .wheel(let f, let dy):
