@@ -13,6 +13,10 @@ final class SimulatorGrid: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override var isFlipped: Bool { true }
+    /// The next layout moves the devices to their places rather than jumping (set when devices come or go).
+    private var animateNext = false
+    private var lastSideBySide = false
+    private var arriving: [SimulatorView] = []
 
     func view(for sim: Simulator) -> SimulatorView? { views.first { $0.simulator === sim } }
 
@@ -31,10 +35,20 @@ final class SimulatorGrid: NSView {
             }
         }
         for v in views where !next.contains(where: { $0 === v }) {
+            // A device leaving fades and sinks a little; the others close the gap as it goes.
             v.show(nil)
-            v.removeFromSuperview()
+            if Design.reduceMotion || window == nil { v.removeFromSuperview(); continue }
+            Design.animate(Design.arrive, {
+                v.animator().alphaValue = 0
+                v.animator().setFrameOrigin(NSPoint(x: v.frame.minX, y: v.frame.minY + 18))
+            }, done: { v.removeFromSuperview(); v.alphaValue = 1 })
         }
+        let arriving = next.filter { v in !views.contains { $0 === v } }
+        let leaving = views.filter { v in !next.contains { $0 === v } }
         views = next
+        if !arriving.isEmpty || !leaving.isEmpty || lastSideBySide != sideBySide { animateNext = true }
+        lastSideBySide = sideBySide
+        self.arriving = arriving
         for v in views {
             v.showsCaption = sideBySide && views.count > 1
             v.isChosen = v.simulator === chosen
@@ -82,6 +96,22 @@ final class SimulatorGrid: NSView {
             let candidate = frames(cols: cols)
             if smallestPicture(candidate) > smallestPicture(best) { best = candidate }
         }
-        for (v, frame) in zip(views, best) { v.frame = frame }
+        let animate = animateNext && window != nil && !Design.reduceMotion
+        animateNext = false
+        let fresh = arriving
+        arriving = []
+        guard animate else { for (v, frame) in zip(views, best) { v.frame = frame }; return }
+        for v in fresh {
+            // A new device rises into its place from just below, fading in.
+            if let i = views.firstIndex(where: { $0 === v }) { v.frame = best[i].offsetBy(dx: 0, dy: 24) }
+            v.alphaValue = 0
+        }
+        Design.animate(Design.move, {
+            for (v, frame) in zip(views, best) {
+                v.animateLayout = true
+                v.animator().frame = frame
+                if fresh.contains(where: { $0 === v }) { v.animator().alphaValue = 1 }
+            }
+        }, done: { [weak self] in self?.views.forEach { $0.animateLayout = false } })
     }
 }

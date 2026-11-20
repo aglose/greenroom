@@ -66,6 +66,14 @@ final class SimulatorView: NSView {
     private let cameraLayer = CALayer()
     private let ringLayer = CALayer()
     private let hingeLayer = CAGradientLayer()
+    /// The screen while the app starts: the device's shape, softly breathing, until the first picture fades in.
+    private let placeholderLayer = CALayer()
+    private var waitingForFirstFrame = false
+    /// The next layout moves the body to its new place and shape rather than jumping (set by the grid, and by a
+    /// rotation or device change).
+    var animateLayout = false
+    private var morphOnce = false
+    private var lastSize = CGSize.zero
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -100,7 +108,10 @@ final class SimulatorView: NSView {
         hingeLayer.colors = [NSColor(white: 0, alpha: 0.45).cgColor, NSColor(white: 1, alpha: 0.07).cgColor]
         hingeLayer.startPoint = CGPoint(x: 0, y: 0.5)
         hingeLayer.endPoint = CGPoint(x: 1, y: 0.5)
-        for l in [ringLayer, rimLayer, bezelLayer, display, hingeLayer, cameraLayer] { layer?.addSublayer(l) }
+        placeholderLayer.backgroundColor = NSColor(srgbRed: 0.10, green: 0.105, blue: 0.12, alpha: 1).cgColor
+        placeholderLayer.cornerCurve = .continuous
+        placeholderLayer.isHidden = true
+        for l in [ringLayer, rimLayer, bezelLayer, placeholderLayer, display, hingeLayer, cameraLayer] { layer?.addSublayer(l) }
 
         message.font = .systemFont(ofSize: 15, weight: .medium)
         message.textColor = Design.mute
@@ -140,7 +151,24 @@ final class SimulatorView: NSView {
         simulator = sim
         display.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
         message.stringValue = sim == nil ? placeholder : (sim!.state == .starting ? "Starting \(sim!.name)…" : "")
-        guard let sim else { return }
+        lastSize = .zero
+        guard let sim else { placeholderLayer.isHidden = true; return }
+        waitingForFirstFrame = true
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        display.opacity = 0
+        placeholderLayer.isHidden = false
+        placeholderLayer.opacity = 1
+        CATransaction.commit()
+        if !Design.reduceMotion {
+            let breathe = CABasicAnimation(keyPath: "opacity")
+            breathe.fromValue = 1
+            breathe.toValue = 0.55
+            breathe.duration = 1.1
+            breathe.autoreverses = true
+            breathe.repeatCount = .infinity
+            breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            placeholderLayer.add(breathe, forKey: "breathe")
+        }
         let renderer = display.sampleBufferRenderer
         sim.onSample = { [weak self, weak sim] sample in
             if renderer.status == .failed {
@@ -148,9 +176,19 @@ final class SimulatorView: NSView {
                 sim?.requestKeyframe()
             }
             renderer.enqueue(sample)
-            DispatchQueue.main.async { if self?.message.stringValue.isEmpty == false { self?.message.stringValue = "" } }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !self.message.stringValue.isEmpty { self.message.stringValue = "" }
+                if self.waitingForFirstFrame { self.firstFrameArrived() }
+            }
         }
-        sim.onSize = { [weak self] _ in self?.needsLayout = true; self?.updateCaption() }
+        sim.onSize = { [weak self] size in
+            guard let self else { return }
+            // A rotation or a device change: the body turns into its new shape instead of jumping.
+            if self.lastSize.width > 0, size != self.lastSize { self.morphOnce = true }
+            self.needsLayout = true
+            self.updateCaption()
+        }
         updateCaption()
         sim.requestKeyframe()
         sim.send("redraw")
@@ -159,6 +197,40 @@ final class SimulatorView: NSView {
     }
 
     func setMessage(_ text: String) { message.stringValue = text }
+
+    /// The first picture cross-fades over the breathing placeholder.
+    private func firstFrameArrived() {
+        waitingForFirstFrame = false
+        let d = Design.reduceMotion ? 0.12 : 0.22 * Design.slow
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(d)
+        CATransaction.setCompletionBlock { [weak self] in
+            self?.placeholderLayer.removeAnimation(forKey: "breathe")
+            self?.placeholderLayer.isHidden = true
+        }
+        display.opacity = 1
+        placeholderLayer.opacity = 0
+        CATransaction.commit()
+    }
+
+    /// The device's size, or before its first picture, the size its kind of device usually has, so the body can
+    /// stand on the stage while the app starts.
+    private var effectiveSize: CGSize {
+        if let s = simulator?.deviceSize, s.width > 0 { return s }
+        guard let sim = simulator else { return .zero }
+        var kind = "phone"
+        if let i = sim.options.firstIndex(of: "--device"), i + 1 < sim.options.count { kind = sim.options[i + 1] }
+        switch kind {
+        case "watch", "watch-large": return CGSize(width: 454, height: 454)
+        case "watch-small": return CGSize(width: 384, height: 384)
+        case "foldable": return CGSize(width: 1682, height: 1402)
+        case "pixel-10-pro-fold": return CGSize(width: 2076, height: 2152)
+        case "tablet": return CGSize(width: 2560, height: 1600)
+        case "desktop": return CGSize(width: 2560, height: 1440)
+        case "tv": return CGSize(width: 3840, height: 2160)
+        default: return CGSize(width: 822, height: 1782)
+        }
+    }
 
     /// A ring that fades at a device position: where an agent touched, so the person can follow it.
     func flashTouch(deviceX: Int, deviceY: Int) {
@@ -193,7 +265,7 @@ final class SimulatorView: NSView {
     private enum Body { case phone, fold, watch, flat }
 
     private var body: Body {
-        let s = simulator?.deviceSize ?? .zero
+        let s = effectiveSize
         guard s.width > 0, s.height > 0 else { return .phone }
         let a = s.width / s.height
         if abs(s.width - s.height) < 2, max(s.width, s.height) < 700 { return .watch }
@@ -241,7 +313,7 @@ final class SimulatorView: NSView {
 
     /// Where the picture is drawn: the device's shape fitted into the view with a margin.
     private var pictureRect: CGRect {
-        let size = simulator?.deviceSize ?? .zero
+        let size = effectiveSize
         var area = bounds.insetBy(dx: 28, dy: 24)
         area.size.height -= 30   // the caption
         guard size.width > 0, size.height > 0, area.width > 0, area.height > 0 else { return area }
@@ -274,14 +346,24 @@ final class SimulatorView: NSView {
     override func layout() {
         super.layout()
         CATransaction.begin()
-        CATransaction.setDisableActions(true)
+        let size0 = simulator?.deviceSize ?? .zero
+        if (animateLayout || morphOnce) && !Design.reduceMotion {
+            CATransaction.setAnimationDuration(Design.move)
+            CATransaction.setAnimationTimingFunction(Design.moveTiming())
+        } else {
+            CATransaction.setDisableActions(true)
+        }
+        morphOnce = false
+        if size0.width > 0 { lastSize = size0 }
         // A flipped, layer-backed view's sublayers use its flipped coordinates.
         let r = pictureRect
         display.frame = r
-        let hasDevice = simulator != nil && (simulator?.deviceSize.width ?? 0) > 0
+        let hasDevice = simulator != nil
         let b = bezel(forShortSide: min(r.width, r.height))
         let screenR = screenRadius(r)
         display.cornerRadius = screenR
+        placeholderLayer.frame = r
+        placeholderLayer.cornerRadius = screenR
         let bezelRect = r.insetBy(dx: -b, dy: -b)
         bezelLayer.frame = bezelRect
         bezelLayer.cornerRadius = body == .watch ? bezelRect.width / 2 : screenR + b
@@ -300,7 +382,7 @@ final class SimulatorView: NSView {
         }
         cameraLayer.cornerRadius = cam / 2
         hingeLayer.frame = body == .fold ? CGRect(x: r.midX - 1, y: r.minY, width: 2, height: r.height) : .zero
-        for l in [rimLayer, bezelLayer, cameraLayer, hingeLayer] as [CALayer] { l.isHidden = !hasDevice }
+        for l in [rimLayer, bezelLayer, cameraLayer, hingeLayer, display] as [CALayer] { l.isHidden = !hasDevice }
         // The marks, from device pixels to where the picture is drawn.
         let size = simulator?.deviceSize ?? .zero
         func path(_ rects: [CGRect]) -> CGPath {

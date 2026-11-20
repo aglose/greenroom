@@ -25,13 +25,16 @@ enum Design {
 
     // Motion: three curves cover everything (docs/UI-PLAN.md). Each is a duration and a timing; springs where
     // something moves, a quick ease where something changes state.
-    static let snap: TimeInterval = 0.15
-    static let move: TimeInterval = 0.32
-    static let arrive: TimeInterval = 0.22
+    static var snap: TimeInterval { 0.15 * slow }
+    static var move: TimeInterval { 0.34 * slow }
+    static var arrive: TimeInterval { 0.24 * slow }
+    /// `GREENROOM_SLOW_MOTION=N` runs every animation N times slower, to look at one (or capture it) mid-flight.
+    static let slow: Double = Double(ProcessInfo.processInfo.environment["GREENROOM_SLOW_MOTION"] ?? "") ?? 1
+    static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     static func moveTiming() -> CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1) }
 
     /// Runs `changes` animated on the `move` curve, or at once when the person asked for reduced motion.
-    static func animate(_ duration: TimeInterval = move, _ changes: () -> Void, done: (() -> Void)? = nil) {
+    static func animate(_ duration: TimeInterval = 0.34, _ changes: () -> Void, done: (() -> Void)? = nil) {
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             changes(); done?(); return
         }
@@ -134,6 +137,7 @@ final class GlassButton: NSButton {
         return s
     }
 
+    override var isHighlighted: Bool { didSet { refresh() } }
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
 
@@ -146,7 +150,9 @@ final class GlassButton: NSButton {
         default: fill = hovering ? Design.well : .clear; ink = isEnabled ? Design.ink : Design.mute
         }
         CATransaction.begin(); CATransaction.setAnimationDuration(Design.snap)
-        layer?.backgroundColor = fill.cgColor
+        // Pressed, a button darkens at once (no waiting for the click to finish to show it was hit).
+        layer?.backgroundColor = (isHighlighted ? fill.blended(withFraction: 0.35, of: .black) ?? fill : fill).cgColor
+        if isHighlighted, fill.alphaComponent < 0.05 { layer?.backgroundColor = Design.wellOn.cgColor }
         CATransaction.commit()
         contentTintColor = ink
         attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: ink, .font: font ?? .systemFont(ofSize: 13)])

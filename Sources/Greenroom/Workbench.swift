@@ -56,6 +56,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var deviceLeading: NSLayoutConstraint!
     private(set) var showingDevice = false
     private static let deviceWidth: CGFloat = 384
+    private let emptyStage = EmptyStage(frame: .zero)
+    let toast = Toast(frame: .zero)
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
@@ -67,7 +69,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         case recent(URL)
     }
 
-    private static let hint = "Drop an APK here, or press ⌘O"
+    private static let hint = ""
 
     override init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 780),
@@ -97,7 +99,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         compareBar.lineBreakMode = .byTruncatingTail
         compareBar.isSelectable = true
         let stack = StageBackground()
-        for v in [grid, compareBar, timeline, logPanel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        for v in [grid, emptyStage, compareBar, timeline, logPanel, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        emptyStage.onOpen = { [weak self] in self?.open($0) }
+        emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
         timeline.isHidden = true
         compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
         timelineHeight = timeline.heightAnchor.constraint(equalToConstant: 0)
@@ -115,6 +119,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
             gridTrailing,
+            emptyStage.topAnchor.constraint(equalTo: grid.topAnchor),
+            emptyStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
+            emptyStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
+            emptyStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            toast.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
+            toast.bottomAnchor.constraint(equalTo: grid.bottomAnchor, constant: -8),
             grid.bottomAnchor.constraint(equalTo: compareBar.topAnchor),
             compareBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
             compareBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
@@ -230,6 +240,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let sims = Engine.shared.simulators
         if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
         refreshGrid()
+        let nothing = sims.isEmpty
+        if emptyStage.isHidden == nothing {   // shown when nothing runs, gone (after a fade) when something does
+            if nothing { emptyStage.reload(); emptyStage.alphaValue = 0; emptyStage.isHidden = false }
+            Design.animate(Design.arrive, { self.emptyStage.animator().alphaValue = nothing ? 1 : 0 },
+                           done: { if !Engine.shared.simulators.isEmpty { self.emptyStage.isHidden = true } })
+        }
         if showingLog { logPanel.follow(selected) }
         if showingNetwork { networkPane.follow(selected) }
         if showingDevice { devicePane.follow(selected) }
@@ -795,9 +811,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let on = !recording.contains(key)
         sim.send(on ? "rec on all" : "rec off all") { [weak self] answer in
             guard let self else { return }
-            if answer.hasPrefix("error") { self.window.subtitle = "Recorder: \(answer)"; return }
+            if answer.hasPrefix("error") { self.toast.show("Recorder: " + answer.replacingOccurrences(of: "error: ", with: ""), problem: true); return }
             if on { self.recording.insert(key) } else { self.recording.remove(key) }
-            self.window.subtitle = on ? "Recording \(sim.name)" : sim.name
+            self.toast.show(on ? "Recording \(sim.name): input, log, network and screen" : "Recording stopped")
             self.updateChrome()
         }
     }
@@ -815,23 +831,23 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         sim.send("rec save recordings/\(name)") { [weak self] answer in
             guard let self else { return }
             if answer.hasPrefix("error") {
-                self.window.subtitle = "Recording not saved: \(answer)"
+                self.toast.show("Recording not saved: " + answer.replacingOccurrences(of: "error: ", with: ""), problem: true)
                 done?(nil, answer)
                 return
             }
             // The engine answers at once and writes the bundle after: wait until the file is there and has stopped growing.
-            self.window.subtitle = "Saving the recording…"
+            self.toast.show("Saving the recording…")
             var tries = 0, lastSize = -1
             Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { timer in
                 tries += 1
                 let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? -1
                 if size > 0, size == lastSize {
                     timer.invalidate()
-                    self.window.subtitle = "Saved \(name)"
+                    self.toast.show("Saved \(name)")
                     done?(file, answer)
                 } else if tries > 100 {
                     timer.invalidate()
-                    self.window.subtitle = "Recording not saved: the engine wrote no file"
+                    self.toast.show("Recording not saved: the engine wrote no file", problem: true)
                     done?(nil, answer)
                 }
                 lastSize = size
@@ -1088,13 +1104,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         sim.send("shot screenshots/\(plain.lastPathComponent)") { [weak self] answer in
             let written = FileManager.default.fileExists(atPath: plain.path)
             guard written, (try? FileManager.default.moveItem(at: plain, to: file)) != nil else {
-                self?.window.subtitle = "Screenshot failed: \(answer)"
+                self?.toast.show("Screenshot failed: " + answer.replacingOccurrences(of: "error: ", with: ""), problem: true)
                 return
             }
             if let image = NSImage(contentsOf: file) {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.writeObjects([image])
             }
+            self?.toast.show("Screenshot copied, and saved as \(file.lastPathComponent)")
             NSWorkspace.shared.activateFileViewerSelecting([file])
         }
     }

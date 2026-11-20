@@ -22,6 +22,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordCheckIfAsked()
         stageCheckIfAsked()
         networkCheckIfAsked()
+        motionCheckIfAsked()
+    }
+
+    /// `Greenroom --motion-check DIR APK` (run with GREENROOM_SLOW_MOTION=6): the window captured in the middle of
+    /// each transition: empty, starting, a second device arriving, a rotation, a pane sliding in, a toast.
+    private func motionCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--motion-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        let apk = URL(fileURLWithPath: args[i + 2])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        workbench.window.setContentSize(NSSize(width: 1440, height: 900))
+        workbench.window.center()
+        let mid = Design.move / 2
+        func shot(_ name: String) { captureWindow(to: dir.appendingPathComponent(name + ".png")) }
+        func after(_ t: Double, _ f: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: f) }
+        after(1) { [self] in
+            shot("1-empty")
+            guard let sim = workbench.open(apk, remember: false, options: ["--appearance", "dark"]) else { return }
+            after(0.6) { shot("2-starting") }
+            var waited = 0.0
+            Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] timer in
+                waited += 0.25
+                guard sim.framesShown > 2 || waited > 90 else { return }
+                timer.invalidate()
+                after(Design.move + 1) { [self] in
+                    shot("3-running")
+                    workbench.openBeside(apk: apk, device: "pixel-10-pro-fold")
+                    after(mid) { shot("4-second-arriving") }
+                    after(Design.move + 12) { [self] in
+                        shot("5-two")
+                        workbench.rotate(nil)
+                        after(1.2 + mid) { shot("6-rotating") }
+                        after(1.2 + Design.move + 2) { [self] in
+                            shot("7-rotated")
+                            workbench.setShowingDevice(true)
+                            workbench.toast.show("Screenshot copied, and saved as engine-testapp.png")
+                            after(mid) { shot("8-pane-sliding") }
+                            after(Design.move + 1) { shot("9-pane-open"); NSApp.terminate(nil) }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// `Greenroom --network-check DIR APK`: the test app's network screen makes a few requests (one to a host that
