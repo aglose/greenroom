@@ -73,9 +73,13 @@ final class ControlChannel {
     private var waiting: [((String) -> Void)?] = []
     private var reader: Thread?
 
-    init?(port: Int) {
+    /// `token`: what an engine started with `--control-token-file` wants first on every connection.
+    init?(port: Int, token: String? = nil) {
         guard let s = LoopbackSocket(port: port) else { return nil }
         socket = s
+        if let token {
+            guard s.write(line: "auth \(token)"), s.readLine() == "ok" else { s.close(); return nil }
+        }
         let t = Thread { [weak self] in self?.readLoop() }
         t.name = "greenroom-control"
         t.qualityOfService = .userInteractive
@@ -134,9 +138,12 @@ final class FrameChannel {
     var onFrame: ((Frame) -> Void)?   // called on the reader thread
     var onEnd: (() -> Void)?
 
-    init?(port: Int, kbps: Int) {
+    init?(port: Int, kbps: Int, token: String? = nil) {
         guard let s = LoopbackSocket(port: port) else { return nil }
         socket = s
+        if let token {
+            guard s.write(line: "auth \(token)"), s.readLine() == "ok" else { s.close(); return nil }
+        }
         guard s.write(line: "stream 80 h264 \(kbps)"), let answer = s.readLine(), answer == "ok stream h264" else {
             s.close(); return nil
         }

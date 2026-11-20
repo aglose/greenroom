@@ -73,3 +73,4 @@ A release is cut by pushing a `v*` tag: [docs/RELEASING.md](docs/RELEASING.md) h
 - Signing: every binary has the hardened runtime. Only the engine's `java` has entitlements (JIT, executable
   memory for the Android libraries it loads, and dyld variables for apksim's `--no-network`); the app itself has none.
 - State: `~/Library/Application Support/Greenroom`, readable by you alone.
+- [docs/PLAN.md](docs/PLAN.md) is the plan: what is built, what is next, and what was measured on the way.

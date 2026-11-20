@@ -29,9 +29,14 @@ final class Simulator {
     private var logHandle: FileHandle?
     private var pendingOutput = Data()
     private var port: Int?
+    /// The control channel's token, when the engine can be told to want one (Engine.supportsControlToken).
+    private var token: String?
+    private var tokenFile: URL?
 
     /// What an agent was last told is on this screen, and the references it holds.
     let tree = ScreenTree()
+    /// Whether other programs on this Mac are kept off this simulator's control channel.
+    var isPrivate: Bool { token != nil }
     /// How much of the log an agent has already been given.
     var logOffset: UInt64 = 0
     /// The launch options this simulator was started with (shown to agents).
@@ -46,13 +51,29 @@ final class Simulator {
     }
 
     /// Starts the engine headless with a control port of its choosing, and connects once it names the port.
-    func start(launcher: URL, stateDir: URL, options: [String]) throws {
+    func start(launcher: URL, stateDir: URL, options: [String], controlToken: Bool = false) throws {
         FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
         logHandle = try FileHandle(forWritingTo: log)
 
         let pipe = Pipe()
         process.executableURL = launcher
-        process.arguments = ["--headless", "--control", "auto"] + options + [apk.path]
+        var control = ["--headless", "--control", "auto"]
+        if controlToken {
+            // A token only this app and the engine know: no other program on this Mac can drive the simulator.
+            var bytes = [UInt8](repeating: 0, count: 24)
+            _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+            let made = bytes.map { String(format: "%02x", $0) }.joined()
+            let dir = stateDir.appendingPathComponent("tokens", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let file = dir.appendingPathComponent(UUID().uuidString)
+            guard FileManager.default.createFile(atPath: file.path, contents: Data(made.utf8), attributes: [.posixPermissions: 0o600]) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            token = made
+            tokenFile = file
+            control += ["--control-token-file", file.path]
+        }
+        process.arguments = control + options + [apk.path]
         self.options = options
         var env = ProcessInfo.processInfo.environment
         env["APKSIM_HOME"] = stateDir.path
@@ -74,6 +95,7 @@ final class Simulator {
             DispatchQueue.main.async {
                 guard let self else { return }
                 try? self.logHandle?.close()
+                if let file = self.tokenFile { try? FileManager.default.removeItem(at: file) }
                 self.frames?.close()
                 self.control?.close()
                 self.state = .ended(proc.terminationStatus)
@@ -99,8 +121,8 @@ final class Simulator {
     }
 
     private func connect(port: Int) {
-        guard let control = ControlChannel(port: port),
-              let frames = FrameChannel(port: port, kbps: 24_000) else {
+        guard let control = ControlChannel(port: port, token: token),
+              let frames = FrameChannel(port: port, kbps: 24_000, token: token) else {
             DispatchQueue.main.async { [weak self] in self?.process.terminate() }
             return
         }

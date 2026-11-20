@@ -59,12 +59,21 @@ final class Engine {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         }
+        if simulators.isEmpty {   // tokens of simulators from an earlier run of the app: nothing answers to them now
+            try? fm.removeItem(at: engineState.appendingPathComponent("tokens", isDirectory: true))
+        }
         let bundled = root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
         let wanted = engineState.appendingPathComponent("testapp-\(version).apk")
         if fm.fileExists(atPath: bundled.path), !fm.fileExists(atPath: wanted.path) {
             try fm.copyItem(at: bundled, to: wanted)
         }
     }
+
+    /// Whether this engine has `--control-token-file` (apksim after 0.53.0): its control channel then answers
+    /// only this app. Older engines answer any program on this Mac.
+    private(set) lazy var supportsControlToken: Bool = {
+        (try? String(contentsOf: launcher, encoding: .utf8))?.contains("--control-token-file") ?? false
+    }()
 
     var engineState: URL { state.appendingPathComponent("engine", isDirectory: true) }
     var logs: URL { state.appendingPathComponent("logs", isDirectory: true) }
@@ -110,7 +119,7 @@ final class Engine {
         try prepare()
         let log = logs.appendingPathComponent("simulator-\(Int(Date().timeIntervalSince1970 * 1000)).log")
         let sim = Simulator(apk: apk, log: log)
-        try sim.start(launcher: launcher, stateDir: engineState, options: options)
+        try sim.start(launcher: launcher, stateDir: engineState, options: options, controlToken: supportsControlToken)
         simulators.append(sim)
         onChange?()
         return sim

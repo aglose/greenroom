@@ -37,6 +37,7 @@ if let i = arguments.firstIndex(of: "--smoke-stream"), i + 1 < arguments.count {
             let size = sim.deviceSize
             print("[greenroom] smoke-stream: \(samples) frames decoded, first after \(String(format: "%.2f", firstFrame ?? -1)) s, device \(Int(size.width))x\(Int(size.height)), state \(sim.state)")
             print("[greenroom] activity: \(activity)")
+            print("[greenroom] control channel: \(sim.isPrivate ? "token required" : "open to local programs (this engine has no --control-token-file)")")
             print("[greenroom] stats: \(stats.prefix(160))")
             let ok = samples > 0 && size.width > 0 && !activity.isEmpty && !activity.hasPrefix("error")
             if !ok, let log = try? String(contentsOf: sim.log, encoding: .utf8) {
