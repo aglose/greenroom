@@ -58,6 +58,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private static let deviceWidth: CGFloat = 384
     private let emptyStage = EmptyStage(frame: .zero)
     let toast = Toast(frame: .zero)
+    let palette = Palette(frame: .zero)
+    private let scrim = Scrim()
+    private(set) var showingPalette = false
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
@@ -124,7 +127,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             emptyStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
             emptyStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
             toast.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
-            toast.bottomAnchor.constraint(equalTo: grid.bottomAnchor, constant: -8),
+            toast.topAnchor.constraint(equalTo: grid.topAnchor, constant: 4),
             grid.bottomAnchor.constraint(equalTo: compareBar.topAnchor),
             compareBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
             compareBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
@@ -291,6 +294,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         recordButton = GlassButton(symbol: "record.circle", title: "Record", label: "Record input, log, network and screen for replay", style: .record, target: self, action: #selector(toggleRecording(_:)))
         let library = GlassButton(symbol: "sidebar.left", label: "Show the library", target: self, action: #selector(toggleLibrary(_:)))
         let shot = GlassButton(symbol: "camera", label: "Screenshot", target: self, action: #selector(screenshot(_:)))
+        let commands = GlassButton(symbol: "magnifyingglass", title: "Commands   ⌘K", label: "Search every command, device, app and recording", style: .well, target: self, action: #selector(showPalette(_:)))
 
         func group(_ views: [NSView]) -> NSView {
             let well = NSView()
@@ -309,7 +313,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), spacer, mirrorButton, group(layoutButtons), shot, recordButton])
+        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), spacer, mirrorButton, group(layoutButtons), shot, recordButton, commands])
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -334,7 +338,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         column.translatesAutoresizingMaskIntoConstraints = false
         rail.addSubview(column)
 
-        for v in [networkPane, devicePane, header, rail] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        for v in [networkPane, devicePane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        scrim.isHidden = true
+        palette.isHidden = true
+        scrim.onClick = { [weak self] in self?.hidePalette() }
+        palette.onClose = { [weak self] in self?.hidePalette() }
+        palette.source = { [weak self] in self?.paletteItems() ?? [] }
         networkPane.isHidden = true
         devicePane.isHidden = true
         devicePane.targets = { [weak self] in
@@ -357,6 +366,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             networkPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             networkPane.widthAnchor.constraint(equalToConstant: Self.networkWidth),
             networkLeading,
+            scrim.topAnchor.constraint(equalTo: host.topAnchor), scrim.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            scrim.leadingAnchor.constraint(equalTo: host.leadingAnchor), scrim.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            palette.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+            palette.topAnchor.constraint(equalTo: host.topAnchor, constant: 110),
             devicePane.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
             devicePane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             devicePane.widthAnchor.constraint(equalToConstant: Self.deviceWidth),
@@ -413,6 +426,143 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleTimeline(_ sender: Any?) { setShowingTimeline(!showingTimeline) }
 
     @objc func toggleDevicePane(_ sender: Any?) { setShowingDevice(!showingDevice) }
+
+    // MARK: Command palette
+
+    @objc func showPalette(_ sender: Any?) {
+        if showingPalette { hidePalette(); return }
+        showingPalette = true
+        scrim.isHidden = false
+        palette.isHidden = false
+        scrim.alphaValue = 0
+        palette.alphaValue = 0
+        palette.layer?.setAffineTransform(CGAffineTransform(translationX: 0, y: 8))
+        palette.open()
+        Design.animate(Design.arrive, {
+            self.scrim.animator().alphaValue = 1
+            self.palette.animator().alphaValue = 1
+            self.palette.layer?.setAffineTransform(.identity)
+        })
+    }
+
+    func hidePalette() {
+        guard showingPalette else { return }
+        showingPalette = false
+        Design.animate(Design.snap, {
+            self.scrim.animator().alphaValue = 0
+            self.palette.animator().alphaValue = 0
+        }, done: {
+            if !self.showingPalette { self.scrim.isHidden = true; self.palette.isHidden = true }
+        })
+        if let sim = selected, let v = grid.view(for: sim) { window.makeFirstResponder(v) }
+    }
+
+    /// A device command from the palette, sent where the toolbar's go, with the engine's answer as a toast.
+    private func run(_ command: String, _ done: String) {
+        let to = targets
+        guard !to.isEmpty else { toast.show("No device is running", problem: true); return }
+        for (i, s) in to.enumerated() {
+            s.send(command) { [weak self] answer in
+                guard i == 0 else { return }
+                let problem = answer.hasPrefix("error") || answer.hasPrefix("no ") || answer.contains(" has no ")
+                self?.toast.show(problem ? answer.replacingOccurrences(of: "error: ", with: "") : (to.count > 1 ? "\(done) on \(to.count) devices" : done), problem: problem)
+            }
+        }
+        scheduleCompare()
+    }
+
+    /// Everything the palette offers, as things stand now.
+    private func paletteItems() -> [PaletteItem] {
+        var out: [PaletteItem] = []
+        func add(_ id: String, _ title: String, _ group: String, _ symbol: String, _ shortcut: String = "", keywords: String = "", _ run: @escaping () -> Void) {
+            out.append(PaletteItem(id: id, title: title, group: group, symbol: symbol, shortcut: shortcut, keywords: keywords, run: run))
+        }
+        func setting(_ id: String, _ title: String, _ symbol: String, _ command: String, keywords: String = "") {
+            add("set." + id, title, "Device", symbol, keywords: keywords) { [weak self] in self?.run(command, title) }
+        }
+        // Apps.
+        add("open", "Open APK…", "App", "folder", "⌘O") { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
+        add("compare.apk", "Compare with another build…", "App", "plusminus", "⇧⌘O") { [weak self] in self?.compareWithAPK(nil) }
+        let sample = Engine.shared.root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
+        if FileManager.default.fileExists(atPath: sample.path) { add("open.sample", "Open the sample app", "App", "shippingbox") { [weak self] in self?.open(sample) } }
+        for url in Recents.all.prefix(8) {
+            add("open." + url.path, "Open " + url.deletingPathExtension().lastPathComponent, "Recent", "clock.arrow.circlepath", keywords: url.path) { [weak self] in self?.open(url) }
+        }
+        // Running devices.
+        for sim in Engine.shared.simulators where sim.isAlive {
+            let kind = sim.options.firstIndex(of: "--device").flatMap { i in i + 1 < sim.options.count ? Self.title(sim.options[i + 1]) : nil } ?? "Phone"
+            add("switch." + String(UInt(bitPattern: ObjectIdentifier(sim).hashValue)), "Go to \(sim.name) on \(kind)", "Running", "iphone") { [weak self] in self?.select(sim) }
+        }
+        if live != nil {
+            add("back", "Back", "Device", "chevron.backward", "⌘[") { [weak self] in self?.back(nil) }
+            add("home", "Home", "Device", "house", "⇧⌘H") { [weak self] in self?.home(nil) }
+            add("rotate", "Rotate", "Device", "rotate.right", "⌘R") { [weak self] in self?.rotate(nil) }
+            add("shake", "Shake", "Device", "iphone.radiowaves.left.and.right") { [weak self] in self?.shake(nil) }
+            add("shot", "Save screenshot", "Device", "camera", "⌘S", keywords: "capture picture") { [weak self] in self?.screenshot(nil) }
+            add("restart", "Restart the app", "App", "arrow.clockwise", "⇧⌘R") { [weak self] in self?.restart(nil) }
+            add("close", "Close this simulator", "App", "xmark.circle", "⇧⌘W", keywords: "quit stop") { [weak self] in self?.closeSelected(nil) }
+            setting("dark", "Dark appearance", "moon", "appearance dark", keywords: "night theme")
+            setting("light", "Light appearance", "sun.max", "appearance light", keywords: "day theme")
+            for (d, _) in [("phone", 0), ("foldable", 0), ("pixel-10-pro-fold", 0), ("watch", 0), ("tablet", 0), ("desktop", 0), ("tv", 0)] {
+                setting("device." + d, "Switch to \(Self.title(d))", "iphone.gen3", "device \(d)", keywords: "device size form factor")
+                add("beside." + d, "Open beside as \(Self.title(d))", "Device", "rectangle.split.2x1", keywords: "another second") { [weak self] in
+                    if let apk = self?.selected?.apk { self?.openBeside(apk: apk, device: d) }
+                }
+            }
+            for (tag, name) in [("en-US", "English (US)"), ("fr-FR", "French"), ("de-DE", "German"), ("es-ES", "Spanish"), ("ja-JP", "Japanese"), ("ar-EG", "Arabic, right to left"), ("he-IL", "Hebrew, right to left"), ("hi-IN", "Hindi")] {
+                setting("locale." + tag, "Language: \(name)", "globe", "locale \(tag)", keywords: "locale translate rtl " + tag)
+            }
+            for f in ["0.85", "1.0", "1.3", "1.5", "2.0"] { setting("font." + f, "Text size \(f)×", "textformat.size", "fontscale \(f)", keywords: "font scale accessibility larger") }
+            for (n, t) in [("online", "Network: online"), ("3g", "Network: slow 3G"), ("lossy", "Network: lossy"), ("offline", "Network: offline")] {
+                setting("net." + n, t, "wifi", "network \(n)", keywords: "conditions connection airplane")
+            }
+            for (v, t) in [("run", "Location: city run"), ("bike", "Location: bicycle ride"), ("drive", "Location: freeway drive"), ("37.7749 -122.4194", "Location: San Francisco"), ("51.5072 -0.1276", "Location: London"), ("35.6762 139.6503", "Location: Tokyo"), ("none", "Location: none")] {
+                setting("loc." + v, t, "location", "location \(v)", keywords: "gps map")
+            }
+            for z in ["UTC", "America/Los_Angeles", "America/New_York", "Europe/London", "Asia/Tokyo"] { setting("tz." + z, "Time zone: \(z)", "clock", "timezone \(z)", keywords: "zone clock") }
+            setting("anim.off", "Animations off", "tortoise", "animscale 0", keywords: "speed duration scale")
+            setting("anim.on", "Animations on", "hare", "animscale 1", keywords: "speed duration scale")
+            setting("anim.slow", "Slow animations", "tortoise.fill", "animscale 10", keywords: "speed duration scale")
+            setting("bounds.on", "Show layout bounds", "square.dashed", "debug layout on", keywords: "debug outlines")
+            setting("bounds.off", "Hide layout bounds", "square", "debug layout off", keywords: "debug outlines")
+            setting("kb.on", "Software keyboard on", "keyboard", "keyboard soft on", keywords: "ime")
+            setting("kb.off", "Software keyboard off", "keyboard", "keyboard soft off", keywords: "ime")
+            setting("bt.off", "Bluetooth off", "antenna.radiowaves.left.and.right.slash", "bluetooth off")
+            setting("bt.on", "Bluetooth on", "antenna.radiowaves.left.and.right", "bluetooth on")
+            setting("thermal.severe", "Thermal: severe", "thermometer.high", "thermal severe", keywords: "heat hot")
+            setting("thermal.none", "Thermal: normal", "thermometer.low", "thermal none", keywords: "heat")
+            setting("recreate", "Recreate the activity", "arrow.triangle.2.circlepath", "recreate", keywords: "configuration change")
+            setting("death", "Kill the process (state kept)", "bolt.slash", "process-death", keywords: "process death restore saved state")
+            setting("memory", "Low memory warning", "memorychip", "memory low", keywords: "trim")
+            setting("fp.ok", "Fingerprint: matching", "touchid", "biometrics match", keywords: "biometric auth")
+            setting("fp.no", "Fingerprint: not matching", "touchid", "biometrics nomatch", keywords: "biometric auth")
+            setting("perm.allow", "Allow the permission request", "checkmark.shield", "permission allow")
+            setting("perm.deny", "Deny the permission request", "xmark.shield", "permission deny")
+            setting("perm.reset", "Reset permissions", "shield", "permission reset")
+            add(isRecording ? "rec.stop" : "rec.start", isRecording ? "Stop recording" : "Start recording", "Record", "record.circle", "⌥⌘R") { [weak self] in self?.toggleRecording(nil) }
+            if isRecording { add("rec.save", "Save recording", "Record", "square.and.arrow.down", "⇧⌘S") { [weak self] in self?.saveRecordingAndShow(nil) } }
+        }
+        // Layout and panes.
+        add("layout.one", "Show one device", "View", "iphone") { [weak self] in self?.setSideBySide(false) }
+        add("layout.all", "Show every device side by side", "View", "rectangle.split.2x1", "⌘\\") { [weak self] in self?.showAll(nil) }
+        add("compare", comparing ? "Stop comparing" : "Compare the devices", "View", "plusminus", "⇧⌘D") { [weak self] in self?.toggleCompare(nil) }
+        add("mirror", mirror ? "Stop mirroring input" : "Mirror input to every device", "View", "dot.radiowaves.left.and.right", "⇧⌘M") { [weak self] in self?.toggleMirror(nil) }
+        add("pane.device", showingDevice ? "Hide device controls" : "Show device controls", "Panes", "slider.horizontal.3") { [weak self] in self?.toggleDevicePane(nil) }
+        add("pane.network", showingNetwork ? "Hide network" : "Show network", "Panes", "arrow.up.arrow.down", keywords: "requests http") { [weak self] in self?.toggleNetwork(nil) }
+        add("pane.timeline", showingTimeline ? "Hide timeline" : "Show timeline", "Panes", "chart.bar.xaxis") { [weak self] in self?.toggleTimeline(nil) }
+        add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
+        add("pane.inspect", inspecting ? "Stop inspecting" : "Inspect the screen", "Panes", "cursorarrow.rays", "⌥⌘I", keywords: "nodes accessibility tree") { [weak self] in self?.toggleInspector(nil) }
+        add("pane.agent", "Agent activity", "Panes", "sparkles", "⌥⌘A", keywords: "claude mcp") { [weak self] in self?.showAgent(nil) }
+        add("pane.library", "Show or hide the library", "Panes", "sidebar.left") { [weak self] in self?.toggleLibrary(nil) }
+        // Recordings saved before.
+        let files = (try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let newest = files.filter { $0.pathExtension == "apkrec" }
+            .sorted { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
+        for f in newest.prefix(6) {
+            add("recording." + f.lastPathComponent, "Open recording " + f.deletingPathExtension().lastPathComponent, "Recordings", "film", keywords: "replay trace") { [weak self] in self?.view(recording: f) }
+        }
+        return out
+    }
 
     /// The network pane slides in from the right; the stage makes room as it comes. It shares the place with the
     /// device pane: opening one sends the other away.
@@ -1166,4 +1316,16 @@ private final class DropTarget: NSView {
         path.lineWidth = 2
         path.stroke()
     }
+}
+
+/// A dark veil over the window while the palette is open; a click on it closes the palette.
+final class Scrim: NSView {
+    var onClick: (() -> Void)?
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0, alpha: 0.35).cgColor
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+    override func mouseDown(with event: NSEvent) { onClick?() }
 }

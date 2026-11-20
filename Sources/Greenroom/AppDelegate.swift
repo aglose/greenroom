@@ -23,6 +23,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stageCheckIfAsked()
         networkCheckIfAsked()
         motionCheckIfAsked()
+        paletteCheckIfAsked()
+    }
+
+    /// `Greenroom --palette-check DIR APK`: ⌘K opened over a running app; a few searches typed (their top results
+    /// printed), then "dark" run from it.
+    private func paletteCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--palette-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        workbench.window.setContentSize(NSSize(width: 1440, height: 900))
+        workbench.window.center()
+        guard let sim = workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false) else { return }
+        func after(_ t: Double, _ f: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: f) }
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
+            waited += 0.5
+            guard sim.framesShown > 2 || waited > 90 else { return }
+            timer.invalidate()
+            after(2) { [self] in
+                workbench.showPalette(nil)
+                after(1) { [self] in
+                    captureWindow(to: dir.appendingPathComponent("1-open.png"))
+                    for q in ["dark", "dkm", "fr", "3g", "rot", "net", "fold", "kill"] {
+                        workbench.palette.search(q)
+                        print("[greenroom] palette '\(q)': " + workbench.palette.results.prefix(4).joined(separator: " | "))
+                    }
+                    workbench.palette.search("dark")
+                    after(0.6) { [self] in
+                        captureWindow(to: dir.appendingPathComponent("2-dark.png"))
+                        workbench.palette.runSelected()
+                        after(3) { [self] in
+                            sim.send("config") { answer in
+                                print("[greenroom] after running 'dark': palette shown \(self.workbench.showingPalette), night \(answer.contains("night") && !answer.contains("nonight") ? "yes" : "no?"), toast '\(self.workbench.toast.text)'")
+                                self.captureWindow(to: dir.appendingPathComponent("3-ran.png"))
+                                NSApp.terminate(nil)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// `Greenroom --motion-check DIR APK` (run with GREENROOM_SLOW_MOTION=6): the window captured in the middle of
@@ -420,6 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(submenu(win, title: "Window"))
         NSApp.windowsMenu = win
 
+        win.addItem(to(workbench: #selector(Workbench.showPalette(_:)), "Command Palette…", "k"))
         win.addItem(to(workbench: #selector(Workbench.showAgent(_:)), "Agent Activity", "A", [.command, .option]))
         win.addItem(to(workbench: #selector(Workbench.toggleInspector(_:)), "Inspector", "i", [.command, .option]))
         win.addItem(to(workbench: #selector(Workbench.toggleLog(_:)), "Log", "L", [.command, .shift]))
