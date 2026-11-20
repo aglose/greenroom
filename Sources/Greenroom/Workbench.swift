@@ -56,6 +56,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var deviceLeading: NSLayoutConstraint!
     private(set) var showingDevice = false
     private static let deviceWidth: CGFloat = 384
+    // Diagnostics pane (extras): performance, accessibility audit, background work, clipboard, skin.
+    private let diagnosticsPane = DiagnosticsPane(frame: .zero)
+    private var diagnosticsLeading: NSLayoutConstraint!
+    private(set) var showingDiagnostics = false
+    private static let diagnosticsWidth: CGFloat = 420
     private let emptyStage = EmptyStage(frame: .zero)
     let toast = Toast(frame: .zero)
     let palette = Palette(frame: .zero)
@@ -252,6 +257,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if showingLog { logPanel.follow(selected) }
         if showingNetwork { networkPane.follow(selected) }
         if showingDevice { devicePane.follow(selected) }
+        if showingDiagnostics { diagnosticsPane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
         rows = []
         if !sims.isEmpty {
@@ -323,6 +329,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             ("device", "slider.horizontal.3", "Device controls", #selector(toggleDevicePane(_:))),
             ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
             ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
+            ("diagnostics", "stethoscope", "Diagnostics", #selector(toggleDiagnostics(_:))),
             ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
             ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
             ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
@@ -338,7 +345,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         column.translatesAutoresizingMaskIntoConstraints = false
         rail.addSubview(column)
 
-        for v in [networkPane, devicePane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        for v in [networkPane, devicePane, diagnosticsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
         scrim.isHidden = true
         palette.isHidden = true
         scrim.onClick = { [weak self] in self?.hidePalette() }
@@ -346,6 +353,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         palette.source = { [weak self] in self?.paletteItems() ?? [] }
         networkPane.isHidden = true
         devicePane.isHidden = true
+        diagnosticsPane.isHidden = true
+        wireDiagnostics()
+        diagnosticsLeading = diagnosticsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         devicePane.targets = { [weak self] in
             guard let self else { return [] }
             return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
@@ -374,6 +384,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             devicePane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             devicePane.widthAnchor.constraint(equalToConstant: Self.deviceWidth),
             deviceLeading,
+            diagnosticsPane.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            diagnosticsPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            diagnosticsPane.widthAnchor.constraint(equalToConstant: Self.diagnosticsWidth),
+            diagnosticsLeading,
             rail.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
             column.topAnchor.constraint(equalTo: rail.topAnchor),
             column.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
@@ -417,6 +431,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         railButtons["log"]?.isOn = showingLog
         railButtons["network"]?.isOn = showingNetwork
         railButtons["device"]?.isOn = showingDevice
+        railButtons["diagnostics"]?.isOn = showingDiagnostics
         railButtons["timeline"]?.isOn = showingTimeline
         timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
@@ -426,6 +441,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleTimeline(_ sender: Any?) { setShowingTimeline(!showingTimeline) }
 
     @objc func toggleDevicePane(_ sender: Any?) { setShowingDevice(!showingDevice) }
+    @objc func toggleDiagnostics(_ sender: Any?) { setShowingDiagnostics(!showingDiagnostics) }
 
     // MARK: Command palette
 
@@ -548,6 +564,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         add("compare", comparing ? "Stop comparing" : "Compare the devices", "View", "plusminus", "⇧⌘D") { [weak self] in self?.toggleCompare(nil) }
         add("mirror", mirror ? "Stop mirroring input" : "Mirror input to every device", "View", "dot.radiowaves.left.and.right", "⇧⌘M") { [weak self] in self?.toggleMirror(nil) }
         add("pane.device", showingDevice ? "Hide device controls" : "Show device controls", "Panes", "slider.horizontal.3") { [weak self] in self?.toggleDevicePane(nil) }
+        add("pane.diagnostics", showingDiagnostics ? "Hide diagnostics" : "Show diagnostics", "Panes", "stethoscope", keywords: "performance fps memory cpu accessibility background clipboard skin") { [weak self] in self?.toggleDiagnostics(nil) }
+        add("diagnostics.audit", "Audit accessibility", "Panes", "checklist", keywords: "a11y labels touch targets") { [weak self] in self?.auditAccessibility() }
         add("pane.network", showingNetwork ? "Hide network" : "Show network", "Panes", "arrow.up.arrow.down", keywords: "requests http") { [weak self] in self?.toggleNetwork(nil) }
         add("pane.timeline", showingTimeline ? "Hide timeline" : "Show timeline", "Panes", "chart.bar.xaxis") { [weak self] in self?.toggleTimeline(nil) }
         add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
@@ -568,31 +586,59 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     /// device pane: opening one sends the other away.
     func setShowingNetwork(_ on: Bool) {
         showingNetwork = on
-        if on { showingDevice = false }
+        if on { showingDevice = false; showingDiagnostics = false; diagnosticsPane.follow(nil) }
         networkPane.follow(on ? selected : nil)
         layoutRightSlot()
     }
 
     func setShowingDevice(_ on: Bool) {
         showingDevice = on
-        if on { showingNetwork = false; networkPane.follow(nil) }
+        if on { showingNetwork = false; networkPane.follow(nil); showingDiagnostics = false; diagnosticsPane.follow(nil) }
         devicePane.follow(on ? selected : nil)
         layoutRightSlot()
+    }
+
+    func setShowingDiagnostics(_ on: Bool) {
+        showingDiagnostics = on
+        if on { showingNetwork = false; networkPane.follow(nil); showingDevice = false; devicePane.follow(nil) }
+        diagnosticsPane.follow(on ? selected : nil)
+        layoutRightSlot()
+    }
+
+    /// The palette's "Audit accessibility": opens the pane if needed and runs the audit.
+    func auditAccessibility() {
+        if !showingDiagnostics { setShowingDiagnostics(true) }
+        diagnosticsPane.audit()
+    }
+
+    var diagnostics: DiagnosticsPane { diagnosticsPane }
+
+    /// The pane's marks, outlines and fps chips go to the device views (the view of the simulator it names).
+    private func wireDiagnostics() {
+        func view(_ sim: Simulator) -> SimulatorView? { grid.views.first { $0.simulator === sim } }
+        diagnosticsPane.devices = { Engine.shared.simulators.filter { $0.state == .running } }
+        diagnosticsPane.onMarks = { sim, boxes in view(sim)?.boxes = boxes }
+        diagnosticsPane.onOutline = { [weak self] sim, rect in if self?.inspecting != true { view(sim)?.outlined = rect } }
+        diagnosticsPane.onChip = { sim, text in view(sim)?.captionExtra = text ?? "" }
+        diagnosticsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
     }
 
     private func layoutRightSlot() {
         guard let host = networkPane.superview else { return }
         if showingNetwork { networkPane.isHidden = false }
         if showingDevice { devicePane.isHidden = false }
-        let width = showingNetwork ? Self.networkWidth : showingDevice ? Self.deviceWidth : 0
+        if showingDiagnostics { diagnosticsPane.isHidden = false }
+        let width = showingNetwork ? Self.networkWidth : showingDevice ? Self.deviceWidth : showingDiagnostics ? Self.diagnosticsWidth : 0
         Design.animate(Design.move, {
             self.networkLeading.animator().constant = self.showingNetwork ? -(Self.networkWidth + 68) : 20
             self.deviceLeading.animator().constant = self.showingDevice ? -(Self.deviceWidth + 68) : 20
+            self.diagnosticsLeading.animator().constant = self.showingDiagnostics ? -(Self.diagnosticsWidth + 68) : 20
             self.gridTrailing.animator().constant = width > 0 ? -(width + 80) : -64
             host.layoutSubtreeIfNeeded()
         }, done: {
             if !self.showingNetwork { self.networkPane.isHidden = true }
             if !self.showingDevice { self.devicePane.isHidden = true }
+            if !self.showingDiagnostics { self.diagnosticsPane.isHidden = true }
         })
         updateChrome()
     }

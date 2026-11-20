@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var workbench: Workbench!
+    var workbench: Workbench!
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenus()
@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         motionCheckIfAsked()
         paletteCheckIfAsked()
         mockCheckIfAsked()
+        extrasCheckIfAsked()
     }
 
     /// `Greenroom --mock-check DIR APK`: the test app fetches a page; the request is failed from the network pane and
@@ -399,7 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The window as it is on screen. CGWindowListCreateImage is gone from the SDK's headers but still there, and
     /// needs no screen-recording permission for the process's own window.
-    private func captureWindow(to file: URL) {
+    func captureWindow(to file: URL) {
         typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
         guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { return }
         let capture = unsafeBitCast(sym, to: Capture.self)
