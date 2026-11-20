@@ -66,4 +66,6 @@ if [[ -n "$CHECK" ]]; then
   unsigned=$(find "$APP" -type f \( -perm +111 -o -name '*.dylib' \) -exec sh -c 'file -b "$1" | grep -q Mach-O && ! codesign -dv "$1" 2>&1 | grep -q "flags=.*runtime" && echo "$1"' _ {} \;)
   [[ -z "$unsigned" ]] || { echo "error: not signed with the hardened runtime:"; echo "$unsigned"; exit 1; }
   "$C/MacOS/Greenroom" --smoke "$C/Resources/engine-testapp.apk" | tail -3
+  # The workbench's path: the screen streamed to the app as H.264 and decoded, input over the control channel.
+  "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
 fi

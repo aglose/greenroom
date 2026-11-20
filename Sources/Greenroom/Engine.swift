@@ -11,6 +11,8 @@ final class Engine {
     let state: URL
 
     private(set) var running: [Instance] = []
+    /// The simulators shown in the workbench, oldest first. Ended ones stay until closed.
+    private(set) var simulators: [Simulator] = []
     var onChange: (() -> Void)?
 
     final class Instance {
@@ -102,9 +104,30 @@ final class Engine {
         return instance
     }
 
+    /// Starts the APK headless for the workbench: its screen is streamed to the app and drawn there.
+    func open(apk: URL, options: [String] = []) throws -> Simulator {
+        guard apk.pathExtension.lowercased() == "apk" else { throw Failure.notAnApk(apk) }
+        try prepare()
+        let log = logs.appendingPathComponent("simulator-\(Int(Date().timeIntervalSince1970 * 1000)).log")
+        let sim = Simulator(apk: apk, log: log)
+        try sim.start(launcher: launcher, stateDir: engineState, options: options)
+        simulators.append(sim)
+        onChange?()
+        return sim
+    }
+
+    func close(_ sim: Simulator) {
+        sim.quit()
+        simulators.removeAll { $0 === sim }
+        onChange?()
+    }
+
+    var screenshots: URL { engineState.appendingPathComponent("screenshots", isDirectory: true) }
+
     /// Asks every simulator to quit (SIGTERM: the engine's client passes it on) and stops the engine's standbys.
     func stopAll() {
         for i in running where i.process.isRunning { i.process.terminate() }
+        for s in simulators { s.quit() }
         let p = Process()
         p.executableURL = launcher
         p.arguments = ["--stop-standbys"]
