@@ -52,12 +52,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var timelineHeight: NSLayoutConstraint!
     private var networkLeading: NSLayoutConstraint!
     /// The right-hand slot holds one pane at a time; opening one sends the one there away.
-    enum RightPane { case device, network, tests, diagnostics }
+    enum RightPane { case device, network, tests, diagnostics, recordings }
     private(set) var rightPane: RightPane?
     var showingNetwork: Bool { rightPane == .network }
     var showingDevice: Bool { rightPane == .device }
     var showingTests: Bool { rightPane == .tests }
     var showingDiagnostics: Bool { rightPane == .diagnostics }
+    var showingRecordings: Bool { rightPane == .recordings }
     private let devicePane = DevicePane(frame: .zero)
     private var deviceLeading: NSLayoutConstraint!
     private static let deviceWidth: CGFloat = 384
@@ -69,6 +70,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private let diagnosticsPane = DiagnosticsPane(frame: .zero)
     private var diagnosticsLeading: NSLayoutConstraint!
     private static let diagnosticsWidth: CGFloat = 420
+    // Recordings pane (right slot): see RecordingsPane.swift.
+    private let recordingsPane = RecordingsPane(frame: .zero)
+    private var recordingsLeading: NSLayoutConstraint!
+    private static let recordingsWidth: CGFloat = 470
     private let emptyStage = EmptyStage(frame: .zero)
     let toast = Toast(frame: .zero)
     let palette = Palette(frame: .zero)
@@ -341,6 +346,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
             ("tests", "checkmark.circle", "Tests: run an androidTest APK", #selector(toggleTests(_:))),
             ("diagnostics", "stethoscope", "Diagnostics", #selector(toggleDiagnostics(_:))),
+            ("recordings", "film", "Recordings: replay, and find the first build that differs", #selector(toggleRecordings(_:))),
             ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
             ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
             ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
@@ -358,6 +364,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
         for v in [networkPane, devicePane, testsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
         for v in [networkPane, devicePane, diagnosticsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        for v in [networkPane, devicePane, recordingsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
         scrim.isHidden = true
         palette.isHidden = true
         scrim.onClick = { [weak self] in self?.hidePalette() }
@@ -372,6 +379,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         diagnosticsPane.isHidden = true
         wireDiagnostics()
         diagnosticsLeading = diagnosticsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
+        recordingsPane.isHidden = true
+        recordingsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+        recordingsPane.onOpenTrace = { [weak self] file in self?.view(recording: file) }
+        recordingsLeading = recordingsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         devicePane.targets = { [weak self] in
             guard let self else { return [] }
             return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
@@ -408,6 +419,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             diagnosticsPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             diagnosticsPane.widthAnchor.constraint(equalToConstant: Self.diagnosticsWidth),
             diagnosticsLeading,
+            recordingsPane.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            recordingsPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            recordingsPane.widthAnchor.constraint(equalToConstant: Self.recordingsWidth),
+            recordingsLeading,
             rail.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
             column.topAnchor.constraint(equalTo: rail.topAnchor),
             column.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
@@ -453,6 +468,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         railButtons["device"]?.isOn = showingDevice
         railButtons["tests"]?.isOn = showingTests
         railButtons["diagnostics"]?.isOn = showingDiagnostics
+        railButtons["recordings"]?.isOn = showingRecordings
         railButtons["timeline"]?.isOn = showingTimeline
         timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
@@ -464,6 +480,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleDevicePane(_ sender: Any?) { setShowingDevice(!showingDevice) }
     @objc func toggleTests(_ sender: Any?) { setShowingTests(!showingTests) }
     @objc func toggleDiagnostics(_ sender: Any?) { setShowingDiagnostics(!showingDiagnostics) }
+    @objc func toggleRecordings(_ sender: Any?) { setShowingRecordings(!showingRecordings) }
 
     // MARK: Command palette
 
@@ -592,6 +609,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         add("pane.network", showingNetwork ? "Hide network" : "Show network", "Panes", "arrow.up.arrow.down", keywords: "requests http") { [weak self] in self?.toggleNetwork(nil) }
         add("tests.run", "Run tests…", "Tests", "checkmark.circle", keywords: "androidtest instrument espresso") { [weak self] in self?.runTests() }
         add("pane.tests", showingTests ? "Hide tests" : "Show tests", "Panes", "checkmark.circle", keywords: "androidtest instrument espresso") { [weak self] in self?.toggleTests(nil) }
+        add("pane.recordings", "Show recordings", "Recordings", "film", keywords: "replay saved bundles apkrec") { [weak self] in self?.setShowingRecordings(true) }
+        add("recordings.replay", "Replay a recording…", "Recordings", "play.fill", keywords: "replay build regression") { [weak self] in self?.setShowingRecordings(true); self?.recordingsPane.promptReplay() }
+        add("recordings.bisect", "Find the first build that differs…", "Recordings", "arrow.triangle.branch", keywords: "bisect replay regression builds") { [weak self] in self?.setShowingRecordings(true); self?.recordingsPane.promptBisect() }
         add("pane.timeline", showingTimeline ? "Hide timeline" : "Show timeline", "Panes", "chart.bar.xaxis") { [weak self] in self?.toggleTimeline(nil) }
         add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
         add("pane.inspect", inspecting ? "Stop inspecting" : "Inspect the screen", "Panes", "cursorarrow.rays", "⌥⌘I", keywords: "nodes accessibility tree") { [weak self] in self?.toggleInspector(nil) }
@@ -657,14 +677,18 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         case .network: networkPane.follow(on ? selected : nil)
         case .tests: testsPane.setActive(on)
         case .diagnostics: diagnosticsPane.follow(on ? selected : nil)
+        case .recordings: recordingsPane.setShown(on, folder: recordings)
         }
     }
 
     /// Each pane of the slot: its view, the constraint that slides it, its width.
     private var slot: [(RightPane, NSView, NSLayoutConstraint, CGFloat)] {
         [(.device, devicePane, deviceLeading, Self.deviceWidth), (.network, networkPane, networkLeading, Self.networkWidth),
-         (.tests, testsPane, testsLeading, Self.testsWidth), (.diagnostics, diagnosticsPane, diagnosticsLeading, Self.diagnosticsWidth)]
+         (.tests, testsPane, testsLeading, Self.testsWidth), (.diagnostics, diagnosticsPane, diagnosticsLeading, Self.diagnosticsWidth),
+         (.recordings, recordingsPane, recordingsLeading, Self.recordingsWidth)]
     }
+
+    func setShowingRecordings(_ on: Bool) { show(on ? .recordings : nil, closing: .recordings) }
 
     private func layoutRightSlot() {
         guard let host = networkPane.superview else { return }
@@ -693,6 +717,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     }
 
     var network: NetworkPane { networkPane }
+    var recordingsView: RecordingsPane { recordingsPane }
 
     /// The playhead dragged to a moment, as a person would (for scripted checks).
     func debugScrub(to time: Date) { timeline.show(time); timeline.onScrub?(time) }
@@ -1083,6 +1108,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 if size > 0, size == lastSize {
                     timer.invalidate()
                     self.toast.show("Saved \(name)")
+                    if self.showingRecordings { self.recordingsPane.refresh(select: file) }   // recordings pane: the new file
                     done?(file, answer)
                 } else if tries > 100 {
                     timer.invalidate()

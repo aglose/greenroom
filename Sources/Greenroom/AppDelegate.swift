@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mockCheckIfAsked()
         extrasCheckIfAsked()
         devHooksCheckIfAsked()
+        replayCheckIfAsked()
     }
 
     /// `Greenroom --mock-check DIR APK`: the test app fetches a page; the request is failed from the network pane and
@@ -498,6 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ note: Notification) {
         agent.stop()
         TestRun.terminateAll()
+        ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
         Engine.shared.stopAll()
     }
 
