@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         paletteCheckIfAsked()
         mockCheckIfAsked()
         extrasCheckIfAsked()
+        devHooksCheckIfAsked()
     }
 
     /// `Greenroom --mock-check DIR APK`: the test app fetches a page; the request is failed from the network pane and
@@ -244,7 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard pane.start() else { print("[greenroom] tests: could not start"); NSApp.terminate(nil); return }
             captureWindow(to: dir.appendingPathComponent("1-start.png"))
             // Mid-run: the first moment some results are in and the run is still going.
-            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { t in
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] t in
                 guard let r = pane.run, r.isRunning else { if pane.run?.isRunning == false { t.invalidate() }; return }
                 if r.done >= 3, shotsTaken == 0 { shotsTaken = 1; captureWindow(to: dir.appendingPathComponent("2-running.png")) }
             }
@@ -435,6 +436,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// `Greenroom --devhooks-check DIR APK`: see DevHooksCheck.
+    private func devHooksCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--devhooks-check"), i + 2 < args.count else { return }
+        DevHooksCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2])) { [self] in captureWindow(to: $0) }
     }
 
     private func defaults_forgetRecent(_ apk: URL) {

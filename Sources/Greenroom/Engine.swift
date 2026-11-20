@@ -128,6 +128,16 @@ final class Engine {
         return sim
     }
 
+    /// Puts `new` where `old` stood in the list and drops `old` (a relaunch keeps its place on the stage).
+    func replace(_ old: Simulator, with new: Simulator) {
+        if let at = simulators.firstIndex(where: { $0 === old }) {
+            simulators.removeAll { $0 === new }
+            simulators.insert(new, at: min(at, simulators.count))
+            simulators.removeAll { $0 === old }
+        }
+        onChange?()
+    }
+
     func close(_ sim: Simulator) {
         sim.quit()
         simulators.removeAll { $0 === sim }
