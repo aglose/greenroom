@@ -24,6 +24,15 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
     /// Called when a request is picked in the list (not when the timeline picks one).
     var onSelect: ((NetEvent) -> Void)?
     private var revealing = false
+    /// The engine's rules (mocks, failures, delays, patches), shown as chips above the list.
+    private let rulesStrip = NSStackView()
+    private let rulesFlow = NSStackView()
+    private var rulesHeight: NSLayoutConstraint!
+    private(set) var rules: [[String: Any]] = []
+    private var actionButtons: [GlassButton] = []
+    private var selectedEvent: NetEvent?
+    private var ruleTimer: Timer?
+    private let editor = NSPopover()
 
     private static let conditions = [("online", "Online"), ("3g", "3G"), ("lossy", "Lossy"), ("offline", "Offline")]
     private static let columns: [(String, String, CGFloat)] = [("method", "Method", 66), ("url", "Request", 210), ("status", "Status", 50),
@@ -115,7 +124,21 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
         tabs.spacing = 2
         let detailHead = NSStackView(views: [detailTitle, detailStatus, NSView(), tabs])
         detailHead.spacing = 8
-        for v in [detailHead, detailScroll] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(v) }
+        // What can be done to this request from now on: the engine answers it, fails it, slows it or patches it.
+        actionButtons = [
+            ("Mock response…", "theatermasks", #selector(mockPicked(_:))),
+            ("Fail", "exclamationmark.octagon", #selector(failPicked(_:))),
+            ("Slow by 3 s", "tortoise", #selector(slowPicked(_:))),
+            ("Patch JSON…", "curlybraces", #selector(patchPicked(_:))),
+        ].map { name, symbol, action in
+            let b = GlassButton(symbol: symbol, title: name, label: name, style: .well, target: self, action: action)
+            b.font = .systemFont(ofSize: 12, weight: .medium)
+            b.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            return b
+        }
+        let actionRow = NSStackView(views: actionButtons)
+        actionRow.spacing = 6
+        for v in [detailHead, detailScroll, actionRow] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(v) }
 
         empty.font = .systemFont(ofSize: 13)
         empty.textColor = Design.mute
@@ -126,7 +149,23 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let top = NSStackView(views: [title, count, spacer] + conditionButtons)
         top.spacing = 4
-        for v in [top, filter, heads, scroll, empty, card] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        let rulesTitle = NSTextField(labelWithString: "Rules")
+        rulesTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        rulesTitle.textColor = Design.difference
+        let clear = GlassButton(symbol: nil, title: "Clear all", label: "Remove every rule", target: self, action: #selector(clearRules(_:)))
+        clear.font = .systemFont(ofSize: 12, weight: .medium)
+        clear.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        rulesFlow.orientation = .vertical
+        rulesFlow.alignment = .leading
+        rulesFlow.spacing = 4
+        let rulesHead = NSStackView(views: [rulesTitle, NSView(), clear])
+        rulesStrip.orientation = .vertical
+        rulesStrip.alignment = .width
+        rulesStrip.spacing = 6
+        rulesStrip.addArrangedSubview(rulesHead)
+        rulesStrip.addArrangedSubview(rulesFlow)
+        rulesStrip.isHidden = true
+        for v in [top, filter, rulesStrip, heads, scroll, empty, card] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -136,7 +175,10 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
             filter.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10),
             filter.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             filter.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            heads.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 12),
+            rulesStrip.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 10),
+            rulesStrip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            rulesStrip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            heads.topAnchor.constraint(equalTo: rulesStrip.bottomAnchor, constant: 10),
             heads.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             heads.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
             scroll.topAnchor.constraint(equalTo: heads.bottomAnchor, constant: 4),
@@ -156,7 +198,9 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
             detailScroll.topAnchor.constraint(equalTo: detailHead.bottomAnchor, constant: 8),
             detailScroll.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
             detailScroll.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -6),
-            detailScroll.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8),
+            detailScroll.bottomAnchor.constraint(equalTo: actionRow.topAnchor, constant: -8),
+            actionRow.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
+            actionRow.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
         ])
         refreshButtons()
         showDetail()
@@ -172,8 +216,16 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
         sim?.activity.onRequests = { [weak self] in self?.reload() }
         detail = nil
         atPlayhead = nil
+        selectedEvent = nil
+        rules = []
         reload()
         showDetail()
+        refreshRules()
+        // Hit counts change as the app makes requests: looked at every few seconds while the pane follows a device.
+        ruleTimer?.invalidate()
+        ruleTimer = sim == nil ? nil : Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            if self?.rules.isEmpty == false { self?.refreshRules() }
+        }
     }
 
     func reload() {
@@ -305,6 +357,8 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
     // MARK: Detail
 
     private func load(_ e: NetEvent) {
+        selectedEvent = e
+        updateActions()
         detailTitle.stringValue = "\(e.method) \(e.shortURL)"
         detailStatus.stringValue = e.status == 0 ? "failed" : String(e.status)
         detailStatus.textColor = e.failed ? NSColor(srgbRed: 1, green: 0.6, blue: 0.56, alpha: 1) : Design.accent
@@ -318,6 +372,135 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
         }
     }
 
+    // MARK: Rules
+
+    private func updateActions() {
+        let ok = selectedEvent.map { $0.method != "CONNECT" && $0.method != "DNS" } ?? false
+        for b in actionButtons { b.isEnabled = ok }
+    }
+
+    /// The selected request's address as a rule pattern: its query (which changes from call to call) becomes `*`.
+    private func pattern(_ e: NetEvent) -> String {
+        var url = e.url
+        if let q = url.firstIndex(of: "?") { url = String(url[..<q]) + "*" }
+        return url.replacingOccurrences(of: " ", with: "%20")
+    }
+
+    /// Adds a rule; `kind` is a status, `patch`, or `0` (the server's answer, delayed).
+    func addRule(method: String, pattern: String, kind: String, latency: Int, type: String, body: Data) {
+        guard let sim = simulator else { return }
+        let b64 = body.isEmpty ? "-" : body.base64EncodedString()
+        sim.send("network rule add \(method) \(pattern) \(kind) \(latency) \(type) \(b64)") { [weak self] answer in
+            guard let self else { return }
+            if answer.hasPrefix("error") { self.say(answer.replacingOccurrences(of: "error: ", with: ""), problem: true) }
+            else { self.say("Rule added: the next matching request gets it (the app's connections to that host are reopened)") }
+            self.refreshRules()
+        }
+    }
+
+    var onSay: ((String, Bool) -> Void)?
+    private func say(_ text: String, problem: Bool = false) { onSay?(text, problem) }
+
+    /// Selects the latest request whose address contains `text` (for scripted checks).
+    func debugSelect(containing text: String) {
+        guard let i = shown.lastIndex(where: { $0.url.contains(text) && $0.method == "GET" }) else { return }
+        table.selectRowIndexes([i], byExtendingSelection: false)
+    }
+    func debugFail() { failPicked(nil) }
+    func debugMock(body: String) {
+        guard let e = selectedEvent else { return }
+        addRule(method: e.method, pattern: pattern(e), kind: "200", latency: 0, type: "text/plain", body: Data(body.utf8))
+    }
+
+    @objc private func failPicked(_ sender: Any?) {
+        guard let e = selectedEvent else { return }
+        let body = Data(#"{"error":"a failure Greenroom made up"}"#.utf8)
+        addRule(method: e.method, pattern: pattern(e), kind: "503", latency: 0, type: "application/json", body: body)
+    }
+
+    @objc private func slowPicked(_ sender: Any?) {
+        guard let e = selectedEvent else { return }
+        addRule(method: e.method, pattern: pattern(e), kind: "0", latency: 3000, type: "-", body: Data())
+    }
+
+    @objc private func mockPicked(_ sender: NSButton) { openEditor(sender, patch: false) }
+    @objc private func patchPicked(_ sender: NSButton) { openEditor(sender, patch: true) }
+
+    /// The editor for a mock (status, type, body: the real answer to start from) or a patch (a JSON merge patch).
+    private func openEditor(_ anchor: NSView, patch: Bool) {
+        guard let e = selectedEvent else { return }
+        let view = RuleEditor(patch: patch, event: e, realBody: patch ? nil : responseText(), realType: e.type)
+        view.onAdd = { [weak self] status, type, body in
+            guard let self else { return }
+            self.editor.close()
+            self.addRule(method: e.method, pattern: self.pattern(e), kind: patch ? "patch" : String(status), latency: 0,
+                         type: patch ? "-" : type, body: Data(body.utf8))
+        }
+        view.onCancel = { [weak self] in self?.editor.close() }
+        let vc = NSViewController()
+        vc.view = view
+        editor.contentViewController = vc
+        editor.behavior = .transient
+        editor.appearance = NSAppearance(named: .darkAqua)
+        editor.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+    }
+
+    /// The selected exchange's response body as text, if it is text.
+    private func responseText() -> String? {
+        guard let d = detail, let data = Data(base64Encoded: d["respBody"] as? String ?? ""), !data.isEmpty else { return nil }
+        if let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+           let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .withoutEscapingSlashes]) {
+            return String(decoding: pretty, as: UTF8.self)
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    func refreshRules() {
+        guard let sim = simulator else { showRules([]); return }
+        sim.send("network rule list") { [weak self] answer in
+            guard let self, sim === self.simulator else { return }
+            let list = (try? JSONSerialization.jsonObject(with: Data(answer.utf8))) as? [[String: Any]] ?? []
+            self.showRules(list)
+        }
+    }
+
+    private func showRules(_ list: [[String: Any]]) {
+        rules = list
+        rulesFlow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for r in list {
+            let id = r["id"] as? Int ?? 0
+            let status = r["status"] as? Int ?? 0
+            let what: String
+            if r["patch"] as? Bool == true { what = "patched" }
+            else if r["forward"] != nil { what = "forwarded" }
+            else if status > 0 { what = "answers \(status)" }
+            else { what = "+\((r["latencyMs"] as? Int ?? 0) / 1000) s" }
+            let pattern = (r["pattern"] as? String ?? "").replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
+            let label = NSTextField(labelWithString: "\(r["method"] as? String ?? "*") \(pattern)  →  \(what)  ·  \(r["hits"] as? Int ?? 0) hits")
+            label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            label.textColor = Design.ink
+            label.lineBreakMode = .byTruncatingMiddle
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            let remove = GlassButton(symbol: "xmark", label: "Remove this rule", target: nil, action: nil)
+            remove.onPress = { [weak self] in
+                self?.simulator?.send("network rule remove \(id)") { _ in self?.refreshRules() }
+            }
+            let chip = NSStackView(views: [label, remove])
+            chip.spacing = 4
+            chip.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 0)
+            chip.wantsLayer = true
+            chip.layer?.backgroundColor = Design.difference.withAlphaComponent(0.14).cgColor
+            chip.layer?.cornerRadius = 8
+            chip.widthAnchor.constraint(lessThanOrEqualToConstant: 560).isActive = true
+            rulesFlow.addArrangedSubview(chip)
+        }
+        rulesStrip.isHidden = list.isEmpty
+    }
+
+    @objc private func clearRules(_ sender: Any?) {
+        simulator?.send("network rule clear") { [weak self] _ in self?.refreshRules() }
+    }
+
     @objc private func tabPicked(_ sender: GlassButton) {
         tab = sender.tag
         refreshButtons()
@@ -325,6 +508,7 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
     }
 
     private func showDetail() {
+        updateActions()
         guard let d = detail else {
             if table.selectedRow < 0 {
                 detailTitle.stringValue = "No request selected"
@@ -356,7 +540,10 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
                     let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
                 line(String(decoding: pretty, as: UTF8.self))
             } else if let text = String(data: data, encoding: .utf8) {
-                line(text)
+                // Pages often start with blank lines; and a very long body is shown in part, so the pane stays quick.
+                let trimmed = text.drop { $0.isWhitespace || $0.isNewline }
+                line(String(trimmed.prefix(65_536)))
+                if trimmed.count > 65_536 { line("(the first 64 kB of \(Self.bytes(data.count)) shown)", Design.mute) }
             } else {
                 line("\(Self.bytes(data.count)) of binary data", Design.mute)
             }
@@ -392,4 +579,72 @@ private final class RoundRow: NSTableRowView {
         p.stroke()
     }
     override var isEmphasized: Bool { get { false } set {} }
+}
+
+/// The form for a new mock (status, content type, body) or patch (a JSON merge patch over the real answer).
+final class RuleEditor: NSView {
+    var onAdd: ((Int, String, String) -> Void)?
+    var onCancel: (() -> Void)?
+    private let status = NSTextField(string: "200")
+    private let type = NSTextField(string: "application/json")
+    private let body = NSTextView()
+    private let patch: Bool
+
+    init(patch: Bool, event: NetEvent, realBody: String?, realType: String?) {
+        self.patch = patch
+        super.init(frame: NSRect(x: 0, y: 0, width: 460, height: 380))
+        let title = NSTextField(labelWithString: patch ? "Patch the answer to \(event.method) \(event.shortURL)" : "Mock the answer to \(event.method) \(event.shortURL)")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.lineBreakMode = .byTruncatingMiddle
+        let hint = NSTextField(wrappingLabelWithString: patch
+            ? "A JSON merge patch: its keys replace the server's, null removes one. The real request still goes out."
+            : "The engine answers in the server's place; nothing leaves the Mac for this request. Starts from the real answer.")
+        hint.font = .systemFont(ofSize: 12)
+        hint.textColor = .secondaryLabelColor
+        status.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        type.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        if let realType { type.stringValue = realType.split(separator: ";").first.map(String.init) ?? realType }
+        body.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        body.isRichText = false
+        body.isAutomaticQuoteSubstitutionEnabled = false
+        body.string = patch ? "{\n  \"name\": \"Changed by Greenroom\"\n}" : (realBody ?? "{\n  \"ok\": true\n}")
+        let scroll = NSScrollView()
+        scroll.documentView = body
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        body.autoresizingMask = [.width]
+        func labelled(_ name: String, _ field: NSView, _ width: CGFloat) -> NSView {
+            let l = NSTextField(labelWithString: name)
+            l.font = .systemFont(ofSize: 12)
+            field.widthAnchor.constraint(equalToConstant: width).isActive = true
+            return NSStackView(views: [l, field])
+        }
+        let fields = NSStackView(views: patch ? [] : [labelled("Status", status, 60), labelled("Type", type, 220)])
+        fields.spacing = 16
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelled))
+        cancel.keyEquivalent = "\u{1b}"
+        let add = NSButton(title: patch ? "Add patch" : "Add mock", target: self, action: #selector(added))
+        add.keyEquivalent = "\r"
+        let buttons = NSStackView(views: [NSView(), cancel, add])
+        let column = NSStackView(views: [title, hint, fields, scroll, buttons])
+        column.orientation = .vertical
+        column.alignment = .width
+        column.spacing = 10
+        column.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(column)
+        NSLayoutConstraint.activate([
+            column.topAnchor.constraint(equalTo: topAnchor), column.bottomAnchor.constraint(equalTo: bottomAnchor),
+            column.leadingAnchor.constraint(equalTo: leadingAnchor), column.trailingAnchor.constraint(equalTo: trailingAnchor),
+            widthAnchor.constraint(equalToConstant: 460), scroll.heightAnchor.constraint(equalToConstant: 200),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    @objc private func cancelled() { onCancel?() }
+    @objc private func added() {
+        let code = Int(status.stringValue.trimmingCharacters(in: .whitespaces)) ?? 200
+        onAdd?(code, type.stringValue.trimmingCharacters(in: .whitespaces), body.string)
+    }
 }

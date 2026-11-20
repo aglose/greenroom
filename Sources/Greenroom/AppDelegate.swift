@@ -24,6 +24,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         networkCheckIfAsked()
         motionCheckIfAsked()
         paletteCheckIfAsked()
+        mockCheckIfAsked()
+    }
+
+    /// `Greenroom --mock-check DIR APK`: the test app fetches a page; the request is failed from the network pane and
+    /// fetched again, then mocked with a short body and fetched again. What the app shows is printed each time.
+    private func mockCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--mock-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        workbench.window.setContentSize(NSSize(width: 1600, height: 1000))
+        workbench.window.center()
+        guard let sim = workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false) else { return }
+        func after(_ t: Double, _ f: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: f) }
+        func shows(_ label: String, then: @escaping () -> Void) {
+            sim.send("nodes") { nodes in
+                let line = ScreenNode.parse(nodes).map(\.label).first { $0.hasPrefix("get okhttp") } ?? "(not found)"
+                let last = sim.activity.requests.last { $0.url.contains("apple.com") && $0.method == "GET" }
+                print("[greenroom] mock \(label): app shows '\(line)'; last request \(last.map { "\($0.status) \($0.mocked ? "by a rule" : "from the server")" } ?? "none")")
+                then()
+            }
+        }
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
+            waited += 0.5
+            guard sim.framesShown > 2 || waited > 90 else { return }
+            timer.invalidate()
+            sim.send("open apksim://network?url=https://www.apple.com/")
+            after(3) { sim.send("tap-text Get") }
+            after(8) { [self] in
+                workbench.setShowingNetwork(true)
+                shows("1 real") { [self] in
+                    workbench.network.debugSelect(containing: "apple.com")
+                    after(1.5) { [self] in
+                        workbench.network.debugFail()
+                        after(1.5) { sim.send("tap-text Get") }
+                        after(6) { [self] in
+                            shows("2 failed") { [self] in
+                                captureWindow(to: dir.appendingPathComponent("1-failed.png"))
+                                print("[greenroom] rules: " + workbench.network.rules.map { "\($0["method"] ?? "") \($0["pattern"] ?? "") \($0["status"] ?? "") hits \($0["hits"] ?? "")" }.joined(separator: " | "))
+                                sim.send("network rule clear") { [self] _ in
+                                    workbench.network.debugSelect(containing: "apple.com")
+                                    after(1.5) { [self] in
+                                        workbench.network.debugMock(body: "hello from Greenroom")
+                                        after(1.5) { sim.send("tap-text Get") }
+                                        after(6) { [self] in
+                                            shows("3 mocked") { [self] in
+                                                captureWindow(to: dir.appendingPathComponent("2-mocked.png"))
+                                                NSApp.terminate(nil)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// `Greenroom --palette-check DIR APK`: ⌘K opened over a running app; a few searches typed (their top results

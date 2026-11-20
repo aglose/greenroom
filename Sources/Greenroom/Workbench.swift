@@ -608,6 +608,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         updateChrome()
     }
 
+    var network: NetworkPane { networkPane }
+
     /// The playhead dragged to a moment, as a person would (for scripted checks).
     func debugScrub(to time: Date) { timeline.show(time); timeline.onScrub?(time) }
 
@@ -624,6 +626,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             self.networkPane.reveal(at: t)
         }
         timeline.onSave = { [weak self] in self?.saveRecordingAndShow(nil) }
+        networkPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         timeline.onClose = { [weak self] in self?.setShowingTimeline(false) }
     }
 
