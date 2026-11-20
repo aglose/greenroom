@@ -52,6 +52,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var timelineHeight: NSLayoutConstraint!
     private var networkLeading: NSLayoutConstraint!
     private(set) var showingNetwork = false
+    private let devicePane = DevicePane(frame: .zero)
+    private var deviceLeading: NSLayoutConstraint!
+    private(set) var showingDevice = false
+    private static let deviceWidth: CGFloat = 384
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
@@ -228,6 +232,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         refreshGrid()
         if showingLog { logPanel.follow(selected) }
         if showingNetwork { networkPane.follow(selected) }
+        if showingDevice { devicePane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
         rows = []
         if !sims.isEmpty {
@@ -295,6 +300,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         header.addSubview(bar)
 
         let rails: [(String, String, String, Selector)] = [
+            ("device", "slider.horizontal.3", "Device controls", #selector(toggleDevicePane(_:))),
             ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
             ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
             ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
@@ -312,8 +318,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         column.translatesAutoresizingMaskIntoConstraints = false
         rail.addSubview(column)
 
-        for v in [networkPane, header, rail] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        for v in [networkPane, devicePane, header, rail] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
         networkPane.isHidden = true
+        devicePane.isHidden = true
+        devicePane.targets = { [weak self] in
+            guard let self else { return [] }
+            return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
+        }
+        deviceLeading = devicePane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         // Hidden, the pane waits just off the window's right edge; shown, it slides in beside the rail.
         networkLeading = networkPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         NSLayoutConstraint.activate([
@@ -329,6 +341,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             networkPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             networkPane.widthAnchor.constraint(equalToConstant: Self.networkWidth),
             networkLeading,
+            devicePane.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            devicePane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            devicePane.widthAnchor.constraint(equalToConstant: Self.deviceWidth),
+            deviceLeading,
             rail.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
             column.topAnchor.constraint(equalTo: rail.topAnchor),
             column.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
@@ -371,6 +387,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         railButtons["inspect"]?.isOn = inspecting
         railButtons["log"]?.isOn = showingLog
         railButtons["network"]?.isOn = showingNetwork
+        railButtons["device"]?.isOn = showingDevice
         railButtons["timeline"]?.isOn = showingTimeline
         timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
@@ -379,17 +396,38 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleNetwork(_ sender: Any?) { setShowingNetwork(!showingNetwork) }
     @objc func toggleTimeline(_ sender: Any?) { setShowingTimeline(!showingTimeline) }
 
-    /// The network pane slides in from the right; the stage makes room as it comes.
+    @objc func toggleDevicePane(_ sender: Any?) { setShowingDevice(!showingDevice) }
+
+    /// The network pane slides in from the right; the stage makes room as it comes. It shares the place with the
+    /// device pane: opening one sends the other away.
     func setShowingNetwork(_ on: Bool) {
         showingNetwork = on
+        if on { showingDevice = false }
         networkPane.follow(on ? selected : nil)
+        layoutRightSlot()
+    }
+
+    func setShowingDevice(_ on: Bool) {
+        showingDevice = on
+        if on { showingNetwork = false; networkPane.follow(nil) }
+        devicePane.follow(on ? selected : nil)
+        layoutRightSlot()
+    }
+
+    private func layoutRightSlot() {
         guard let host = networkPane.superview else { return }
-        if on { networkPane.isHidden = false }
+        if showingNetwork { networkPane.isHidden = false }
+        if showingDevice { devicePane.isHidden = false }
+        let width = showingNetwork ? Self.networkWidth : showingDevice ? Self.deviceWidth : 0
         Design.animate(Design.move, {
-            self.networkLeading.animator().constant = on ? -(Self.networkWidth + 68) : 20
-            self.gridTrailing.animator().constant = on ? -(Self.networkWidth + 80) : -64
+            self.networkLeading.animator().constant = self.showingNetwork ? -(Self.networkWidth + 68) : 20
+            self.deviceLeading.animator().constant = self.showingDevice ? -(Self.deviceWidth + 68) : 20
+            self.gridTrailing.animator().constant = width > 0 ? -(width + 80) : -64
             host.layoutSubtreeIfNeeded()
-        }, done: { if !self.showingNetwork { self.networkPane.isHidden = true } })
+        }, done: {
+            if !self.showingNetwork { self.networkPane.isHidden = true }
+            if !self.showingDevice { self.devicePane.isHidden = true }
+        })
         updateChrome()
     }
 

@@ -99,6 +99,9 @@ final class GlassButton: NSButton {
     enum Style { case plain, well, accent, record }
     var style: Style = .plain { didSet { refresh() } }
     var isOn = false { didSet { refresh() } }
+    /// What a press does, for buttons made in code without a target.
+    var onPress: (() -> Void)? { didSet { target = self; action = #selector(pressed) } }
+    @objc private func pressed() { onPress?() }
     private var hovering = false { didSet { refresh() } }
 
     convenience init(symbol: String?, title: String = "", label: String, style: Style = .plain, target: AnyObject?, action: Selector?) {

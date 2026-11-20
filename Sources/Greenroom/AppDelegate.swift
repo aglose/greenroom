@@ -93,7 +93,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     workbench.setSideBySide(false)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
                         captureWindow(to: dir.appendingPathComponent("3-one.png"))
-                        NSApp.terminate(nil)
+                        workbench.setShowingDevice(true)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                            captureWindow(to: dir.appendingPathComponent("4-device.png"))
+                            NSApp.terminate(nil)
+                        }
                     }
                 }
             }
