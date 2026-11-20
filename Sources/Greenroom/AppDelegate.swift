@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordCheckIfAsked()
         stageCheckIfAsked()
         networkCheckIfAsked()
+        testsCheckIfAsked()
         motionCheckIfAsked()
         paletteCheckIfAsked()
         mockCheckIfAsked()
@@ -204,6 +205,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: Tests pane check
+
+    /// `Greenroom --tests-check DIR APP.apk TEST.apk [CLASSFILTER]`: opens the Tests pane, runs, waits for the end and
+    /// prints one summary line; the window is captured as it starts, while it runs, when it ends and with a failure picked.
+    private func testsCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--tests-check"), i + 3 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        workbench.window.setContentSize(NSSize(width: 1500, height: 960))
+        workbench.window.center()
+        let pane = workbench.tests
+        pane.setInputs(test: URL(fileURLWithPath: args[i + 3]), app: URL(fileURLWithPath: args[i + 2]), filter: i + 4 < args.count ? args[i + 4] : "")
+        workbench.setShowingTests(true)
+        var shotsTaken = 0
+        pane.onFinish = { [self] run in
+            let secs = String(format: "%.1f", run.elapsed)
+            print("[greenroom] tests: \(run.passed) passed, \(run.failed) failed, \(run.ignored) ignored in \(secs) s")
+            if let p = run.problem { print("[greenroom] engine said: \(p)") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [self] in
+                captureWindow(to: dir.appendingPathComponent("3-done.png"))
+                if let f = run.allTests.first(where: { $0.status == .failed }) {
+                    pane.select(f.id)
+                    print("[greenroom] picked \(f.id): bundle \(run.bundleFolder(for: f)?.path ?? "none"), movie \(run.movieFile(for: f)?.lastPathComponent ?? "none")")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [self] in
+                        captureWindow(to: dir.appendingPathComponent("4-failure.png"))
+                        NSApp.terminate(nil)
+                    }
+                } else { NSApp.terminate(nil) }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
+            guard pane.start() else { print("[greenroom] tests: could not start"); NSApp.terminate(nil); return }
+            captureWindow(to: dir.appendingPathComponent("1-start.png"))
+            // Mid-run: the first moment some results are in and the run is still going.
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { t in
+                guard let r = pane.run, r.isRunning else { if pane.run?.isRunning == false { t.invalidate() }; return }
+                if r.done >= 3, shotsTaken == 0 { shotsTaken = 1; captureWindow(to: dir.appendingPathComponent("2-running.png")) }
+            }
+            // A hang must not hold the check for ever.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 900) { print("[greenroom] tests: timed out"); NSApp.terminate(nil) }
         }
     }
 
@@ -443,6 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ note: Notification) {
         agent.stop()
+        TestRun.terminateAll()
         Engine.shared.stopAll()
     }
 
