@@ -56,6 +56,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var deviceLeading: NSLayoutConstraint!
     private(set) var showingDevice = false
     private static let deviceWidth: CGFloat = 384
+    // Recordings pane (right slot): see RecordingsPane.swift.
+    private let recordingsPane = RecordingsPane(frame: .zero)
+    private var recordingsLeading: NSLayoutConstraint!
+    private(set) var showingRecordings = false
+    private static let recordingsWidth: CGFloat = 470
     private let emptyStage = EmptyStage(frame: .zero)
     let toast = Toast(frame: .zero)
     let palette = Palette(frame: .zero)
@@ -323,6 +328,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             ("device", "slider.horizontal.3", "Device controls", #selector(toggleDevicePane(_:))),
             ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
             ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
+            ("recordings", "film", "Recordings: replay, and find the first build that differs", #selector(toggleRecordings(_:))),
             ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
             ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
             ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
@@ -338,7 +344,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         column.translatesAutoresizingMaskIntoConstraints = false
         rail.addSubview(column)
 
-        for v in [networkPane, devicePane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        for v in [networkPane, devicePane, recordingsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
         scrim.isHidden = true
         palette.isHidden = true
         scrim.onClick = { [weak self] in self?.hidePalette() }
@@ -346,6 +352,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         palette.source = { [weak self] in self?.paletteItems() ?? [] }
         networkPane.isHidden = true
         devicePane.isHidden = true
+        recordingsPane.isHidden = true
+        recordingsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+        recordingsPane.onOpenTrace = { [weak self] file in self?.view(recording: file) }
+        recordingsLeading = recordingsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         devicePane.targets = { [weak self] in
             guard let self else { return [] }
             return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
@@ -374,6 +384,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             devicePane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             devicePane.widthAnchor.constraint(equalToConstant: Self.deviceWidth),
             deviceLeading,
+            recordingsPane.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            recordingsPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            recordingsPane.widthAnchor.constraint(equalToConstant: Self.recordingsWidth),
+            recordingsLeading,
             rail.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
             column.topAnchor.constraint(equalTo: rail.topAnchor),
             column.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
@@ -417,6 +431,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         railButtons["log"]?.isOn = showingLog
         railButtons["network"]?.isOn = showingNetwork
         railButtons["device"]?.isOn = showingDevice
+        railButtons["recordings"]?.isOn = showingRecordings
         railButtons["timeline"]?.isOn = showingTimeline
         timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
@@ -426,6 +441,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleTimeline(_ sender: Any?) { setShowingTimeline(!showingTimeline) }
 
     @objc func toggleDevicePane(_ sender: Any?) { setShowingDevice(!showingDevice) }
+    @objc func toggleRecordings(_ sender: Any?) { setShowingRecordings(!showingRecordings) }
 
     // MARK: Command palette
 
@@ -549,6 +565,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         add("mirror", mirror ? "Stop mirroring input" : "Mirror input to every device", "View", "dot.radiowaves.left.and.right", "⇧⌘M") { [weak self] in self?.toggleMirror(nil) }
         add("pane.device", showingDevice ? "Hide device controls" : "Show device controls", "Panes", "slider.horizontal.3") { [weak self] in self?.toggleDevicePane(nil) }
         add("pane.network", showingNetwork ? "Hide network" : "Show network", "Panes", "arrow.up.arrow.down", keywords: "requests http") { [weak self] in self?.toggleNetwork(nil) }
+        add("pane.recordings", "Show recordings", "Recordings", "film", keywords: "replay saved bundles apkrec") { [weak self] in self?.setShowingRecordings(true) }
+        add("recordings.replay", "Replay a recording…", "Recordings", "play.fill", keywords: "replay build regression") { [weak self] in self?.setShowingRecordings(true); self?.recordingsPane.promptReplay() }
+        add("recordings.bisect", "Find the first build that differs…", "Recordings", "arrow.triangle.branch", keywords: "bisect replay regression builds") { [weak self] in self?.setShowingRecordings(true); self?.recordingsPane.promptBisect() }
         add("pane.timeline", showingTimeline ? "Hide timeline" : "Show timeline", "Panes", "chart.bar.xaxis") { [weak self] in self?.toggleTimeline(nil) }
         add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
         add("pane.inspect", inspecting ? "Stop inspecting" : "Inspect the screen", "Panes", "cursorarrow.rays", "⌥⌘I", keywords: "nodes accessibility tree") { [weak self] in self?.toggleInspector(nil) }
@@ -568,15 +587,22 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     /// device pane: opening one sends the other away.
     func setShowingNetwork(_ on: Bool) {
         showingNetwork = on
-        if on { showingDevice = false }
+        if on { showingDevice = false; showingRecordings = false }
         networkPane.follow(on ? selected : nil)
         layoutRightSlot()
     }
 
     func setShowingDevice(_ on: Bool) {
         showingDevice = on
-        if on { showingNetwork = false; networkPane.follow(nil) }
+        if on { showingNetwork = false; showingRecordings = false; networkPane.follow(nil) }
         devicePane.follow(on ? selected : nil)
+        layoutRightSlot()
+    }
+
+    func setShowingRecordings(_ on: Bool) {
+        showingRecordings = on
+        if on { showingNetwork = false; showingDevice = false; networkPane.follow(nil); devicePane.follow(nil) }
+        recordingsPane.setShown(on, folder: recordings)
         layoutRightSlot()
     }
 
@@ -584,15 +610,18 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         guard let host = networkPane.superview else { return }
         if showingNetwork { networkPane.isHidden = false }
         if showingDevice { devicePane.isHidden = false }
-        let width = showingNetwork ? Self.networkWidth : showingDevice ? Self.deviceWidth : 0
+        if showingRecordings { recordingsPane.isHidden = false }
+        let width = showingNetwork ? Self.networkWidth : showingDevice ? Self.deviceWidth : showingRecordings ? Self.recordingsWidth : 0
         Design.animate(Design.move, {
             self.networkLeading.animator().constant = self.showingNetwork ? -(Self.networkWidth + 68) : 20
             self.deviceLeading.animator().constant = self.showingDevice ? -(Self.deviceWidth + 68) : 20
+            self.recordingsLeading.animator().constant = self.showingRecordings ? -(Self.recordingsWidth + 68) : 20
             self.gridTrailing.animator().constant = width > 0 ? -(width + 80) : -64
             host.layoutSubtreeIfNeeded()
         }, done: {
             if !self.showingNetwork { self.networkPane.isHidden = true }
             if !self.showingDevice { self.devicePane.isHidden = true }
+            if !self.showingRecordings { self.recordingsPane.isHidden = true }
         })
         updateChrome()
     }
@@ -609,6 +638,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     }
 
     var network: NetworkPane { networkPane }
+    var recordingsView: RecordingsPane { recordingsPane }
 
     /// The playhead dragged to a moment, as a person would (for scripted checks).
     func debugScrub(to time: Date) { timeline.show(time); timeline.onScrub?(time) }
@@ -997,6 +1027,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 if size > 0, size == lastSize {
                     timer.invalidate()
                     self.toast.show("Saved \(name)")
+                    if self.showingRecordings { self.recordingsPane.refresh(select: file) }   // recordings pane: the new file
                     done?(file, answer)
                 } else if tries > 100 {
                     timer.invalidate()
