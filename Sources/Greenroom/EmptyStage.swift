@@ -93,7 +93,9 @@ final class EmptyStage: NSView {
     /// The last three APKs opened, as buttons.
     func reload() {
         recents.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let list = Array(Recents.all.prefix(3))
+        // One card per app name: copies of one build opened from different folders are one app here (newest first).
+        var seen = Set<String>()
+        let list = Array(Recents.all.filter { seen.insert($0.lastPathComponent).inserted }.prefix(3))
         recentsBlock?.isHidden = list.isEmpty
         for url in list {
             let b = GlassButton(symbol: "shippingbox", title: url.deletingPathExtension().lastPathComponent, label: url.path, style: .well, target: nil, action: nil)

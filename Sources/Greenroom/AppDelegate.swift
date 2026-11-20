@@ -29,7 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         extrasCheckIfAsked()
         devHooksCheckIfAsked()
         replayCheckIfAsked()
-        SnapshotCheck.runIfAsked(workbench)   // `--snapshots-check`, SnapshotCheck.swift
+        SnapshotCheck.runIfAsked(workbench)
+        PerfCheck.runIfAsked(self)   // `--snapshots-check`, SnapshotCheck.swift
     }
 
     /// `Greenroom --mock-check DIR APK`: the test app fetches a page; the request is failed from the network pane and
@@ -202,6 +203,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     print("[greenroom] network: \(reqs.count) requests: " + reqs.map { "\($0.method) \($0.shortURL.prefix(60)) \($0.status) \($0.ms)ms" }.joined(separator: " | "))
                     print("[greenroom] timeline: touches \(sim.activity.touches.count) frames \(sim.activity.frames.count) log marks \(sim.activity.logs.count)")
                     captureWindow(to: dir.appendingPathComponent("1-network-timeline.png"))
+                    // The timeline's own layers on the stage colour, readable even with the screen locked.
+                    if let l = workbench.timelineDock.layer {
+                        let scale: CGFloat = 2, b = workbench.timelineDock.bounds
+                        if let ctx = CGContext(data: nil, width: Int(b.width * scale), height: Int(b.height * scale), bitsPerComponent: 8, bytesPerRow: 0,
+                                               space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                            ctx.setFillColor(Design.stage.cgColor)
+                            ctx.fill(CGRect(x: 0, y: 0, width: b.width * scale, height: b.height * scale))
+                            ctx.scaleBy(x: scale, y: scale)
+                            l.render(in: ctx)
+                            if let img = ctx.makeImage() { try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("1b-timeline-layers.png")) }
+                        }
+                    }
                     if let first = reqs.first { workbench.debugScrub(to: first.start.addingTimeInterval(0.01)) }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
                         captureWindow(to: dir.appendingPathComponent("2-scrubbed.png"))
@@ -465,10 +478,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
         if !locked, let image = capture(.null, 8, UInt32(workbench.window.windowNumber), 9)?.takeRetainedValue() {
             try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file)
-        } else if let view = workbench.window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-            view.cacheDisplay(in: view.bounds, to: rep)
-            try? rep.representation(using: .png, properties: [:])?.write(to: file)
-            print("[greenroom] the screen is locked: \(file.lastPathComponent) is AppKit's drawing, without the video")
+        } else if let view = workbench.window.contentView, let root = view.layer {
+            // The layer tree rendered by Core Animation: shape and text layers, backgrounds and the glass panes' own
+            // fills come out; the video and the glass blur do not.
+            let scale = workbench.window.backingScaleFactor
+            let w = Int(view.bounds.width * scale), h = Int(view.bounds.height * scale)
+            guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            ctx.setFillColor(Design.stage.cgColor)
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.scaleBy(x: scale, y: scale)
+            root.render(in: ctx)
+            if let image = ctx.makeImage() { try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file) }
+            print("[greenroom] the screen is locked: \(file.lastPathComponent) is Core Animation's drawing, without the video or blur")
         }
     }
 

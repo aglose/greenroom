@@ -345,16 +345,28 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let rails: [(String, String, String, Selector)] = [
             ("device", "slider.horizontal.3", "Device controls", #selector(toggleDevicePane(_:))),
             ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
+            ("diagnostics", "stethoscope", "Diagnostics: performance, accessibility, background work", #selector(toggleDiagnostics(_:))),
+            ("-", "", "", #selector(toggleLog(_:))),
             ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
-            ("tests", "checkmark.circle", "Tests: run an androidTest APK", #selector(toggleTests(_:))),
-            ("diagnostics", "stethoscope", "Diagnostics", #selector(toggleDiagnostics(_:))),
-            ("recordings", "film", "Recordings: replay, and find the first build that differs", #selector(toggleRecordings(_:))),
             ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
             ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
-            ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
+            ("-", "", "", #selector(toggleLog(_:))),
+            ("tests", "checkmark.circle", "Tests: run an androidTest APK", #selector(toggleTests(_:))),
             ("snapshots", "photo.stack", "Screenshot tests", #selector(toggleSnapshots(_:))),
+            ("recordings", "film", "Recordings: replay, and find the first build that differs", #selector(toggleRecordings(_:))),
+            ("-", "", "", #selector(toggleLog(_:))),
+            ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
         ]
-        let column = NSStackView(views: rails.map { id, symbol, label, action in
+        // Four groups, a hairline between them: the device, what it does over time, checking builds, the agent.
+        let column = NSStackView(views: rails.map { id, symbol, label, action -> NSView in
+            if id == "-" {
+                let line = NSView()
+                line.wantsLayer = true
+                line.layer?.backgroundColor = Design.stroke.cgColor
+                line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+                line.widthAnchor.constraint(equalToConstant: 22).isActive = true
+                return line
+            }
             let b = GlassButton(symbol: symbol, label: label, target: self, action: action)
             railButtons[id] = b
             return b
@@ -365,9 +377,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         column.translatesAutoresizingMaskIntoConstraints = false
         rail.addSubview(column)
 
-        for v in [networkPane, devicePane, testsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
-        for v in [networkPane, devicePane, diagnosticsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
-        for v in [networkPane, devicePane, recordingsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        // Panes first, then the bar and rail over them, then the palette's veil and the palette on top.
+        for v in [networkPane, devicePane, testsPane, diagnosticsPane, recordingsPane, header, rail, scrim, palette] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(v)
+        }
         scrim.isHidden = true
         palette.isHidden = true
         installSnapshotReview(in: host)
@@ -743,6 +757,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     }
 
     var network: NetworkPane { networkPane }
+    var timelineDock: TimelineDock { timeline }
     var recordingsView: RecordingsPane { recordingsPane }
 
     /// The playhead dragged to a moment, as a person would (for scripted checks).
