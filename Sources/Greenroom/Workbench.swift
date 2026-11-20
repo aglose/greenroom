@@ -51,16 +51,24 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var gridTrailing: NSLayoutConstraint!
     private var timelineHeight: NSLayoutConstraint!
     private var networkLeading: NSLayoutConstraint!
-    private(set) var showingNetwork = false
+    /// The right-hand slot holds one pane at a time; opening one sends the one there away.
+    enum RightPane { case device, network, tests, diagnostics }
+    private(set) var rightPane: RightPane?
+    var showingNetwork: Bool { rightPane == .network }
+    var showingDevice: Bool { rightPane == .device }
+    var showingTests: Bool { rightPane == .tests }
+    var showingDiagnostics: Bool { rightPane == .diagnostics }
     private let devicePane = DevicePane(frame: .zero)
     private var deviceLeading: NSLayoutConstraint!
-    private(set) var showingDevice = false
     private static let deviceWidth: CGFloat = 384
     // Tests pane (right slot, shared with Device and Network).
     private let testsPane = TestsPane(frame: .zero)
     private var testsLeading: NSLayoutConstraint!
-    private(set) var showingTests = false
     private static let testsWidth: CGFloat = 520
+    // Diagnostics pane (extras): performance, accessibility audit, background work, clipboard, skin.
+    private let diagnosticsPane = DiagnosticsPane(frame: .zero)
+    private var diagnosticsLeading: NSLayoutConstraint!
+    private static let diagnosticsWidth: CGFloat = 420
     private let emptyStage = EmptyStage(frame: .zero)
     let toast = Toast(frame: .zero)
     let palette = Palette(frame: .zero)
@@ -258,6 +266,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if showingNetwork { networkPane.follow(selected) }
         if showingDevice { devicePane.follow(selected) }
         testsPane.follow(selected)
+        if showingDiagnostics { diagnosticsPane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
         rows = []
         if !sims.isEmpty {
@@ -330,6 +339,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
             ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
             ("tests", "checkmark.circle", "Tests: run an androidTest APK", #selector(toggleTests(_:))),
+            ("diagnostics", "stethoscope", "Diagnostics", #selector(toggleDiagnostics(_:))),
             ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
             ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
             ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
@@ -346,6 +356,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         rail.addSubview(column)
 
         for v in [networkPane, devicePane, testsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        for v in [networkPane, devicePane, diagnosticsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
         scrim.isHidden = true
         palette.isHidden = true
         scrim.onClick = { [weak self] in self?.hidePalette() }
@@ -357,6 +368,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         testsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         testsPane.follow(selected)
         testsLeading = testsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
+        diagnosticsPane.isHidden = true
+        wireDiagnostics()
+        diagnosticsLeading = diagnosticsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         devicePane.targets = { [weak self] in
             guard let self else { return [] }
             return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
@@ -389,6 +403,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             testsPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             testsPane.widthAnchor.constraint(equalToConstant: Self.testsWidth),
             testsLeading,
+            diagnosticsPane.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            diagnosticsPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            diagnosticsPane.widthAnchor.constraint(equalToConstant: Self.diagnosticsWidth),
+            diagnosticsLeading,
             rail.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
             column.topAnchor.constraint(equalTo: rail.topAnchor),
             column.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
@@ -433,6 +451,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         railButtons["network"]?.isOn = showingNetwork
         railButtons["device"]?.isOn = showingDevice
         railButtons["tests"]?.isOn = showingTests
+        railButtons["diagnostics"]?.isOn = showingDiagnostics
         railButtons["timeline"]?.isOn = showingTimeline
         timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
@@ -443,6 +462,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     @objc func toggleDevicePane(_ sender: Any?) { setShowingDevice(!showingDevice) }
     @objc func toggleTests(_ sender: Any?) { setShowingTests(!showingTests) }
+    @objc func toggleDiagnostics(_ sender: Any?) { setShowingDiagnostics(!showingDiagnostics) }
 
     // MARK: Command palette
 
@@ -565,6 +585,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         add("compare", comparing ? "Stop comparing" : "Compare the devices", "View", "plusminus", "⇧⌘D") { [weak self] in self?.toggleCompare(nil) }
         add("mirror", mirror ? "Stop mirroring input" : "Mirror input to every device", "View", "dot.radiowaves.left.and.right", "⇧⌘M") { [weak self] in self?.toggleMirror(nil) }
         add("pane.device", showingDevice ? "Hide device controls" : "Show device controls", "Panes", "slider.horizontal.3") { [weak self] in self?.toggleDevicePane(nil) }
+        add("pane.diagnostics", showingDiagnostics ? "Hide diagnostics" : "Show diagnostics", "Panes", "stethoscope", keywords: "performance fps memory cpu accessibility background clipboard skin") { [weak self] in self?.toggleDiagnostics(nil) }
+        add("diagnostics.audit", "Audit accessibility", "Panes", "checklist", keywords: "a11y labels touch targets") { [weak self] in self?.auditAccessibility() }
         add("pane.network", showingNetwork ? "Hide network" : "Show network", "Panes", "arrow.up.arrow.down", keywords: "requests http") { [weak self] in self?.toggleNetwork(nil) }
         add("tests.run", "Run tests…", "Tests", "checkmark.circle", keywords: "androidtest instrument espresso") { [weak self] in self?.runTests() }
         add("pane.tests", showingTests ? "Hide tests" : "Show tests", "Panes", "checkmark.circle", keywords: "androidtest instrument espresso") { [weak self] in self?.toggleTests(nil) }
@@ -585,26 +607,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     /// The network pane slides in from the right; the stage makes room as it comes. It shares the place with the
     /// device pane: opening one sends the other away.
-    func setShowingNetwork(_ on: Bool) {
-        showingNetwork = on
-        if on { showingDevice = false; showingTests = false; testsPane.setActive(false) }
-        networkPane.follow(on ? selected : nil)
-        layoutRightSlot()
-    }
-
-    func setShowingDevice(_ on: Bool) {
-        showingDevice = on
-        if on { showingNetwork = false; networkPane.follow(nil); showingTests = false; testsPane.setActive(false) }
-        devicePane.follow(on ? selected : nil)
-        layoutRightSlot()
-    }
-
-    func setShowingTests(_ on: Bool) {
-        showingTests = on
-        if on { showingNetwork = false; networkPane.follow(nil); showingDevice = false; devicePane.follow(nil) }
-        testsPane.setActive(on)
-        layoutRightSlot()
-    }
+    func setShowingNetwork(_ on: Bool) { show(on ? .network : nil, closing: .network) }
+    func setShowingDevice(_ on: Bool) { show(on ? .device : nil, closing: .device) }
+    func setShowingTests(_ on: Bool) { show(on ? .tests : nil, closing: .tests) }
 
     /// "Run tests…": the pane opens, and runs at once when both APKs are known, else asks for the test APK.
     private func runTests() {
@@ -613,23 +618,63 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     }
 
     var tests: TestsPane { testsPane }
+    func setShowingDiagnostics(_ on: Bool) { show(on ? .diagnostics : nil, closing: .diagnostics) }
+
+    /// The palette's "Audit accessibility": opens the pane if needed and runs the audit.
+    func auditAccessibility() {
+        if !showingDiagnostics { setShowingDiagnostics(true) }
+        diagnosticsPane.audit()
+    }
+
+    var diagnostics: DiagnosticsPane { diagnosticsPane }
+
+    /// The pane's marks, outlines and fps chips go to the device views (the view of the simulator it names).
+    private func wireDiagnostics() {
+        func view(_ sim: Simulator) -> SimulatorView? { grid.views.first { $0.simulator === sim } }
+        diagnosticsPane.devices = { Engine.shared.simulators.filter { $0.state == .running } }
+        diagnosticsPane.onMarks = { sim, boxes in view(sim)?.boxes = boxes }
+        diagnosticsPane.onOutline = { [weak self] sim, rect in if self?.inspecting != true { view(sim)?.outlined = rect } }
+        diagnosticsPane.onChip = { sim, text in view(sim)?.captionExtra = text ?? "" }
+        diagnosticsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+    }
+
+    /// Puts `pane` in the right slot (nil: empties it, when `closing` is the one there now). The pane that leaves
+    /// stops following its device, so nothing it shows keeps polling.
+    func show(_ pane: RightPane?, closing: RightPane? = nil) {
+        if pane == nil, let closing, rightPane != closing { return }
+        let old = rightPane
+        rightPane = pane
+        if old != pane, let old { activate(old, false) }
+        if let pane { activate(pane, true) }
+        layoutRightSlot()
+    }
+
+    private func activate(_ pane: RightPane, _ on: Bool) {
+        switch pane {
+        case .device: devicePane.follow(on ? selected : nil)
+        case .network: networkPane.follow(on ? selected : nil)
+        case .tests: testsPane.setActive(on)
+        case .diagnostics: diagnosticsPane.follow(on ? selected : nil)
+        }
+    }
+
+    /// Each pane of the slot: its view, the constraint that slides it, its width.
+    private var slot: [(RightPane, NSView, NSLayoutConstraint, CGFloat)] {
+        [(.device, devicePane, deviceLeading, Self.deviceWidth), (.network, networkPane, networkLeading, Self.networkWidth),
+         (.tests, testsPane, testsLeading, Self.testsWidth), (.diagnostics, diagnosticsPane, diagnosticsLeading, Self.diagnosticsWidth)]
+    }
 
     private func layoutRightSlot() {
         guard let host = networkPane.superview else { return }
-        if showingNetwork { networkPane.isHidden = false }
-        if showingDevice { devicePane.isHidden = false }
-        if showingTests { testsPane.isHidden = false }
-        let width = showingNetwork ? Self.networkWidth : showingDevice ? Self.deviceWidth : showingTests ? Self.testsWidth : 0
+        let panes = slot
+        for (p, view, _, _) in panes where p == rightPane { view.isHidden = false }
+        let width = panes.first { $0.0 == rightPane }?.3 ?? 0
         Design.animate(Design.move, {
-            self.networkLeading.animator().constant = self.showingNetwork ? -(Self.networkWidth + 68) : 20
-            self.deviceLeading.animator().constant = self.showingDevice ? -(Self.deviceWidth + 68) : 20
-            self.testsLeading.animator().constant = self.showingTests ? -(Self.testsWidth + 68) : 20
+            for (p, _, leading, w) in panes { leading.animator().constant = p == self.rightPane ? -(w + 68) : 20 }
             self.gridTrailing.animator().constant = width > 0 ? -(width + 80) : -64
             host.layoutSubtreeIfNeeded()
         }, done: {
-            if !self.showingNetwork { self.networkPane.isHidden = true }
-            if !self.showingDevice { self.devicePane.isHidden = true }
-            if !self.showingTests { self.testsPane.isHidden = true }
+            for (p, view, _, _) in self.slot where p != self.rightPane { view.isHidden = true }
         })
         updateChrome()
     }

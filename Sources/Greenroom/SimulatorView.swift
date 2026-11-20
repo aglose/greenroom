@@ -56,6 +56,8 @@ final class SimulatorView: NSView {
     /// While inspecting, the pointer picks nodes and touches are not sent to the app.
     var inspecting = false { didSet { updateTracking() } }
     var onPoint: ((Int, Int) -> Void)?
+    /// Extra text at the end of the caption (the Diagnostics pane's live fps); empty for none.
+    var captionExtra = "" { didSet { if captionExtra != oldValue { updateCaption() } } }
     private let outlineLayer = CAShapeLayer()
     private var tracking: NSTrackingArea?
     private let boxLayer = CAShapeLayer()
@@ -292,6 +294,7 @@ final class SimulatorView: NSView {
         let text = NSMutableAttributedString(string: kindName, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink])
         var rest = "   \(sim.name)"
         if size.width > 0 { rest += "   \(Int(size.width))×\(Int(size.height))" }
+        if !captionExtra.isEmpty { rest += "   ·   \(captionExtra)" }
         text.append(NSAttributedString(string: rest, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.mute]))
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
