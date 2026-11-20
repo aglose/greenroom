@@ -64,7 +64,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
-    private var selected: Simulator?
+    private(set) var selected: Simulator?
 
     private enum Row {
         case header(String)
@@ -104,6 +104,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let stack = StageBackground()
         for v in [grid, emptyStage, compareBar, timeline, logPanel, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
         emptyStage.onOpen = { [weak self] in self?.open($0) }
+        DevHooks.shared.install(workbench: self, in: stack, over: grid)   // developer hooks (DevHooks.swift)
         emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
         timeline.isHidden = true
         compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
@@ -207,7 +208,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         code == 0 ? "\(sim.name) has quit" : "\(sim.name) ended (exit \(code)). Help > Show Simulator Logs has the details."
     }
 
-    private func select(_ sim: Simulator?) {
+    func select(_ sim: Simulator?) {
         selected = sim
         window.subtitle = sim?.name ?? ""
         reload()
@@ -542,6 +543,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             add(isRecording ? "rec.stop" : "rec.start", isRecording ? "Stop recording" : "Start recording", "Record", "record.circle", "⌥⌘R") { [weak self] in self?.toggleRecording(nil) }
             if isRecording { add("rec.save", "Save recording", "Record", "square.and.arrow.down", "⇧⌘S") { [weak self] in self?.saveRecordingAndShow(nil) } }
         }
+        out += DevHooks.shared.paletteItems(for: selected)   // developer hooks (DevHooks.swift)
         // Layout and panes.
         add("layout.one", "Show one device", "View", "iphone") { [weak self] in self?.setSideBySide(false) }
         add("layout.all", "Show every device side by side", "View", "rectangle.split.2x1", "⌘\\") { [weak self] in self?.showAll(nil) }
@@ -654,6 +656,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             menu.addItem(withTitle: "Restart App", action: #selector(restart(_:)), keyEquivalent: "").target = self
             menu.addItem(withTitle: "Close Simulator", action: #selector(closeSelected(_:)), keyEquivalent: "").target = self
         }
+        menu.addItem(.separator())
+        menu.addItem(DevHooks.shared.submenuItem(for: selected))   // Developer ▸ (DevHooks.swift)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
 

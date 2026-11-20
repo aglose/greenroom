@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         motionCheckIfAsked()
         paletteCheckIfAsked()
         mockCheckIfAsked()
+        devHooksCheckIfAsked()
     }
 
     /// `Greenroom --mock-check DIR APK`: the test app fetches a page; the request is failed from the network pane and
@@ -389,6 +390,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// `Greenroom --devhooks-check DIR APK`: see DevHooksCheck.
+    private func devHooksCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--devhooks-check"), i + 2 < args.count else { return }
+        DevHooksCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2])) { [self] in captureWindow(to: $0) }
     }
 
     private func defaults_forgetRecent(_ apk: URL) {
