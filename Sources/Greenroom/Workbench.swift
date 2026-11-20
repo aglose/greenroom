@@ -54,11 +54,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     // MARK: Opening and selecting
 
-    func open(_ apk: URL) {
+    func open(_ apk: URL, remember: Bool = true) {
         do {
             let sim = try Engine.shared.open(apk: apk)
-            Recents.add(apk)
-            NSDocumentController.shared.noteNewRecentDocumentURL(apk)
+            if remember {
+                Recents.add(apk)
+                NSDocumentController.shared.noteNewRecentDocumentURL(apk)
+            }
             sim.onState = { [weak self, weak sim] state in
                 guard let self, let sim else { return }
                 if self.selected === sim {
@@ -291,6 +293,27 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func validateToolbarItem(_ item: NSToolbarItem) -> Bool { live != nil || (item.itemIdentifier.rawValue == "close" && selected != nil) }
 
     private var live: Simulator? { selected?.state == .running ? selected : nil }
+
+    /// A click made as the mouse would make it, at a fraction of the simulator view's size (for scripted checks).
+    func debugClick(atFraction f: CGPoint) {
+        let v = simulatorView
+        let p = v.convert(CGPoint(x: v.bounds.width * f.x, y: v.bounds.height * f.y), to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { continue }
+            if type == .leftMouseDown { v.mouseDown(with: e) } else { v.mouseUp(with: e) }
+        }
+    }
+
+    /// Text typed as the keyboard would type it, a key press per character (for scripted checks).
+    func debugType(_ text: String) {
+        for ch in text {
+            guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil, characters: String(ch),
+                                           charactersIgnoringModifiers: String(ch), isARepeat: false, keyCode: 0) else { continue }
+            simulatorView.keyDown(with: e)
+        }
+    }
 
     @objc func back(_ sender: Any?) { live?.send("back") }
     @objc func home(_ sender: Any?) { live?.send("home") }

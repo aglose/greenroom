@@ -12,21 +12,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowShotIfAsked()
     }
 
-    /// `Greenroom --window-shot FILE [APK]`: for checking the layout from a script. Opens the APK, waits, writes the
-    /// window as AppKit draws it to FILE (the video layer is composited elsewhere and stays blank) and quits.
+    /// `Greenroom --visual-check DIR APK`: for looking at the workbench from a script. Opens the APK and writes
+    /// pictures of the real window (as the window server composites it, video included) into DIR at each step:
+    /// launch, a click, typing, dark appearance, rotated, tablet. Beside each, the engine's own pixels (`*-engine.png`).
     private func windowShotIfAsked() {
         let args = CommandLine.arguments
-        guard let i = args.firstIndex(of: "--window-shot"), i + 1 < args.count else { return }
-        if i + 2 < args.count { workbench.open(URL(fileURLWithPath: args[i + 2])) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [self] in
-            if let frame = workbench.window.contentView?.superview, let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) {
-                frame.cacheDisplay(in: frame.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+        guard let i = args.firstIndex(of: "--visual-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false)
+        try? FileManager.default.createDirectory(at: Engine.shared.screenshots, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] timer in
+            waited += 0.25
+            guard let sim = Engine.shared.simulators.first else { return }
+            guard sim.framesShown > 0 || waited > 90 else { return }
+            timer.invalidate()
+            let steps: [(String, Double, () -> Void)] = [
+                ("1-launch", 5, {}),
+                ("2-click", 2, { self.workbench.debugClick(atFraction: CGPoint(x: 0.5, y: 0.5)) }),
+                ("2b-typed", 2, { self.workbench.debugType("typed in Greenroom") }),
+                ("3-dark", 3, { self.workbench.appearance(nil) }),
+                ("4-rotated", 3, { self.workbench.rotate(nil) }),
+                ("5-tablet", 4, { self.workbench.rotate(nil); sim.send("device tablet") }),
+            ]
+            var at = 0.0
+            for (name, wait, action) in steps {
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { action() }
+                at += wait
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { [self] in
+                    captureWindow(to: dir.appendingPathComponent("\(name).png"))
+                    sim.send("shot screenshots/vc-\(name).png") { _ in
+                        let from = Engine.shared.screenshots.appendingPathComponent("vc-\(name).png")
+                        let to = dir.appendingPathComponent("\(name)-engine.png")
+                        try? FileManager.default.removeItem(at: to)
+                        try? FileManager.default.moveItem(at: from, to: to)
+                    }
+                    sim.send("stats") { print("[greenroom] \(name): device \(Int(sim.deviceSize.width))x\(Int(sim.deviceSize.height)) frames \(sim.framesShown) \($0.split(separator: " ").filter { $0.hasPrefix("lastDown") || $0.hasPrefix("frames=") }.joined(separator: " "))") }
+                }
+                at += 0.6
             }
-            let sims = Engine.shared.simulators
-            print("[greenroom] window-shot: \(sims.count) simulators, first \(sims.first.map { "\($0.state) \($0.framesShown) frames" } ?? "none")")
-            NSApp.terminate(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + at + 1) { NSApp.terminate(nil) }
         }
+    }
+
+    /// The window as it is on screen. CGWindowListCreateImage is gone from the SDK's headers but still there, and
+    /// needs no screen-recording permission for the process's own window.
+    private func captureWindow(to file: URL) {
+        typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { return }
+        let capture = unsafeBitCast(sym, to: Capture.self)
+        // .optionIncludingWindow = 8; .boundsIgnoreFraming | .bestResolution = 1 | 8
+        guard let image = capture(.null, 8, UInt32(workbench.window.windowNumber), 9)?.takeRetainedValue() else { return }
+        try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file)
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
