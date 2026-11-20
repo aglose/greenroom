@@ -23,12 +23,16 @@ version of it and adds the workbench.
   over pixels that differ, and a summary under the pictures. With Mirror Input, two builds are driven as one.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
+- **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.
+- **Record** (⌥⌘R) turns the engine's flight recorder on: input, log, network, database and screen for the last
+  minutes. File > Save Recording writes a `.apkrec` bundle; Save Recording and Open Timeline shows it in the
+  engine's trace viewer, as does opening a `.apkrec` file. Bundles replay with `apksim replay`.
 - **Agents** drive the same simulators over the Model Context Protocol: the screen as compact text with stable
   references, every action answered with what changed, checks and waits in one call
   ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.md)). The toolbar's Agent button shows what an agent did and
   can pause it.
 
-Still to come: a timeline of recorded sessions, differences in network calls and frame timings.
+Still to come: the timeline and network inspector inside the window, replay and bisect from the app, differences in network calls and frame timings.
 
 How a simulator gets on screen: the engine runs headless, sends its screen as H.264 over a loopback connection, and
 the app shows it with `AVSampleBufferDisplayLayer`; input goes back over the engine's control channel

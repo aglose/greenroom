@@ -19,6 +19,12 @@
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
+      <key>CFBundleTypeName</key><string>apksim recording</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Default</string>
+      <key>LSItemContentTypes</key><array><string>dev.apksim.recording</string></array>
+    </dict>
+    <dict>
       <key>CFBundleTypeName</key><string>Android package</string>
       <key>CFBundleTypeRole</key><string>Viewer</string>
       <key>LSHandlerRank</key><string>Default</string>
@@ -27,6 +33,13 @@
   </array>
   <key>UTImportedTypeDeclarations</key>
   <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>dev.apksim.recording</string>
+      <key>UTTypeDescription</key><string>apksim recording</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string><string>public.archive</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>apkrec</string></array></dict>
+    </dict>
     <dict>
       <key>UTTypeIdentifier</key><string>com.android.package-archive</string>
       <key>UTTypeDescription</key><string>Android package</string>

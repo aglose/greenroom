@@ -20,6 +20,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var inspectTimer: Timer?
     private let compareBar = NSTextField(wrappingLabelWithString: "")
     private var compareHeight: NSLayoutConstraint!
+    /// The log panel under the simulators, and whether the flight recorder is on for the chosen simulator.
+    private let logPanel = LogPanel(frame: .zero)
+    private var logHeight: NSLayoutConstraint!
+    private(set) var showingLog = false
+    private var recording = Set<ObjectIdentifier>()
     private let compareQueue = DispatchQueue(label: "greenroom-compare")
     private var compareScheduled = false
     private var compareTimer: Timer?
@@ -41,13 +46,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private static let hint = "Drop an APK here, or press ⌘O"
 
     override init() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 780),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         super.init()
         window.title = "Greenroom"
         window.isReleasedWhenClosed = false
-        window.contentMinSize = NSSize(width: 620, height: 460)
+        window.contentMinSize = NSSize(width: 760, height: 480)
         window.toolbarStyle = .unified
 
         let split = NSSplitViewController()
@@ -64,8 +69,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let stack = NSView()
         stack.wantsLayer = true
         stack.layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor   // one surface with the simulators above
-        for v in [grid, compareBar] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        for v in [grid, compareBar, logPanel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
         compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
+        logHeight = logPanel.heightAnchor.constraint(equalToConstant: 0)
+        logPanel.isHidden = true
         NSLayoutConstraint.activate([
             grid.topAnchor.constraint(equalTo: stack.topAnchor),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
@@ -73,8 +80,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             grid.bottomAnchor.constraint(equalTo: compareBar.topAnchor),
             compareBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
             compareBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
-            compareBar.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: -8),
+            compareBar.bottomAnchor.constraint(equalTo: logPanel.topAnchor, constant: -8),
             compareHeight,
+            logPanel.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            logPanel.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            logPanel.bottomAnchor.constraint(equalTo: stack.bottomAnchor),
+            logHeight,
         ])
         content.view = DropTarget(content: stack) { [weak self] in self?.open($0) }
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
@@ -88,14 +99,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             self.grid.view(for: sim)?.outlined = node?.frame
         }
         window.contentViewController = split
-        window.setContentSize(NSSize(width: 900, height: 760))
+        window.setContentSize(NSSize(width: 1080, height: 780))
 
         let toolbar = NSToolbar(identifier: "workbench")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         window.toolbar = toolbar
 
-        window.setFrameAutosaveName("Workbench")
+        window.setFrameAutosaveName("Workbench2")   // a new name: the first layout's saved size was too narrow for the toolbar
         if window.frame.origin == .zero { window.center() }
         Engine.shared.onChange = { [weak self] in self?.reload() }
         reload()
@@ -173,6 +184,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let sims = Engine.shared.simulators
         if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
         refreshGrid()
+        if showingLog { logPanel.follow(selected) }
         rows = []
         if !sims.isEmpty {
             rows.append(.header("Running"))
@@ -333,17 +345,19 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         Tool(id: "compare", label: "Compare", symbol: "plusminus.circle", command: #selector(toggleCompare(_:))),
         Tool(id: "agent", label: "Agent", symbol: "sparkles", command: #selector(showAgent(_:))),
         Tool(id: "inspect", label: "Inspector", symbol: "scope", command: #selector(toggleInspector(_:))),
+        Tool(id: "record", label: "Record", symbol: "record.circle", command: #selector(toggleRecording(_:))),
+        Tool(id: "log", label: "Log", symbol: "text.alignleft", command: #selector(toggleLog(_:))),
     ]
     private static let devices = ["phone", "foldable", "tablet", "desktop", "tv"]
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "compare", "agent", "flex", "shot", "inspect"].map {
+        ["back", "rotate", "appearance", "device", "flex", "grid", "mirror", "compare", "flex", "agent", "record", "shot", "log", "inspect"].map {
             $0 == "flex" ? .flexibleSpace : NSToolbarItem.Identifier($0)
         }
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar) + ["restart", "close"].map { NSToolbarItem.Identifier($0) }   // also in the Device menu
+        toolbarDefaultItemIdentifiers(toolbar) + ["home", "restart", "close"].map { NSToolbarItem.Identifier($0) }   // also in the Device menu
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
@@ -405,6 +419,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             item.image = Self.toggleImage("plusminus.circle", on: comparing, label: item.label)
             item.toolTip = comparing ? "Compare: differences from the chosen simulator are marked" : "Compare: mark what differs between the simulators"
             return Engine.shared.simulators.count > 1 || comparing
+        case "record":
+            item.image = isRecording ? NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: item.label)?
+                .withSymbolConfiguration(.init(paletteColors: [.systemRed])) : NSImage(systemSymbolName: "record.circle", accessibilityDescription: item.label)
+            item.toolTip = isRecording ? "Recording: File > Save Recording keeps the last minutes" : "Record input, log, network and screen for replay"
+            return live != nil
+        case "log":
+            item.image = Self.toggleImage("text.alignleft", on: showingLog, label: item.label)
+            return true
         case "inspect":
             item.image = Self.toggleImage("scope", on: inspecting, label: item.label)
             item.toolTip = inspecting ? "Inspector: clicks on the chosen simulator pick nodes" : "Inspector: see the nodes on screen"
@@ -431,6 +453,97 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     /// The simulators a toolbar command goes to: the chosen one, or every running one while input is mirrored.
     private var targets: [Simulator] {
         mirror ? Engine.shared.simulators.filter { $0.state == .running } : (live.map { [$0] } ?? [])
+    }
+
+    // MARK: Log and recordings
+
+    @objc func toggleLog(_ sender: Any?) { setShowingLog(!showingLog) }
+
+    func setShowingLog(_ on: Bool) {
+        showingLog = on
+        logPanel.isHidden = !on
+        logHeight.constant = on ? 190 : 0
+        logPanel.follow(on ? selected : nil)
+        window.toolbar?.validateVisibleItems()
+    }
+
+    /// The log lines shown (for scripted checks).
+    var logLines: [String] { logPanel.shown }
+
+    var isRecording: Bool { selected.map { recording.contains(ObjectIdentifier($0)) } ?? false }
+
+    /// The flight recorder for the chosen simulator: input, log, network, database and screen for the last while,
+    /// kept in the engine until saved. Recording takes checkpoints the app can notice (a brief stop and start), so
+    /// it is off until asked for.
+    @objc func toggleRecording(_ sender: Any?) {
+        guard let sim = live else { return }
+        let key = ObjectIdentifier(sim)
+        let on = !recording.contains(key)
+        sim.send(on ? "rec on all" : "rec off all") { [weak self] answer in
+            guard let self else { return }
+            if answer.hasPrefix("error") { self.window.subtitle = "Recorder: \(answer)"; return }
+            if on { self.recording.insert(key) } else { self.recording.remove(key) }
+            self.window.subtitle = on ? "Recording \(sim.name)" : sim.name
+            self.window.toolbar?.validateVisibleItems()
+        }
+    }
+
+    var recordings: URL { Engine.shared.engineState.appendingPathComponent("recordings", isDirectory: true) }
+
+    /// Saves what the recorder holds as a .apkrec bundle and shows it. `done` gets the file, or nil with the reason.
+    func saveRecording(done: ((URL?, String) -> Void)? = nil) {
+        guard let sim = live else { done?(nil, "no running simulator"); return }
+        try? FileManager.default.createDirectory(at: recordings, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyyMMdd-HHmmss"
+        let name = "\(sim.name.replacingOccurrences(of: " ", with: "-"))-\(stamp.string(from: Date())).apkrec"
+        let file = recordings.appendingPathComponent(name)
+        sim.send("rec save recordings/\(name)") { [weak self] answer in
+            guard let self else { return }
+            if answer.hasPrefix("error") {
+                self.window.subtitle = "Recording not saved: \(answer)"
+                done?(nil, answer)
+                return
+            }
+            // The engine answers at once and writes the bundle after: wait until the file is there and has stopped growing.
+            self.window.subtitle = "Saving the recording…"
+            var tries = 0, lastSize = -1
+            Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { timer in
+                tries += 1
+                let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? -1
+                if size > 0, size == lastSize {
+                    timer.invalidate()
+                    self.window.subtitle = "Saved \(name)"
+                    done?(file, answer)
+                } else if tries > 100 {
+                    timer.invalidate()
+                    self.window.subtitle = "Recording not saved: the engine wrote no file"
+                    done?(nil, answer)
+                }
+                lastSize = size
+            }
+        }
+    }
+
+    @objc func saveRecordingAndShow(_ sender: Any?) {
+        saveRecording { file, _ in if let file { NSWorkspace.shared.activateFileViewerSelecting([file]) } }
+    }
+
+    /// Opens a recording in the engine's trace viewer (a page it serves on this Mac only, in the default browser).
+    func view(recording file: URL) {
+        let p = Process()
+        p.executableURL = Engine.shared.launcher
+        p.arguments = ["rec", "view", file.path]
+        var env = ProcessInfo.processInfo.environment
+        env["APKSIM_HOME"] = Engine.shared.engineState.path
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+    }
+
+    @objc func saveRecordingAndView(_ sender: Any?) {
+        saveRecording { [weak self] file, _ in if let file { self?.view(recording: file) } }
     }
 
     // MARK: Inspecting

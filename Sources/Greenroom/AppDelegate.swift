@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowShotIfAsked()
         compareCheckIfAsked()
         inspectCheckIfAsked()
+        recordCheckIfAsked()
     }
 
     /// `Greenroom --visual-check DIR APK`: for looking at the workbench from a script. Opens the APK and writes
@@ -134,6 +135,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// `Greenroom --record-check DIR APK`: opens the APK with the log panel, records, taps, saves the recording
+    /// into the state folder and reports it; captures the window.
+    private func recordCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--record-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let sim = workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false) else { return }
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] timer in
+            waited += 0.25
+            guard (sim.state == .running && sim.framesShown > 0) || waited > 120 else { return }
+            timer.invalidate()
+            workbench.setShowingLog(true)
+            workbench.toggleRecording(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in workbench.debugClick(atFraction: CGPoint(x: 0.5, y: 0.5)) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [self] in
+                captureWindow(to: dir.appendingPathComponent("r1-log.png"))
+                let recording = workbench.isRecording
+                workbench.saveRecording { [self] file, answer in
+                    let size = file.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int } ?? 0
+                    print("[greenroom] record: on=\(recording) log lines \(workbench.logLines.count) saved \(file?.lastPathComponent ?? "nothing") \(size) bytes | \(answer.prefix(160))")
+                    if let file { try? FileManager.default.copyItem(at: file, to: dir.appendingPathComponent("check.apkrec")) }
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+    }
+
     private func defaults_forgetRecent(_ apk: URL) {
         var paths = UserDefaults.standard.stringArray(forKey: "recentApks") ?? []
         paths.removeAll { $0 == apk.path }
@@ -174,7 +204,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        urls.forEach { workbench.open($0) }
+        for url in urls {
+            if url.pathExtension.lowercased() == "apkrec" { workbench.view(recording: url) } else { workbench.open(url) }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -230,6 +262,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         file.addItem(to(workbench: #selector(Workbench.compareWithAPK(_:)), "Compare With APK…", "O", [.command, .shift]))
         file.addItem(item("Clear Recent APKs", #selector(clearRecents(_:)), ""))
         file.addItem(.separator())
+        file.addItem(to(workbench: #selector(Workbench.toggleRecording(_:)), "Record", "r", [.command, .option]))
+        file.addItem(to(workbench: #selector(Workbench.saveRecordingAndShow(_:)), "Save Recording", "S", [.command, .shift]))
+        file.addItem(to(workbench: #selector(Workbench.saveRecordingAndView(_:)), "Save Recording and Open Timeline", "S", [.command, .option]))
+        file.addItem(.separator())
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         main.addItem(submenu(file, title: "File"))
 
@@ -260,6 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         win.addItem(to(workbench: #selector(Workbench.showAgent(_:)), "Agent Activity", "A", [.command, .option]))
         win.addItem(to(workbench: #selector(Workbench.toggleInspector(_:)), "Inspector", "i", [.command, .option]))
+        win.addItem(to(workbench: #selector(Workbench.toggleLog(_:)), "Log", "L", [.command, .shift]))
 
         let help = NSMenu(title: "Help")
         help.addItem(item("Show Simulator Logs", #selector(showLogs(_:)), ""))
