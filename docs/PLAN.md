@@ -4,21 +4,24 @@ A native Mac app, shipped as a signed and notarized DMG, that hosts many simulat
 usable by an LLM agent as by a person. The app is **Greenroom**, in its own public repository
 (https://github.com/aglose/greenroom), bundling a released apksim; "Apksim.app" below means it.
 
-Status 2026-11-19: phase 0's S0 done; phase 1 begun in the app's repository (the app opens APKs in the bundled
-engine's own window; `scripts/bundle.sh` embeds a pinned release, signs all 81 binaries with the hardened runtime
-and smoke-tests it; state in a 700 folder; the training app bundled, so no first-run download). Also there: an icon, `scripts/dmg.sh` (a 339 MB image for engine 0.53.0, which mounts and runs the app read-only;
-`--notarize` written, not run: the Mac has no Developer ID certificate yet), CI and a tag-driven release workflow.
-Left in phase 1: the Developer ID certificate and notary secrets (the owner's, steps in the app's
-docs/RELEASING.md), a first notarized release, Sparkle, first-run training shown in the app.
-Later the same day, in the app's repository: the first notarized image (0.1.0: Developer ID, app and image
-accepted and stapled); the workbench (phase 2's start: simulators inside the app's window on the H.264 stream,
-input over the control channel, sidebar, device toolbar; Side by Side and Mirror Input); the agent interface
-(phase 3: MCP served by the app behind a token, `Greenroom --mcp` as the stdio shim, 16 tools with stable
-references and change reports; a scripted session passes locally and in CI; no real agent client has used it yet);
-Compare (phase 4's start: node and pixel differences between simulators, marked in the window and as an agent
-tool). The engine's control channel: apksim's pull request 552 refuses a web page's POST and adds `--control-token-file`;
-the app uses a token per simulator when its engine has the option (the bundled 0.53.0 does not yet). Not started:
-shared surfaces (S1), hot swap (S2), the inspector, the timeline, network and frame-timing differences, Sparkle.
+## Status (2026-11-19, evening)
+
+| Phase | Done | Not done |
+| --- | --- | --- |
+| 0. Spikes | S0 hardened runtime | S1 shared surfaces, S2 hot swap |
+| 1. App in a DMG | The app, icon, document types, bundling and signing of every binary, notarized and stapled images (0.1.0, 0.3.0, locally), CI, a release workflow | A published GitHub release (the workflow's secrets are unset, so it has never run), Sparkle, training progress shown at first run, Install Command Line Tool |
+| 2. Workbench | Simulators in the app's window (on the H.264 stream), input, sidebar, toolbar, inspector (node list, pick by pointing), log panel, screenshot | Most device controls (see UI-PLAN.md), command palette, Gradle-folder watching, capture with a skin, the accessibility audit, hosted window mode and JSON/events in the engine (the stream and polling serve instead) |
+| 3. Agents | MCP served by the app behind a token, the stdio shim, 16 tools with stable references and change reports, annotated screenshots, checks, waits, logs, compare, a feed popover; a scripted session passes locally and in CI | A session with a real agent client, verification bundles, the matrix tool, network and gaps tools, a pause button, one-click setup |
+| 4. Many at once | Side by side, mirrored input, Compare (content and pixels, in the window and as a tool) | Matrix wall, network and frame-timing differences, the HTML report, snapshot review, scenes |
+| 5. Time and tests | Recorder on/off, save a recording, open one in the engine's trace viewer | In-window timeline, network inspector, replay and bisect, test runner, crawl map |
+| 6. Hot swap, polish | | All of it |
+| Security and privacy | State folder 0700, the sample app bundled (no download at first run), PRIVACY.md, the agent endpoint's token and Origin/Host checks, a control token per simulator (engine 0.54.0) | The "no connections of our own" CI check, opt-in analytics and crash reports, a tighter profile for APKs from strangers |
+
+The core that every later piece stands on (a signed app that runs APKs in its own window, drives them, and lets an
+agent do the same, privately) is in place. What is still owed to call the core complete: the engine with the control
+token bundled and released, the no-connections check, one real agent session, and a public release. The interface
+is the next large piece: docs/UI-PLAN.md.
+
 Found on the way, in apksim: two launches started together (a first launch and the background training it starts)
 race on `ln -sfn` of the class-path link in `$TMPDIR` and one dies with "File exists".
 
