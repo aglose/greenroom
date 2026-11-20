@@ -100,7 +100,7 @@ final class Simulator {
             let size = CGSize(width: frame.width, height: frame.height)
             if size != self.deviceSize {
                 self.deviceSize = size
-                DispatchQueue.main.async { self.onSize?(size) }
+                DispatchQueue.main.async { self.onSize?(size); Engine.shared.onChange?() }
             }
             if let sample = self.decoder.sampleBuffer(for: frame) {
                 self.framesShown += 1

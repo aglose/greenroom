@@ -7,11 +7,18 @@ Greenroom is the app around [apksim](https://github.com/aglose/apksim), the open
 APKs on Apple Silicon. apksim stays a command-line tool with every switch it has; Greenroom bundles a released
 version of it and adds the workbench.
 
-**Status: early.** Today: open APKs (drop, ⌘O, double-click in Finder, recent list) and each runs as a simulator
-inside the Greenroom window, several at once, switched from the sidebar. The mouse is the finger, the scroll wheel
-scrolls, the keyboard types, ⌘V pastes. The toolbar has Back, Home, Rotate, light/dark, the device (phone, foldable,
-tablet, desktop, TV, switched while the app runs), Screenshot, Restart and Close. Still to come: several simulators
-side by side, an inspector, a timeline, build comparisons, an agent interface.
+**Status: early.** Today:
+
+- Open APKs (drop, ⌘O, double-click in Finder, recent list); each runs as a simulator inside the Greenroom window.
+- The mouse is the finger, the scroll wheel scrolls, the keyboard types, ⌘V pastes.
+- Toolbar: Back, Home, Rotate, light/dark, the device (phone, foldable, tablet, desktop, TV, switched while the app
+  runs), Screenshot, Restart, Close.
+- **Side by Side** (⌘\\) shows every running simulator at once, sized so a phone and a tablet get about the same
+  area. Device > Open Beside As starts the same APK again as another device.
+- **Mirror Input** (⇧⌘M) sends each touch, key and toolbar command to every simulator, at the same place on each
+  screen whatever its size.
+
+Still to come: an inspector, a timeline, build comparisons with differences marked, an agent interface.
 
 How a simulator gets on screen: the engine runs headless, sends its screen as H.264 over a loopback connection, and
 the app shows it with `AVSampleBufferDisplayLayer`; input goes back over the engine's control channel

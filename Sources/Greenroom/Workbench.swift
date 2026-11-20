@@ -6,7 +6,11 @@ import UniformTypeIdentifiers
 final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate {
     let window: NSWindow
     private let table = NSTableView()
-    private let simulatorView = SimulatorView(frame: .zero)
+    private let grid = SimulatorGrid(frame: .zero)
+    /// Every running simulator at once, tiled, rather than the chosen one alone.
+    private(set) var sideBySide = false
+    /// Input in one simulator, and the toolbar's commands, go to all of them.
+    private(set) var mirror = false
     private let status = NSTextField(labelWithString: "")
     private var rows: [Row] = []
     private var selected: Simulator?
@@ -35,7 +39,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         side.maximumThickness = 320
         split.addSplitViewItem(side)
         let content = NSViewController()
-        content.view = DropTarget(content: simulatorView) { [weak self] in self?.open($0) }
+        content.view = DropTarget(content: grid) { [weak self] in self?.open($0) }
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
         window.contentViewController = split
         window.setContentSize(NSSize(width: 900, height: 760))
@@ -47,34 +51,34 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
         window.setFrameAutosaveName("Workbench")
         if window.frame.origin == .zero { window.center() }
-        simulatorView.show(nil, placeholder: Self.hint)
         Engine.shared.onChange = { [weak self] in self?.reload() }
         reload()
     }
 
     // MARK: Opening and selecting
 
-    func open(_ apk: URL, remember: Bool = true) {
+    @discardableResult
+    func open(_ apk: URL, remember: Bool = true, options: [String] = []) -> Simulator? {
         do {
-            let sim = try Engine.shared.open(apk: apk)
+            let sim = try Engine.shared.open(apk: apk, options: options)
             if remember {
                 Recents.add(apk)
                 NSDocumentController.shared.noteNewRecentDocumentURL(apk)
             }
             sim.onState = { [weak self, weak sim] state in
                 guard let self, let sim else { return }
-                if self.selected === sim {
-                    switch state {
-                    case .starting: break
-                    case .running: self.simulatorView.setMessage("")
-                    case .ended(let code): self.simulatorView.setMessage(Self.ended(sim, code))
-                    }
+                switch state {
+                case .starting: break
+                case .running: self.grid.view(for: sim)?.setMessage("")
+                case .ended(let code): self.grid.view(for: sim)?.setMessage(Self.ended(sim, code))
                 }
                 self.reload()
             }
             select(sim)
+            return sim
         } catch {
             NSAlert(error: error).beginSheetModal(for: window)
+            return nil
         }
     }
 
@@ -84,20 +88,35 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     private func select(_ sim: Simulator?) {
         selected = sim
-        if let sim {
-            simulatorView.show(sim)
-            if case .ended(let code) = sim.state { simulatorView.setMessage(Self.ended(sim, code)) }
-            window.subtitle = sim.name
-        } else {
-            simulatorView.show(nil, placeholder: Self.hint)
-            window.subtitle = ""
-        }
+        window.subtitle = sim?.name ?? ""
         reload()
+        if let sim, let v = grid.view(for: sim) { window.makeFirstResponder(v) }
+    }
+
+    /// The simulators on screen: all of them side by side, or the chosen one.
+    private func refreshGrid() {
+        let sims = Engine.shared.simulators
+        let shown = sideBySide ? sims.filter { $0.isAlive || $0 === selected } : (selected.map { [$0] } ?? [])
+        grid.show(shown, chosen: selected, sideBySide: sideBySide, hint: Self.hint) { [weak self] view in
+            view.onSelect = { [weak self] v in
+                guard let self, let sim = v.simulator, sim !== self.selected else { return }
+                self.selected = sim
+                self.window.subtitle = sim.name
+                self.reload()
+            }
+            view.route = { [weak self] input, v in
+                guard let self else { return }
+                if self.mirror { Engine.shared.simulators.filter { $0.state == .running }.forEach { $0.perform(input) } }
+                else { v.simulator?.perform(input) }
+            }
+        }
+        for v in grid.views { if let sim = v.simulator, case .ended(let code) = sim.state { v.setMessage(Self.ended(sim, code)) } }
     }
 
     private func reload() {
         let sims = Engine.shared.simulators
-        if let s = selected, !sims.contains(where: { $0 === s }) { selected = nil; simulatorView.show(nil, placeholder: Self.hint); window.subtitle = "" }
+        if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
+        refreshGrid()
         rows = []
         if !sims.isEmpty {
             rows.append(.header("Running"))
@@ -187,7 +206,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             let symbol: String
             switch sim.state {
             case .starting: detail = "Starting…"; symbol = "circle.dotted"
-            case .running: detail = "Running"; symbol = "play.circle.fill"
+            case .running:
+                let size = sim.deviceSize
+                detail = size.width > 0 ? "Running · \(Int(size.width))×\(Int(size.height))" : "Running"
+                symbol = "play.circle.fill"
             case .ended(let code): detail = code == 0 ? "Quit" : "Ended (exit \(code))"; symbol = "stop.circle"
             }
             return cell(symbol: symbol, tint: sim.state == .running ? .systemGreen : .secondaryLabelColor, title: sim.name, detail: detail)
@@ -250,11 +272,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         Tool(id: "shot", label: "Screenshot", symbol: "camera", command: #selector(screenshot(_:))),
         Tool(id: "restart", label: "Restart App", symbol: "arrow.clockwise", command: #selector(restart(_:))),
         Tool(id: "close", label: "Close Simulator", symbol: "xmark.circle", command: #selector(closeSelected(_:))),
+        Tool(id: "grid", label: "Side by Side", symbol: "rectangle.split.2x1", command: #selector(toggleSideBySide(_:))),
+        Tool(id: "mirror", label: "Mirror Input", symbol: "arrow.triangle.branch", command: #selector(toggleMirror(_:))),
     ]
     private static let devices = ["phone", "foldable", "tablet", "desktop", "tv"]
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        ["back", "home", "rotate", "appearance", "device", "flex", "shot", "restart", "close"].map {
+        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "flex", "shot", "restart", "close"].map {
             $0 == "flex" ? .flexibleSpace : NSToolbarItem.Identifier($0)
         }
     }
@@ -272,10 +296,19 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             item.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: "Device")
             let menu = NSMenu()
             for d in Self.devices {
-                let m = menu.addItem(withTitle: d.capitalized == "Tv" ? "TV" : d.capitalized, action: #selector(device(_:)), keyEquivalent: "")
+                let m = menu.addItem(withTitle: Self.title(d), action: #selector(device(_:)), keyEquivalent: "")
                 m.target = self
                 m.representedObject = d
             }
+            menu.addItem(.separator())
+            let again = NSMenuItem(title: "Open Beside As", action: nil, keyEquivalent: "")
+            again.submenu = NSMenu()
+            for d in Self.devices {
+                let m = again.submenu!.addItem(withTitle: Self.title(d), action: #selector(openBeside(_:)), keyEquivalent: "")
+                m.target = self
+                m.representedObject = d
+            }
+            menu.addItem(again)
             item.menu = menu
             return item
         }
@@ -290,13 +323,66 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         return item
     }
 
-    @objc func validateToolbarItem(_ item: NSToolbarItem) -> Bool { live != nil || (item.itemIdentifier.rawValue == "close" && selected != nil) }
+    @objc func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        switch item.itemIdentifier.rawValue {
+        case "grid":
+            item.image = Self.toggleImage("rectangle.split.2x1", on: sideBySide, label: item.label)
+            item.toolTip = sideBySide ? "Side by Side: every simulator is shown" : "Side by Side: show every simulator at once"
+            return Engine.shared.simulators.count > 1 || sideBySide
+        case "mirror":
+            item.image = Self.toggleImage("arrow.triangle.branch", on: mirror, label: item.label)
+            item.toolTip = mirror ? "Mirror Input: on. Touches, keys and toolbar commands go to every simulator" : "Mirror Input: send touches and keys to every simulator"
+            return Engine.shared.simulators.count > 1 || mirror
+        case "close": return selected != nil
+        default: return live != nil
+        }
+    }
+
+    /// A toolbar symbol, in the accent colour while its switch is on.
+    private static func toggleImage(_ symbol: String, on: Bool, label: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        return on ? image?.withSymbolConfiguration(.init(paletteColors: [.controlAccentColor])) : image
+    }
+
+    private static func title(_ device: String) -> String { device == "tv" ? "TV" : device.capitalized }
 
     private var live: Simulator? { selected?.state == .running ? selected : nil }
 
+    /// The simulators a toolbar command goes to: the chosen one, or every running one while input is mirrored.
+    private var targets: [Simulator] {
+        mirror ? Engine.shared.simulators.filter { $0.state == .running } : (live.map { [$0] } ?? [])
+    }
+
+    @objc func toggleSideBySide(_ sender: Any?) { setSideBySide(!sideBySide) }
+    @objc func toggleMirror(_ sender: Any?) { setMirror(!mirror) }
+
+    func setSideBySide(_ on: Bool) { sideBySide = on; reload() }
+
+    func setMirror(_ on: Bool) {
+        mirror = on
+        window.subtitle = on ? "Mirroring input to every simulator" : (selected?.name ?? "")
+        reload()
+    }
+
+    /// The chosen simulator's APK again, as another device, shown beside it.
+    @objc func openBeside(_ sender: NSMenuItem) {
+        guard let d = sender.representedObject as? String, let apk = selected?.apk else { return }
+        openBeside(apk: apk, device: d)
+    }
+
+    @discardableResult
+    func openBeside(apk: URL, device: String) -> Simulator? {
+        let keep = selected
+        let sim = open(apk, remember: false, options: ["--device", device])
+        sideBySide = true
+        if let keep { selected = keep; window.subtitle = keep.name }
+        reload()
+        return sim
+    }
+
     /// A click made as the mouse would make it, at a fraction of the simulator view's size (for scripted checks).
     func debugClick(atFraction f: CGPoint) {
-        let v = simulatorView
+        guard let sel = selected, let v = grid.view(for: sel) else { return }
         let p = v.convert(CGPoint(x: v.bounds.width * f.x, y: v.bounds.height * f.y), to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
@@ -311,15 +397,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                            windowNumber: window.windowNumber, context: nil, characters: String(ch),
                                            charactersIgnoringModifiers: String(ch), isARepeat: false, keyCode: 0) else { continue }
-            simulatorView.keyDown(with: e)
+            if let sel = selected { grid.view(for: sel)?.keyDown(with: e) }
         }
     }
 
-    @objc func back(_ sender: Any?) { live?.send("back") }
-    @objc func home(_ sender: Any?) { live?.send("home") }
-    @objc func rotate(_ sender: Any?) { live?.send("rotate right") }
-    @objc func appearance(_ sender: Any?) { live?.send("appearance toggle") }
-    @objc func restart(_ sender: Any?) { live?.send("restart") }
+    @objc func back(_ sender: Any?) { targets.forEach { $0.send("back") } }
+    @objc func home(_ sender: Any?) { targets.forEach { $0.send("home") } }
+    @objc func rotate(_ sender: Any?) { targets.forEach { $0.send("rotate right") } }
+    @objc func appearance(_ sender: Any?) { targets.forEach { $0.send("appearance toggle") } }
+    @objc func restart(_ sender: Any?) { targets.forEach { $0.send("restart") } }
     @objc func closeSelected(_ sender: Any?) { if let s = selected { Engine.shared.close(s) } }
 
     @objc func device(_ sender: NSMenuItem) {
@@ -341,7 +427,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         sim.send("shot screenshots/\(plain.lastPathComponent)") { [weak self] answer in
             let written = FileManager.default.fileExists(atPath: plain.path)
             guard written, (try? FileManager.default.moveItem(at: plain, to: file)) != nil else {
-                self?.simulatorView.window?.subtitle = "Screenshot failed: \(answer)"
+                self?.window.subtitle = "Screenshot failed: \(answer)"
                 return
             }
             if let image = NSImage(contentsOf: file) {

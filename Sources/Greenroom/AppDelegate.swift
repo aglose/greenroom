@@ -35,6 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ("3-dark", 3, { self.workbench.appearance(nil) }),
                 ("4-rotated", 3, { self.workbench.rotate(nil) }),
                 ("5-tablet", 4, { self.workbench.rotate(nil); sim.send("device tablet") }),
+                ("6-beside", 14, { sim.send("device phone"); self.workbench.openBeside(apk: sim.apk, device: "tablet") }),
+                ("7-mirrored", 4, {
+                    self.workbench.setMirror(true)
+                    self.workbench.debugClick(atFraction: CGPoint(x: 0.5, y: 0.5))
+                    self.workbench.debugType(" x2")
+                }),
             ]
             var at = 0.0
             for (name, wait, action) in steps {
@@ -47,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         let to = dir.appendingPathComponent("\(name)-engine.png")
                         try? FileManager.default.removeItem(at: to)
                         try? FileManager.default.moveItem(at: from, to: to)
+                    }
+                    for other in Engine.shared.simulators.dropFirst() {
+                        other.send("stats") { print("[greenroom] \(name) (second): device \(Int(other.deviceSize.width))x\(Int(other.deviceSize.height)) \($0.split(separator: " ").filter { $0.hasPrefix("lastDown") }.joined())") }
                     }
                     sim.send("stats") { print("[greenroom] \(name): device \(Int(sim.deviceSize.width))x\(Int(sim.deviceSize.height)) frames \(sim.framesShown) \($0.split(separator: " ").filter { $0.hasPrefix("lastDown") || $0.hasPrefix("frames=") }.joined(separator: " "))") }
                 }
@@ -134,6 +143,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(to(workbench: #selector(Workbench.home(_:)), "Home", "H", [.command, .shift]))
         device.addItem(to(workbench: #selector(Workbench.rotate(_:)), "Rotate", "r"))
         device.addItem(to(workbench: #selector(Workbench.appearance(_:)), "Switch Light and Dark", "A", [.command, .shift]))
+        device.addItem(.separator())
+        device.addItem(to(workbench: #selector(Workbench.toggleSideBySide(_:)), "Side by Side", "\\"))
+        device.addItem(to(workbench: #selector(Workbench.toggleMirror(_:)), "Mirror Input", "M", [.command, .shift]))
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.screenshot(_:)), "Save Screenshot", "s"))
         device.addItem(to(workbench: #selector(Workbench.restart(_:)), "Restart App", "R", [.command, .shift]))
