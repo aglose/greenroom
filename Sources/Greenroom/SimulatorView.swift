@@ -50,6 +50,13 @@ final class SimulatorView: NSView {
     /// (differing pixels). Set by a comparison.
     var boxes: [CGRect] = [] { didSet { needsLayout = true } }
     var areas: [CGRect] = [] { didSet { needsLayout = true } }
+    /// The inspector's node, outlined in the accent colour.
+    var outlined: CGRect? { didSet { needsLayout = true } }
+    /// While inspecting, the pointer picks nodes and touches are not sent to the app.
+    var inspecting = false { didSet { updateTracking() } }
+    var onPoint: ((Int, Int) -> Void)?
+    private let outlineLayer = CAShapeLayer()
+    private var tracking: NSTrackingArea?
     private let boxLayer = CAShapeLayer()
     private let areaLayer = CAShapeLayer()
 
@@ -79,6 +86,10 @@ final class SimulatorView: NSView {
         boxLayer.fillColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
         boxLayer.strokeColor = NSColor.systemOrange.cgColor
         boxLayer.lineWidth = 2
+        outlineLayer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+        outlineLayer.strokeColor = NSColor.controlAccentColor.cgColor
+        outlineLayer.lineWidth = 2
+        layer?.addSublayer(outlineLayer)
         layer?.addSublayer(areaLayer)
         layer?.addSublayer(boxLayer)
         NSLayoutConstraint.activate([
@@ -193,6 +204,8 @@ final class SimulatorView: NSView {
         }
         areaLayer.frame = bounds
         boxLayer.frame = bounds
+        outlineLayer.frame = bounds
+        outlineLayer.path = path(outlined.map { [$0] } ?? [])
         areaLayer.path = path(areas)
         boxLayer.path = path(boxes)
         CATransaction.commit()
@@ -213,9 +226,29 @@ final class SimulatorView: NSView {
         if let f = fraction(event) { emit(.touch(kind, f)) }
     }
 
+    private func updateTracking() {
+        if let tracking { removeTrackingArea(tracking) }
+        tracking = nil
+        if inspecting {
+            let t = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+            addTrackingArea(t)
+            tracking = t
+        } else {
+            outlined = nil
+        }
+    }
+
+    private func point(_ event: NSEvent) {
+        guard let f = fraction(event), let size = simulator?.deviceSize, pictureRect.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onPoint?(Int(f.x * size.width), Int(f.y * size.height))
+    }
+
+    override func mouseMoved(with event: NSEvent) { if inspecting { point(event) } }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         onSelect?(self)
+        if inspecting { point(event); return }
         guard pictureRect.contains(convert(event.locationInWindow, from: nil)) else { return }
         touching = true
         touch("down", event)

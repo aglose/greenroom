@@ -7,6 +7,13 @@ struct ScreenNode {
     var text = "", hint = "", desc = ""
     /// Where to tap when it is not the node's own centre (a label folded into the box that takes the tap).
     var tapPoint: (Int, Int)?
+    /// The box that takes the tap, when it is larger than the node's own (the row or tab a label was folded into).
+    var hitBox: (left: Int, top: Int, right: Int, bottom: Int)?
+    /// Where a touch reaches this node: its tap box, else its own bounds.
+    var frame: CGRect {
+        if let h = hitBox { return CGRect(x: h.left, y: h.top, width: h.right - h.left, height: h.bottom - h.top) }
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
+    }
     var ref = ""
     // Filled by ScreenTree.update: what this node was in the tree before, if it was there.
     var isNew = true
@@ -97,6 +104,7 @@ struct ScreenNode {
             if inside.count == 1, !out[inside[0]].click {
                 out[inside[0]].click = true
                 out[inside[0]].tapPoint = ((n.left + n.right) / 2, (n.top + n.bottom) / 2)
+                out[inside[0]].hitBox = (n.left, n.top, n.right, n.bottom)
                 out[inside[0]].field = out[inside[0]].field || n.field
                 drop.insert(i)
             }

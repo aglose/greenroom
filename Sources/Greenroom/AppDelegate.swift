@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         termSource = term
         windowShotIfAsked()
         compareCheckIfAsked()
+        inspectCheckIfAsked()
     }
 
     /// `Greenroom --visual-check DIR APK`: for looking at the workbench from a script. Opens the APK and writes
@@ -101,6 +102,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 captureWindow(to: dir.appendingPathComponent("c2-different.png"))
                 print("[greenroom] c2: " + workbench.compareText.replacingOccurrences(of: "\n", with: " | "))
                 NSApp.terminate(nil)
+            }
+        }
+    }
+
+    /// `Greenroom --inspect-check DIR APK`: opens the APK with the inspector, clicks the middle of the picture and
+    /// captures the window: the click must pick a node (not tap the app) and outline it.
+    private func inspectCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--inspect-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let sim = workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false) else { return }
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] timer in
+            waited += 0.25
+            guard (sim.state == .running && sim.framesShown > 0) || waited > 120 else { return }
+            timer.invalidate()
+            workbench.setInspecting(true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [self] in
+                workbench.debugClick(atFraction: CGPoint(x: 0.584, y: 0.881))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [self] in
+                captureWindow(to: dir.appendingPathComponent("i1-inspector.png"))
+                sim.send("stats") { [self] stats in
+                    let down = stats.split(separator: " ").first { $0.hasPrefix("lastDown") } ?? ""
+                    print("[greenroom] inspector: \(workbench.inspectorNodes.count) nodes, outline \(workbench.inspectorOutline.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "none"), app \(down)")
+                    NSApp.terminate(nil)
+                }
             }
         }
     }
@@ -230,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = win
 
         win.addItem(to(workbench: #selector(Workbench.showAgent(_:)), "Agent Activity", "A", [.command, .option]))
+        win.addItem(to(workbench: #selector(Workbench.toggleInspector(_:)), "Inspector", "i", [.command, .option]))
 
         let help = NSMenu(title: "Help")
         help.addItem(item("Show Simulator Logs", #selector(showLogs(_:)), ""))

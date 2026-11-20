@@ -13,6 +13,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var mirror = false
     /// Differences between the chosen simulator and the others are found and marked as the apps are used.
     private(set) var comparing = false
+    /// The inspector pane is open: the pointer picks nodes on the chosen simulator.
+    private(set) var inspecting = false
+    private let inspector = Inspector()
+    private var inspectorItem: NSSplitViewItem!
+    private var inspectTimer: Timer?
     private let compareBar = NSTextField(wrappingLabelWithString: "")
     private var compareHeight: NSLayoutConstraint!
     private let compareQueue = DispatchQueue(label: "greenroom-compare")
@@ -73,6 +78,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         ])
         content.view = DropTarget(content: stack) { [weak self] in self?.open($0) }
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
+        inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
+        inspectorItem.minimumThickness = 240
+        inspectorItem.maximumThickness = 380
+        inspectorItem.isCollapsed = true
+        split.addSplitViewItem(inspectorItem)
+        inspector.onPick = { [weak self] node in
+            guard let self, let sim = self.selected else { return }
+            self.grid.view(for: sim)?.outlined = node?.frame
+        }
         window.contentViewController = split
         window.setContentSize(NSSize(width: 900, height: 760))
 
@@ -149,6 +163,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             }
         }
         for v in grid.views { if let sim = v.simulator, case .ended(let code) = sim.state { v.setMessage(Self.ended(sim, code)) } }
+        for v in grid.views {
+            v.inspecting = inspecting && v.simulator === selected
+            v.onPoint = { [weak self] x, y in self?.inspector.pick(atDeviceX: x, y: y) }
+        }
     }
 
     private func reload() {
@@ -314,17 +332,18 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         Tool(id: "mirror", label: "Mirror Input", symbol: "arrow.triangle.branch", command: #selector(toggleMirror(_:))),
         Tool(id: "compare", label: "Compare", symbol: "plusminus.circle", command: #selector(toggleCompare(_:))),
         Tool(id: "agent", label: "Agent", symbol: "sparkles", command: #selector(showAgent(_:))),
+        Tool(id: "inspect", label: "Inspector", symbol: "scope", command: #selector(toggleInspector(_:))),
     ]
     private static let devices = ["phone", "foldable", "tablet", "desktop", "tv"]
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "compare", "agent", "flex", "shot", "restart", "close"].map {
+        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "compare", "agent", "flex", "shot", "inspect"].map {
             $0 == "flex" ? .flexibleSpace : NSToolbarItem.Identifier($0)
         }
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
+        toolbarDefaultItemIdentifiers(toolbar) + ["restart", "close"].map { NSToolbarItem.Identifier($0) }   // also in the Device menu
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
@@ -386,6 +405,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             item.image = Self.toggleImage("plusminus.circle", on: comparing, label: item.label)
             item.toolTip = comparing ? "Compare: differences from the chosen simulator are marked" : "Compare: mark what differs between the simulators"
             return Engine.shared.simulators.count > 1 || comparing
+        case "inspect":
+            item.image = Self.toggleImage("scope", on: inspecting, label: item.label)
+            item.toolTip = inspecting ? "Inspector: clicks on the chosen simulator pick nodes" : "Inspector: see the nodes on screen"
+            return true
         case "agent":
             (item.view as? NSButton)?.image = Self.toggleImage("sparkles", on: agentActivity.client != nil, label: item.label)
             item.toolTip = agentActivity.client.map { "\($0) is connected" } ?? "Connect an agent"
@@ -409,6 +432,42 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var targets: [Simulator] {
         mirror ? Engine.shared.simulators.filter { $0.state == .running } : (live.map { [$0] } ?? [])
     }
+
+    // MARK: Inspecting
+
+    @objc func toggleInspector(_ sender: Any?) { setInspecting(!inspecting) }
+
+    /// The inspector: the chosen simulator's nodes in a pane, picked by pointing at the picture. While it is open
+    /// clicks on that picture pick instead of tapping; keys and the toolbar still reach the app.
+    func setInspecting(_ on: Bool) {
+        inspecting = on
+        inspectorItem.animator().isCollapsed = !on
+        inspectTimer?.invalidate()
+        inspectTimer = on ? Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refreshInspector() } : nil
+        reload()
+        if on { refreshInspector() }
+    }
+
+    private var inspectorBusy = false
+
+    private func refreshInspector() {
+        guard inspecting, !inspectorBusy else { return }
+        guard let sim = live else { inspector.show([], of: nil); return }
+        inspectorBusy = true
+        compareQueue.async {
+            let nodes = ScreenNode.parse(sim.sendSync("nodes", timeout: 10))
+            DispatchQueue.main.async {
+                self.inspectorBusy = false
+                if self.inspecting, self.selected === sim { self.inspector.show(nodes, of: sim) }
+            }
+        }
+    }
+
+    /// The outlined node's box on the chosen simulator (for scripted checks).
+    var inspectorOutline: CGRect? { selected.flatMap { grid.view(for: $0)?.outlined } }
+
+    /// What the inspector lists (for scripted checks).
+    var inspectorNodes: [ScreenNode] { inspector.nodes }
 
     // MARK: Comparing
 
