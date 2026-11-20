@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         term.resume()
         termSource = term
         windowShotIfAsked()
+        compareCheckIfAsked()
     }
 
     /// `Greenroom --visual-check DIR APK`: for looking at the workbench from a script. Opens the APK and writes
@@ -72,6 +73,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// `Greenroom --compare-check DIR APK [X,Y]`: opens the APK twice in compare mode and captures the window while
+    /// the two are the same, then after a tap at X,Y (device pixels) on the first one alone.
+    private func compareCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--compare-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1]), apk = URL(fileURLWithPath: args[i + 2])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let base = workbench.open(apk, remember: false) else { return }
+        var second: Simulator?
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] timer in
+            waited += 0.25
+            if second == nil, base.state == .running, base.framesShown > 0 {
+                second = workbench.compare(with: apk)
+                defaults_forgetRecent(apk)
+            }
+            guard let other = second, (other.state == .running && other.framesShown > 0) || waited > 120 else { return }
+            timer.invalidate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [self] in
+                captureWindow(to: dir.appendingPathComponent("c1-same.png"))
+                print("[greenroom] c1: " + workbench.compareText.replacingOccurrences(of: "\n", with: " | "))
+                workbench.setMirror(false)
+                if i + 3 < args.count { base.send("tap " + args[i + 3].replacingOccurrences(of: ",", with: " ")) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [self] in
+                captureWindow(to: dir.appendingPathComponent("c2-different.png"))
+                print("[greenroom] c2: " + workbench.compareText.replacingOccurrences(of: "\n", with: " | "))
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    private func defaults_forgetRecent(_ apk: URL) {
+        var paths = UserDefaults.standard.stringArray(forKey: "recentApks") ?? []
+        paths.removeAll { $0 == apk.path }
+        UserDefaults.standard.set(paths, forKey: "recentApks")
+    }
+
     /// The window as it is on screen. CGWindowListCreateImage is gone from the SDK's headers but still there, and
     /// needs no screen-recording permission for the process's own window.
     private func captureWindow(to file: URL) {
@@ -79,8 +118,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { return }
         let capture = unsafeBitCast(sym, to: Capture.self)
         // .optionIncludingWindow = 8; .boundsIgnoreFraming | .bestResolution = 1 | 8
-        guard let image = capture(.null, 8, UInt32(workbench.window.windowNumber), 9)?.takeRetainedValue() else { return }
-        try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file)
+        // With the screen locked the window server hands out a blank picture. Then AppKit draws the content view
+        // instead: no video and no glass, but the layout, the captions and the marks a comparison makes.
+        let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+        if !locked, let image = capture(.null, 8, UInt32(workbench.window.windowNumber), 9)?.takeRetainedValue() {
+            try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file)
+        } else if let view = workbench.window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: file)
+            print("[greenroom] the screen is locked: \(file.lastPathComponent) is AppKit's drawing, without the video")
+        }
     }
 
     private let agent = AgentServer()
@@ -151,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let file = NSMenu(title: "File")
         file.addItem(item("Open APK…", #selector(openDocument(_:)), "o"))
+        file.addItem(to(workbench: #selector(Workbench.compareWithAPK(_:)), "Compare With APK…", "O", [.command, .shift]))
         file.addItem(item("Clear Recent APKs", #selector(clearRecents(_:)), ""))
         file.addItem(.separator())
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -168,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.toggleSideBySide(_:)), "Side by Side", "\\"))
         device.addItem(to(workbench: #selector(Workbench.toggleMirror(_:)), "Mirror Input", "M", [.command, .shift]))
+        device.addItem(to(workbench: #selector(Workbench.toggleCompare(_:)), "Compare", "D", [.command, .shift]))
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.screenshot(_:)), "Save Screenshot", "s"))
         device.addItem(to(workbench: #selector(Workbench.restart(_:)), "Restart App", "R", [.command, .shift]))

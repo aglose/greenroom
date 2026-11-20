@@ -42,9 +42,14 @@ The answers are built to be cheap to read:
 | `key`, `back`, `swipe`, `open_url` | keys, Back, a swipe by `direction` or coordinates, a deep link |
 | `set` | appearance, locale, font scale, rotation, network, device, time zone, animation scale, permissions; home, resume, lock, unlock, recreate, restart, process-death |
 | `screen`, `check`, `wait_for`, `screenshot`, `logs` | reading and verifying |
+| `compare` | how two simulators' screens differ: `-` only on the base, `+` only on the other, `>` moved, and the share of pixels that differ; `map` adds a picture of where |
 
 With several simulators running, each tool takes `sim` (`s1`, `s2`...). A second `launch` puts its simulator
 beside the first, so the same build can be driven on a phone and a tablet at once.
+
+To check a change against the build before it: `launch` both APKs, do the same steps on each, and `compare`.
+`s1 vs s2: SAME | same content, identical pixels` means the change did nothing visible on that screen; otherwise
+the lines say exactly what moved, appeared or went.
 
 ## What an agent cannot do
 

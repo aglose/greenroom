@@ -11,6 +11,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var sideBySide = false
     /// Input in one simulator, and the toolbar's commands, go to all of them.
     private(set) var mirror = false
+    /// Differences between the chosen simulator and the others are found and marked as the apps are used.
+    private(set) var comparing = false
+    private let compareBar = NSTextField(wrappingLabelWithString: "")
+    private var compareHeight: NSLayoutConstraint!
+    private let compareQueue = DispatchQueue(label: "greenroom-compare")
+    private var compareScheduled = false
+    private var compareTimer: Timer?
     /// What agents have done here, and the popover that shows it.
     let agentActivity = AgentActivity()
     var agentTools: AgentTools? { didSet { agentPanel = agentTools.map { AgentPanel(activity: agentActivity, tools: $0) } } }
@@ -44,7 +51,27 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         side.maximumThickness = 320
         split.addSplitViewItem(side)
         let content = NSViewController()
-        content.view = DropTarget(content: grid) { [weak self] in self?.open($0) }
+        compareBar.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        compareBar.textColor = .secondaryLabelColor
+        compareBar.maximumNumberOfLines = 7
+        compareBar.lineBreakMode = .byTruncatingTail
+        compareBar.isSelectable = true
+        let stack = NSView()
+        stack.wantsLayer = true
+        stack.layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor   // one surface with the simulators above
+        for v in [grid, compareBar] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: stack.topAnchor),
+            grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            grid.bottomAnchor.constraint(equalTo: compareBar.topAnchor),
+            compareBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
+            compareBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
+            compareBar.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: -8),
+            compareHeight,
+        ])
+        content.view = DropTarget(content: stack) { [weak self] in self?.open($0) }
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
         window.contentViewController = split
         window.setContentSize(NSSize(width: 900, height: 760))
@@ -118,6 +145,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 guard let self else { return }
                 if self.mirror { Engine.shared.simulators.filter { $0.state == .running }.forEach { $0.perform(input) } }
                 else { v.simulator?.perform(input) }
+                self.scheduleCompare()
             }
         }
         for v in grid.views { if let sim = v.simulator, case .ended(let code) = sim.state { v.setMessage(Self.ended(sim, code)) } }
@@ -284,12 +312,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         Tool(id: "close", label: "Close Simulator", symbol: "xmark.circle", command: #selector(closeSelected(_:))),
         Tool(id: "grid", label: "Side by Side", symbol: "rectangle.split.2x1", command: #selector(toggleSideBySide(_:))),
         Tool(id: "mirror", label: "Mirror Input", symbol: "arrow.triangle.branch", command: #selector(toggleMirror(_:))),
+        Tool(id: "compare", label: "Compare", symbol: "plusminus.circle", command: #selector(toggleCompare(_:))),
         Tool(id: "agent", label: "Agent", symbol: "sparkles", command: #selector(showAgent(_:))),
     ]
     private static let devices = ["phone", "foldable", "tablet", "desktop", "tv"]
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "agent", "flex", "shot", "restart", "close"].map {
+        ["back", "home", "rotate", "appearance", "device", "flex", "grid", "mirror", "compare", "agent", "flex", "shot", "restart", "close"].map {
             $0 == "flex" ? .flexibleSpace : NSToolbarItem.Identifier($0)
         }
     }
@@ -353,6 +382,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             item.image = Self.toggleImage("arrow.triangle.branch", on: mirror, label: item.label)
             item.toolTip = mirror ? "Mirror Input: on. Touches, keys and toolbar commands go to every simulator" : "Mirror Input: send touches and keys to every simulator"
             return Engine.shared.simulators.count > 1 || mirror
+        case "compare":
+            item.image = Self.toggleImage("plusminus.circle", on: comparing, label: item.label)
+            item.toolTip = comparing ? "Compare: differences from the chosen simulator are marked" : "Compare: mark what differs between the simulators"
+            return Engine.shared.simulators.count > 1 || comparing
         case "agent":
             (item.view as? NSButton)?.image = Self.toggleImage("sparkles", on: agentActivity.client != nil, label: item.label)
             item.toolTip = agentActivity.client.map { "\($0) is connected" } ?? "Connect an agent"
@@ -377,10 +410,104 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         mirror ? Engine.shared.simulators.filter { $0.state == .running } : (live.map { [$0] } ?? [])
     }
 
+    // MARK: Comparing
+
+    @objc func toggleCompare(_ sender: Any?) { setComparing(!comparing) }
+
+    /// Compare mode: the simulators side by side, the differences from the chosen one marked on each picture
+    /// (boxes: content only there or moved; shaded: pixels that differ) and listed under them.
+    func setComparing(_ on: Bool) {
+        comparing = on
+        compareTimer?.invalidate()
+        compareTimer = nil
+        if on {
+            sideBySide = true
+            // Content that loads by itself changes the answer too: look again every few seconds.
+            compareTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.scheduleCompare(after: 0) }
+        } else {
+            for v in grid.views { v.boxes = []; v.areas = [] }
+            compareBar.stringValue = ""
+        }
+        compareHeight.constant = on ? 104 : 0
+        reload()
+        if on { scheduleCompare(after: 0) }
+    }
+
+    /// The APK chosen in a panel, started beside the chosen simulator with input mirrored and differences marked:
+    /// two builds of an app, driven as one.
+    @objc func compareWithAPK(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "apk") ?? .data]
+        panel.message = selected == nil ? "Choose the first of two builds to compare" : "Choose the build to compare with \(selected!.name)"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            self.compare(with: url)
+        }
+    }
+
+    @discardableResult
+    func compare(with apk: URL) -> Simulator? {
+        let base = selected
+        let sim = open(apk, remember: true, options: base?.options ?? [])
+        if let base, base.isAlive { selected = base; window.subtitle = base.name }
+        mirror = true
+        setComparing(true)
+        return sim
+    }
+
+    /// What the bar under the simulators says (for scripted checks).
+    var compareText: String { compareBar.stringValue }
+
+    private func scheduleCompare(after delay: TimeInterval = 0.5) {
+        guard comparing, !compareScheduled else { return }
+        compareScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            let running = Engine.shared.simulators.filter { $0.state == .running }
+            guard self.comparing, let base = self.live, running.count > 1 else {
+                self.compareScheduled = false
+                if self.comparing { self.compareBar.stringValue = "Compare: open a second simulator (File > Compare With APK…, or the device menu's Open Beside As)." }
+                return
+            }
+            let others = running.filter { $0 !== base }
+            self.compareQueue.async {
+                let results = others.map { ($0, base.compare(with: $0).comparison) }
+                DispatchQueue.main.async {
+                    self.compareScheduled = false
+                    guard self.comparing else { return }
+                    self.show(results, base: base)
+                }
+            }
+        }
+    }
+
+    private func show(_ results: [(Simulator, ScreenComparison)], base: Simulator) {
+        var baseBoxes: [CGRect] = []
+        var text: [String] = []
+        func rect(_ n: ScreenNode) -> CGRect { CGRect(x: n.left, y: n.top, width: n.right - n.left, height: n.bottom - n.top) }
+        for (other, c) in results {
+            baseBoxes += c.onlyA.map(rect) + c.moved.map { rect($0.a) }
+            if let v = grid.view(for: other) {
+                v.boxes = c.onlyB.map(rect) + c.moved.map { rect($0.b) }
+                v.areas = c.cells
+            }
+            let size = other.deviceSize
+            text.append("\(base.name) → \(other.name) \(Int(size.width))×\(Int(size.height)): \(c.summary)")
+            text += c.lines(limit: 5).map { "  " + $0 }
+        }
+        grid.view(for: base)?.boxes = baseBoxes
+        grid.view(for: base)?.areas = []
+        compareBar.stringValue = text.joined(separator: "\n")
+    }
+
     @objc func toggleSideBySide(_ sender: Any?) { setSideBySide(!sideBySide) }
     @objc func toggleMirror(_ sender: Any?) { setMirror(!mirror) }
 
-    func setSideBySide(_ on: Bool) { sideBySide = on; reload() }
+    func setSideBySide(_ on: Bool) {
+        if !on, comparing { setComparing(false) }
+        sideBySide = on
+        reload()
+    }
 
     func setMirror(_ on: Bool) {
         mirror = on
@@ -447,11 +574,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         }
     }
 
-    @objc func back(_ sender: Any?) { targets.forEach { $0.send("back") } }
-    @objc func home(_ sender: Any?) { targets.forEach { $0.send("home") } }
-    @objc func rotate(_ sender: Any?) { targets.forEach { $0.send("rotate right") } }
-    @objc func appearance(_ sender: Any?) { targets.forEach { $0.send("appearance toggle") } }
-    @objc func restart(_ sender: Any?) { targets.forEach { $0.send("restart") } }
+    @objc func back(_ sender: Any?) { targets.forEach { $0.send("back") }; scheduleCompare() }
+    @objc func home(_ sender: Any?) { targets.forEach { $0.send("home") }; scheduleCompare() }
+    @objc func rotate(_ sender: Any?) { targets.forEach { $0.send("rotate right") }; scheduleCompare() }
+    @objc func appearance(_ sender: Any?) { targets.forEach { $0.send("appearance toggle") }; scheduleCompare() }
+    @objc func restart(_ sender: Any?) { targets.forEach { $0.send("restart") }; scheduleCompare() }
     @objc func closeSelected(_ sender: Any?) { if let s = selected { Engine.shared.close(s) } }
 
     @objc func device(_ sender: NSMenuItem) {

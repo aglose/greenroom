@@ -46,6 +46,12 @@ final class SimulatorView: NSView {
     /// A caption under the picture and an outline when chosen: for views shown side by side.
     var showsCaption = false { didSet { caption.isHidden = !showsCaption; needsLayout = true } }
     var isChosen = false { didSet { updateOutline() } }
+    /// Areas to point out on the picture, in device pixels: boxes (differences in content) and filled areas
+    /// (differing pixels). Set by a comparison.
+    var boxes: [CGRect] = [] { didSet { needsLayout = true } }
+    var areas: [CGRect] = [] { didSet { needsLayout = true } }
+    private let boxLayer = CAShapeLayer()
+    private let areaLayer = CAShapeLayer()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -69,6 +75,12 @@ final class SimulatorView: NSView {
         caption.isHidden = true
         addSubview(caption)
         display.borderColor = NSColor.controlAccentColor.cgColor
+        areaLayer.fillColor = NSColor.systemPink.withAlphaComponent(0.28).cgColor
+        boxLayer.fillColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
+        boxLayer.strokeColor = NSColor.systemOrange.cgColor
+        boxLayer.lineWidth = 2
+        layer?.addSublayer(areaLayer)
+        layer?.addSublayer(boxLayer)
         NSLayoutConstraint.activate([
             message.centerXAnchor.constraint(equalTo: centerXAnchor),
             message.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -170,6 +182,19 @@ final class SimulatorView: NSView {
         // A flipped, layer-backed view's sublayers use its flipped coordinates.
         let r = pictureRect
         display.frame = r
+        // The marks, from device pixels to where the picture is drawn.
+        let size = simulator?.deviceSize ?? .zero
+        func path(_ rects: [CGRect]) -> CGPath {
+            let p = CGMutablePath()
+            guard size.width > 0, size.height > 0 else { return p }
+            let sx = r.width / size.width, sy = r.height / size.height
+            for q in rects { p.addRect(CGRect(x: r.minX + q.minX * sx, y: r.minY + q.minY * sy, width: q.width * sx, height: q.height * sy)) }
+            return p
+        }
+        areaLayer.frame = bounds
+        boxLayer.frame = bounds
+        areaLayer.path = path(areas)
+        boxLayer.path = path(boxes)
         CATransaction.commit()
         caption.frame = CGRect(x: 8, y: r.maxY + 6, width: bounds.width - 16, height: 16)
         updateOutline()

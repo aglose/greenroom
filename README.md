@@ -18,12 +18,15 @@ version of it and adds the workbench.
 - **Mirror Input** (⇧⌘M) sends each touch, key and toolbar command to every simulator, at the same place on each
   screen whatever its size.
 
+- **Compare** (⇧⌘D, or File > Compare With APK… for a second build) marks what differs between the chosen
+  simulator and the others as you use them: boxes around content that is only on one side or has moved, shading
+  over pixels that differ, and a summary under the pictures. With Mirror Input, two builds are driven as one.
 - **Agents** drive the same simulators over the Model Context Protocol: the screen as compact text with stable
   references, every action answered with what changed, checks and waits in one call
   ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.md)). The toolbar's Agent button shows what an agent did and
   can pause it.
 
-Still to come: an inspector, a timeline, build comparisons with differences marked.
+Still to come: an inspector, a timeline of recorded sessions, differences in network calls and frame timings.
 
 How a simulator gets on screen: the engine runs headless, sends its screen as H.264 over a loopback connection, and
 the app shows it with `AVSampleBufferDisplayLayer`; input goes back over the engine's control channel

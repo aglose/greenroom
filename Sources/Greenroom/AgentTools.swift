@@ -44,7 +44,7 @@ final class AgentTools {
         "unlock": "^$", "recreate": "^$", "restart": "^$", "process-death": "^$",
     ]
 
-    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for"]
+    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare"]
 
     static let tools: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Answers with the screen's nodes.", schema([
@@ -77,6 +77,10 @@ final class AgentTools {
          schema(["text": str, "gone": bool, "timeout_ms": int], required: ["text"])),
         ("screenshot", "A picture of the screen, for what the nodes do not show. annotate draws each tappable node's ref on it.",
          schema(["max_size": ["type": "integer", "description": "longest side in pixels (default 1000, 0 for full size)"], "annotate": bool])),
+        ("compare", "How two simulators' screens differ (two builds, or two devices): - only on the base, + only on the other, > moved; "
+            + "and, for screens of one size, the share of pixels that differ. map adds a picture of where.",
+         schema(["base": ["type": "string", "description": "simulator id compared against (default: the first running)"],
+                 "other": ["type": "string", "description": "simulator id compared (default: the second running)"], "map": bool], sim: false)),
         ("logs", "The app's log lines since the last call (android.util.Log and the engine's own).",
          schema(["filter": ["type": "string", "description": "keep lines containing this"], "lines": int])),
     ]
@@ -112,6 +116,7 @@ final class AgentTools {
             case "wait_for": content = text(try waitFor(args))
             case "screenshot": content = try screenshot(args)
             case "logs": content = text(try logs(args))
+            case "compare": content = try compare(args)
             default: throw Failure(message: "unknown tool \(name)")
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
@@ -476,6 +481,27 @@ final class AgentTools {
         }
         return [["type": "image", "data": png.base64EncodedString(), "mimeType": "image/png"],
                 ["type": "text", "text": "\(id(s)) \(w)x\(h) (device \(cg.width)x\(cg.height)) | \(activity(s))\(legend)"]]
+    }
+
+    private func compare(_ args: [String: Any]) throws -> [[String: Any]] {
+        let live = all().filter { $0.state == .running }
+        func pick(_ key: String, _ fallback: Int) throws -> Simulator {
+            if let want = args[key] as? String {
+                guard let s = live.first(where: { id($0) == want }) else { throw Failure(message: "no running simulator \(want): call simulators") }
+                return s
+            }
+            guard live.count > fallback else { throw Failure(message: "compare needs two running simulators: launch the other build or device first") }
+            return live[fallback]
+        }
+        let base = try pick("base", 0), other = try pick("other", 1)
+        guard base !== other else { throw Failure(message: "base and other are the same simulator") }
+        let (c, image) = base.compare(with: other)
+        let head = "\(id(base)) vs \(id(other)): \(c.isSame ? "SAME" : "DIFFERENT") | \(c.summary)"
+        var content = text(([head] + c.lines()).joined(separator: "\n"))
+        if args["map"] as? Bool == true, let image, !c.cells.isEmpty, let png = ScreenComparison.map(b: image, cells: c.cells) {
+            content.insert(["type": "image", "data": png.base64EncodedString(), "mimeType": "image/png"], at: 0)
+        }
+        return content
     }
 
     private func logs(_ args: [String: Any]) throws -> String {
