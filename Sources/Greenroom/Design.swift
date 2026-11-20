@@ -1,0 +1,153 @@
+import AppKit
+
+/// Every colour, radius and motion curve the window uses, in one place. Views take their values from here.
+enum Design {
+    // Colours of the dark stage and the glass that floats over it.
+    static let stage = NSColor(srgbRed: 0.071, green: 0.075, blue: 0.086, alpha: 1)
+    static let stageDot = NSColor(white: 1, alpha: 0.055)
+    static let ink = NSColor(srgbRed: 0.949, green: 0.953, blue: 0.961, alpha: 1)
+    static let mute = NSColor(srgbRed: 0.643, green: 0.659, blue: 0.690, alpha: 1)
+    static let well = NSColor(white: 1, alpha: 0.07)
+    static let wellOn = NSColor(white: 1, alpha: 0.17)
+    static let stroke = NSColor(white: 1, alpha: 0.09)
+    static let accent = NSColor(srgbRed: 0.239, green: 0.839, blue: 0.549, alpha: 1)       // live, selected, on
+    static let onAccent = NSColor(srgbRed: 0.024, green: 0.157, blue: 0.102, alpha: 1)
+    static let record = NSColor(srgbRed: 1.0, green: 0.322, blue: 0.278, alpha: 1)
+    static let difference = NSColor(srgbRed: 1.0, green: 0.435, blue: 0.812, alpha: 1)
+    static let agent = NSColor(srgbRed: 0.357, green: 0.294, blue: 0.839, alpha: 1)
+    static let warning = NSColor(srgbRed: 1.0, green: 0.753, blue: 0.302, alpha: 1)
+
+    // Shapes.
+    static let barHeight: CGFloat = 48
+    static let margin: CGFloat = 12
+    static let glassRadius: CGFloat = 16
+    static let controlRadius: CGFloat = 10
+
+    // Motion: three curves cover everything (docs/UI-PLAN.md). Each is a duration and a timing; springs where
+    // something moves, a quick ease where something changes state.
+    static let snap: TimeInterval = 0.15
+    static let move: TimeInterval = 0.32
+    static let arrive: TimeInterval = 0.22
+    static func moveTiming() -> CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1) }
+
+    /// Runs `changes` animated on the `move` curve, or at once when the person asked for reduced motion.
+    static func animate(_ duration: TimeInterval = move, _ changes: () -> Void, done: (() -> Void)? = nil) {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            changes(); done?(); return
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = duration
+            ctx.timingFunction = moveTiming()
+            ctx.allowsImplicitAnimation = true
+            changes()
+        }, completionHandler: done)
+    }
+}
+
+/// A rounded pane of frosted glass that floats over the stage.
+final class GlassView: NSVisualEffectView {
+    init(radius: CGFloat = Design.glassRadius) {
+        super.init(frame: .zero)
+        material = .hudWindow
+        blendingMode = .withinWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = radius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.borderWidth = 1
+        layer?.borderColor = Design.stroke.cgColor
+        appearance = NSAppearance(named: .darkAqua)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+}
+
+/// The canvas the devices stand on: dark, with a faint dot grid that shows the space is a surface.
+final class StageBackground: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = Design.stage.cgColor
+        let dot = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { _ in
+            Design.stageDot.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 0, y: 0, width: 2, height: 2)).fill()
+            return true
+        }
+        let pattern = CALayer()
+        pattern.backgroundColor = NSColor(patternImage: dot).cgColor
+        pattern.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        layer?.addSublayer(pattern)
+        dots = pattern
+    }
+
+    private var dots: CALayer?
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer?.backgroundColor = Design.stage.cgColor
+        dots?.frame = bounds
+        CATransaction.commit()
+    }
+}
+
+/// A button on glass: a symbol, a title, or both, in a soft well; tinted while on.
+final class GlassButton: NSButton {
+    enum Style { case plain, well, accent, record }
+    var style: Style = .plain { didSet { refresh() } }
+    var isOn = false { didSet { refresh() } }
+    private var hovering = false { didSet { refresh() } }
+
+    convenience init(symbol: String?, title: String = "", label: String, style: Style = .plain, target: AnyObject?, action: Selector?) {
+        self.init(frame: .zero)
+        self.title = title
+        if let symbol { image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) }
+        imagePosition = symbol == nil ? .noImage : (title.isEmpty ? .imageOnly : .imageLeading)
+        toolTip = label
+        setAccessibilityLabel(label)
+        self.target = target
+        self.action = action
+        self.style = style
+        isBordered = false
+        bezelStyle = .regularSquare
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+        font = .systemFont(ofSize: 13, weight: .medium)
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 30).isActive = true
+        if title.isEmpty { widthAnchor.constraint(equalToConstant: 32).isActive = true }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+        refresh()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        var s = super.intrinsicContentSize
+        if !title.isEmpty { s.width += 20 }
+        return s
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    private func refresh() {
+        let fill: NSColor, ink: NSColor
+        switch (style, isOn) {
+        case (.accent, _), (_, true) where style != .record: fill = isOn || style == .accent ? Design.accent : Design.well; ink = Design.onAccent
+        case (.record, true): fill = Design.record.withAlphaComponent(0.22); ink = NSColor(srgbRed: 1, green: 0.70, blue: 0.68, alpha: 1)
+        case (.well, _), (.record, false): fill = hovering ? Design.wellOn : Design.well; ink = Design.ink
+        default: fill = hovering ? Design.well : .clear; ink = isEnabled ? Design.ink : Design.mute
+        }
+        CATransaction.begin(); CATransaction.setAnimationDuration(Design.snap)
+        layer?.backgroundColor = fill.cgColor
+        CATransaction.commit()
+        contentTintColor = ink
+        attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: ink, .font: font ?? .systemFont(ofSize: 13)])
+    }
+
+    override var isEnabled: Bool { didSet { refresh(); alphaValue = isEnabled ? 1 : 0.45 } }
+}

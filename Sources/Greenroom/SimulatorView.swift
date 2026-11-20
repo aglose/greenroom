@@ -44,7 +44,7 @@ final class SimulatorView: NSView {
     /// Called when the view is clicked, before the click is sent.
     var onSelect: ((SimulatorView) -> Void)?
     /// A caption under the picture and an outline when chosen: for views shown side by side.
-    var showsCaption = false { didSet { caption.isHidden = !showsCaption; needsLayout = true } }
+    var showsCaption = false { didSet { needsLayout = true } }
     var isChosen = false { didSet { updateOutline() } }
     /// Areas to point out on the picture, in device pixels: boxes (differences in content) and filled areas
     /// (differing pixels). Set by a comparison.
@@ -59,29 +59,58 @@ final class SimulatorView: NSView {
     private var tracking: NSTrackingArea?
     private let boxLayer = CAShapeLayer()
     private let areaLayer = CAShapeLayer()
+    // The device's body: a metal rim, a black bezel, a camera, and a ring while chosen.
+    private let rimLayer = CAGradientLayer()
+    private let bezelLayer = CALayer()
+    private let cameraLayer = CALayer()
+    private let ringLayer = CALayer()
+    private let hingeLayer = CAGradientLayer()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
         display.videoGravity = .resizeAspect
-        display.backgroundColor = NSColor.clear.cgColor
-        display.cornerRadius = 14
+        display.backgroundColor = NSColor.black.cgColor
         display.masksToBounds = true
-        layer?.addSublayer(display)
+        display.cornerCurve = .continuous
+        ringLayer.borderColor = Design.accent.cgColor
+        ringLayer.borderWidth = 3
+        ringLayer.cornerCurve = .continuous
+        ringLayer.shadowColor = Design.accent.cgColor
+        ringLayer.shadowOpacity = 0.45
+        ringLayer.shadowRadius = 22
+        ringLayer.shadowOffset = .zero
+        ringLayer.opacity = 0
+        rimLayer.colors = [NSColor(white: 0.62, alpha: 1), NSColor(white: 0.24, alpha: 1), NSColor(white: 0.49, alpha: 1), NSColor(white: 0.19, alpha: 1)].map(\.cgColor)
+        rimLayer.locations = [0, 0.38, 0.7, 1]
+        rimLayer.startPoint = CGPoint(x: 0, y: 0)
+        rimLayer.endPoint = CGPoint(x: 1, y: 1)
+        rimLayer.cornerCurve = .continuous
+        rimLayer.shadowColor = NSColor.black.cgColor
+        rimLayer.shadowOpacity = 0.85
+        rimLayer.shadowRadius = 34
+        rimLayer.shadowOffset = CGSize(width: 0, height: -26)
+        bezelLayer.backgroundColor = NSColor(srgbRed: 0.02, green: 0.02, blue: 0.024, alpha: 1).cgColor
+        bezelLayer.cornerCurve = .continuous
+        cameraLayer.backgroundColor = NSColor(srgbRed: 0.02, green: 0.02, blue: 0.024, alpha: 1).cgColor
+        cameraLayer.borderColor = NSColor(white: 0.12, alpha: 1).cgColor
+        cameraLayer.borderWidth = 1
+        hingeLayer.colors = [NSColor(white: 0, alpha: 0.45).cgColor, NSColor(white: 1, alpha: 0.07).cgColor]
+        hingeLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        hingeLayer.endPoint = CGPoint(x: 1, y: 0.5)
+        for l in [ringLayer, rimLayer, bezelLayer, display, hingeLayer, cameraLayer] { layer?.addSublayer(l) }
 
         message.font = .systemFont(ofSize: 15, weight: .medium)
-        message.textColor = .secondaryLabelColor
+        message.textColor = Design.mute
         message.alignment = .center
         message.translatesAutoresizingMaskIntoConstraints = false
         addSubview(message)
-        caption.font = .systemFont(ofSize: 11, weight: .medium)
-        caption.textColor = .secondaryLabelColor
+        caption.font = .systemFont(ofSize: 12, weight: .regular)
+        caption.textColor = Design.mute
         caption.alignment = .center
         caption.lineBreakMode = .byTruncatingMiddle
-        caption.isHidden = true
         addSubview(caption)
-        display.borderColor = NSColor.controlAccentColor.cgColor
         areaLayer.fillColor = NSColor.systemPink.withAlphaComponent(0.28).cgColor
         boxLayer.fillColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
         boxLayer.strokeColor = NSColor.systemOrange.cgColor
@@ -159,15 +188,49 @@ final class SimulatorView: NSView {
         CATransaction.commit()
     }
 
+    /// What kind of body the device is drawn in, from its screen's shape.
+    private enum Body { case phone, fold, watch, flat }
+
+    private var body: Body {
+        let s = simulator?.deviceSize ?? .zero
+        guard s.width > 0, s.height > 0 else { return .phone }
+        let a = s.width / s.height
+        if abs(s.width - s.height) < 2, max(s.width, s.height) < 700 { return .watch }
+        if a > 0.8, a < 1.25 { return .fold }
+        if a > 1.25 && max(s.width, s.height) > 2000 { return .flat }   // tablet, desktop, TV
+        return .phone
+    }
+
+    private var kindName: String {
+        if let i = simulator?.options.firstIndex(of: "--device"), let d = simulator?.options.dropFirst(i + 1).first {
+            return Workbench.title(d)
+        }
+        switch body {
+        case .phone: return "Phone"
+        case .fold: return "Foldable"
+        case .watch: return "Watch"
+        case .flat: return "Tablet"
+        }
+    }
+
     private func updateCaption() {
-        guard let sim = simulator else { caption.stringValue = ""; return }
+        guard let sim = simulator else { caption.attributedStringValue = NSAttributedString(); return }
         let size = sim.deviceSize
-        caption.stringValue = size.width > 0 ? "\(sim.name) · \(Int(size.width))×\(Int(size.height))" : sim.name
+        let text = NSMutableAttributedString(string: kindName, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink])
+        var rest = "   \(sim.name)"
+        if size.width > 0 { rest += "   \(Int(size.width))×\(Int(size.height))" }
+        text.append(NSAttributedString(string: rest, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.mute]))
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
+        centred.lineBreakMode = .byTruncatingMiddle
+        text.addAttribute(.paragraphStyle, value: centred, range: NSRange(location: 0, length: text.length))
+        caption.attributedStringValue = text
     }
 
     private func updateOutline() {
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        display.borderWidth = isChosen && showsCaption ? 2 : 0
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(Design.arrive)
+        ringLayer.opacity = isChosen && showsCaption && simulator != nil ? 1 : 0
         CATransaction.commit()
     }
 
@@ -178,12 +241,33 @@ final class SimulatorView: NSView {
     /// Where the picture is drawn: the device's shape fitted into the view with a margin.
     private var pictureRect: CGRect {
         let size = simulator?.deviceSize ?? .zero
-        var area = bounds.insetBy(dx: showsCaption ? 12 : 20, dy: showsCaption ? 12 : 20)
-        if showsCaption { area.size.height -= 22 }
+        var area = bounds.insetBy(dx: 28, dy: 24)
+        area.size.height -= 30   // the caption
         guard size.width > 0, size.height > 0, area.width > 0, area.height > 0 else { return area }
-        let scale = min(area.width / size.width, area.height / size.height)
+        // First fit, then take the body's bezel and rim off the space and fit again.
+        let first = min(area.width / size.width, area.height / size.height)
+        let edge = 2 * (bezel(forShortSide: min(size.width, size.height) * first) + 3)
+        let scale = max(0.01, min((area.width - edge) / size.width, (area.height - edge) / size.height))
         let w = size.width * scale, h = size.height * scale
-        return CGRect(x: area.midX - w / 2, y: area.midY - h / 2, width: w, height: h)
+        return CGRect(x: (area.midX - w / 2).rounded(), y: (area.midY - h / 2).rounded(), width: w.rounded(), height: h.rounded())
+    }
+
+    private func bezel(forShortSide side: CGFloat) -> CGFloat {
+        switch body {
+        case .watch: return max(8, side * 0.055)
+        case .flat: return max(6, side * 0.018)
+        default: return min(12, max(6, side * 0.028))
+        }
+    }
+
+    private func screenRadius(_ r: CGRect) -> CGFloat {
+        let short = min(r.width, r.height)
+        switch body {
+        case .watch: return short / 2
+        case .phone: return short * 0.125
+        case .fold: return short * 0.04
+        case .flat: return short * 0.03
+        }
     }
 
     override func layout() {
@@ -193,6 +277,29 @@ final class SimulatorView: NSView {
         // A flipped, layer-backed view's sublayers use its flipped coordinates.
         let r = pictureRect
         display.frame = r
+        let hasDevice = simulator != nil && (simulator?.deviceSize.width ?? 0) > 0
+        let b = bezel(forShortSide: min(r.width, r.height))
+        let screenR = screenRadius(r)
+        display.cornerRadius = screenR
+        let bezelRect = r.insetBy(dx: -b, dy: -b)
+        bezelLayer.frame = bezelRect
+        bezelLayer.cornerRadius = body == .watch ? bezelRect.width / 2 : screenR + b
+        let rimRect = bezelRect.insetBy(dx: -3, dy: -3)
+        rimLayer.frame = rimRect
+        rimLayer.cornerRadius = body == .watch ? rimRect.width / 2 : screenR + b + 3
+        rimLayer.shadowPath = CGPath(roundedRect: CGRect(origin: .zero, size: rimRect.size), cornerWidth: rimLayer.cornerRadius, cornerHeight: rimLayer.cornerRadius, transform: nil)
+        let ringRect = rimRect.insetBy(dx: -3, dy: -3)
+        ringLayer.frame = ringRect
+        ringLayer.cornerRadius = rimLayer.cornerRadius + 3
+        let cam = max(8, min(14, r.width * 0.044))
+        switch body {
+        case .phone: cameraLayer.frame = CGRect(x: r.midX - cam / 2, y: r.minY + cam * 0.9, width: cam, height: cam)
+        case .fold: cameraLayer.frame = CGRect(x: r.maxX - cam * 2.6, y: r.minY + cam * 1.1, width: cam, height: cam)
+        default: cameraLayer.frame = .zero
+        }
+        cameraLayer.cornerRadius = cam / 2
+        hingeLayer.frame = body == .fold ? CGRect(x: r.midX - 1, y: r.minY, width: 2, height: r.height) : .zero
+        for l in [rimLayer, bezelLayer, cameraLayer, hingeLayer] as [CALayer] { l.isHidden = !hasDevice }
         // The marks, from device pixels to where the picture is drawn.
         let size = simulator?.deviceSize ?? .zero
         func path(_ rects: [CGRect]) -> CGPath {
@@ -209,7 +316,8 @@ final class SimulatorView: NSView {
         areaLayer.path = path(areas)
         boxLayer.path = path(boxes)
         CATransaction.commit()
-        caption.frame = CGRect(x: 8, y: r.maxY + 6, width: bounds.width - 16, height: 16)
+        caption.frame = CGRect(x: 8, y: rimRect.maxY + 12, width: bounds.width - 16, height: 18)
+        caption.isHidden = !hasDevice
         updateOutline()
     }
 

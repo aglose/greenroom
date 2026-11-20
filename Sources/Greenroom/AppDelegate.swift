@@ -20,6 +20,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         compareCheckIfAsked()
         inspectCheckIfAsked()
         recordCheckIfAsked()
+        stageCheckIfAsked()
+    }
+
+    /// `Greenroom --stage-check DIR APK`: the stage with a phone, a foldable and a watch side by side, captured once
+    /// all three show a picture, then with the log and the inspector open.
+    private func stageCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--stage-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        let apk = URL(fileURLWithPath: args[i + 2])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        workbench.window.setContentSize(NSSize(width: 1440, height: 900))
+        workbench.window.center()
+        captureWindow(to: dir.appendingPathComponent("0-empty.png"))
+        guard workbench.open(apk, remember: false, options: ["--appearance", "dark"]) != nil else { return }
+        workbench.openBeside(apk: apk, device: "pixel-10-pro-fold")
+        workbench.openBeside(apk: apk, device: "watch")
+        var waited = 0.0
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
+            waited += 0.5
+            let sims = Engine.shared.simulators
+            guard sims.count == 3, sims.allSatisfy({ $0.framesShown > 0 }) || waited > 120 else { return }
+            timer.invalidate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [self] in
+                captureWindow(to: dir.appendingPathComponent("1-three.png"))
+                print("[greenroom] stage: " + sims.map { "\($0.name) \(Int($0.deviceSize.width))x\(Int($0.deviceSize.height)) frames \($0.framesShown)" }.joined(separator: ", "))
+                workbench.setShowingLog(true)
+                workbench.setMirror(true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                    captureWindow(to: dir.appendingPathComponent("2-log-mirror.png"))
+                    workbench.setShowingLog(false)
+                    workbench.setSideBySide(false)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                        captureWindow(to: dir.appendingPathComponent("3-one.png"))
+                        NSApp.terminate(nil)
+                    }
+                }
+            }
+        }
     }
 
     /// `Greenroom --visual-check DIR APK`: for looking at the workbench from a script. Opens the APK and writes

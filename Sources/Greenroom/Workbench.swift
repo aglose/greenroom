@@ -34,6 +34,17 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var agentPanel: AgentPanel?
     private let agentPopover = NSPopover()
     private let status = NSTextField(labelWithString: "")
+    // The floating chrome: a glass bar along the top and a rail of panes on the right.
+    private let header = GlassView()
+    private let rail = GlassView()
+    private var appChip: GlassButton!
+    private var deviceButton: GlassButton!
+    private var deviceButtons: [GlassButton] = []
+    private var mirrorButton: GlassButton!
+    private var layoutButtons: [GlassButton] = []
+    private var recordButton: GlassButton!
+    private var railButtons: [String: GlassButton] = [:]
+    private var splitController: NSSplitViewController!
     private var rows: [Row] = []
     private var selected: Simulator?
 
@@ -52,13 +63,19 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         super.init()
         window.title = "Greenroom"
         window.isReleasedWhenClosed = false
-        window.contentMinSize = NSSize(width: 760, height: 480)
+        window.contentMinSize = NSSize(width: 900, height: 560)
         window.toolbarStyle = .unified
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = Design.stage
 
         let split = NSSplitViewController()
+        splitController = split
         let side = NSSplitViewItem(sidebarWithViewController: sidebarController())
         side.minimumThickness = 200
         side.maximumThickness = 320
+        side.isCollapsed = true   // the stage gets the window; the library slides in when asked for
         split.addSplitViewItem(side)
         let content = NSViewController()
         compareBar.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -66,28 +83,35 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         compareBar.maximumNumberOfLines = 7
         compareBar.lineBreakMode = .byTruncatingTail
         compareBar.isSelectable = true
-        let stack = NSView()
-        stack.wantsLayer = true
-        stack.layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor   // one surface with the simulators above
+        let stack = StageBackground()
         for v in [grid, compareBar, logPanel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
         compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
         logHeight = logPanel.heightAnchor.constraint(equalToConstant: 0)
         logPanel.isHidden = true
+        logPanel.wantsLayer = true   // a dock of glass along the bottom, as the timeline will be
+        logPanel.layer?.cornerRadius = Design.glassRadius
+        logPanel.layer?.cornerCurve = .continuous
+        logPanel.layer?.masksToBounds = true
+        logPanel.layer?.borderWidth = 1
+        logPanel.layer?.borderColor = Design.stroke.cgColor
+        logPanel.layer?.backgroundColor = NSColor(srgbRed: 0.17, green: 0.18, blue: 0.2, alpha: 0.86).cgColor
         NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: stack.topAnchor),
+            grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -64),
             grid.bottomAnchor.constraint(equalTo: compareBar.topAnchor),
             compareBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
             compareBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
             compareBar.bottomAnchor.constraint(equalTo: logPanel.topAnchor, constant: -8),
             compareHeight,
-            logPanel.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            logPanel.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            logPanel.bottomAnchor.constraint(equalTo: stack.bottomAnchor),
+            logPanel.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
+            logPanel.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -64),
+            logPanel.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: -Design.margin),
             logHeight,
         ])
-        content.view = DropTarget(content: stack) { [weak self] in self?.open($0) }
+        let drop = DropTarget(content: stack) { [weak self] in self?.open($0) }
+        content.view = drop
+        buildChrome(in: drop)
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
         inspectorItem.minimumThickness = 240
@@ -101,12 +125,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1080, height: 780))
 
-        let toolbar = NSToolbar(identifier: "workbench")
-        toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
+        // An empty toolbar only gives the title bar the height that centres the window buttons on the glass bar.
+        let toolbar = NSToolbar(identifier: "workbench-empty")
+        toolbar.showsBaselineSeparator = false
         window.toolbar = toolbar
+        window.setContentSize(NSSize(width: 1440, height: 900))
 
-        window.setFrameAutosaveName("Workbench2")   // a new name: the first layout's saved size was too narrow for the toolbar
+        window.setFrameAutosaveName("Workbench3")   // the glass layout wants a larger first window
         if window.frame.origin == .zero { window.center() }
         Engine.shared.onChange = { [weak self] in self?.reload() }
         reload()
@@ -202,6 +227,172 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let alive = sims.filter(\.isAlive).count
         status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac"
         window.toolbar?.validateVisibleItems()
+        updateChrome()
+    }
+
+    // MARK: Floating chrome
+
+    private func buildChrome(in host: NSView) {
+        appChip = GlassButton(symbol: nil, title: "No app", label: "Running apps", style: .well, target: self, action: #selector(showAppMenu(_:)))
+        deviceButton = GlassButton(symbol: "iphone", title: "Phone", label: "Switch the device while the app runs", style: .well, target: self, action: #selector(showDeviceMenu(_:)))
+        deviceButtons = [
+            GlassButton(symbol: "chevron.backward", label: "Back", target: self, action: #selector(back(_:))),
+            GlassButton(symbol: "house", label: "Home", target: self, action: #selector(home(_:))),
+            GlassButton(symbol: "rotate.right", label: "Rotate", target: self, action: #selector(rotate(_:))),
+            GlassButton(symbol: "circle.lefthalf.filled", label: "Light or dark", target: self, action: #selector(appearance(_:))),
+            GlassButton(symbol: nil, title: "Shake", label: "Shake the device", target: self, action: #selector(shake(_:))),
+        ]
+        mirrorButton = GlassButton(symbol: "dot.radiowaves.left.and.right", title: "Mirror", label: "Send touches and keys to every device", style: .well, target: self, action: #selector(toggleMirror(_:)))
+        layoutButtons = [
+            GlassButton(symbol: "iphone", label: "One device", target: self, action: #selector(showOne(_:))),
+            GlassButton(symbol: "rectangle.split.2x1", label: "Every device, side by side", target: self, action: #selector(showAll(_:))),
+            GlassButton(symbol: "plusminus", label: "Compare: mark what differs", target: self, action: #selector(toggleCompare(_:))),
+        ]
+        recordButton = GlassButton(symbol: "record.circle", title: "Record", label: "Record input, log, network and screen for replay", style: .record, target: self, action: #selector(toggleRecording(_:)))
+        let library = GlassButton(symbol: "sidebar.left", label: "Show the library", target: self, action: #selector(toggleLibrary(_:)))
+        let shot = GlassButton(symbol: "camera", label: "Screenshot", target: self, action: #selector(screenshot(_:)))
+
+        func group(_ views: [NSView]) -> NSView {
+            let well = NSView()
+            well.wantsLayer = true
+            well.layer?.backgroundColor = Design.well.cgColor
+            well.layer?.cornerRadius = Design.controlRadius
+            well.layer?.cornerCurve = .continuous
+            let row = NSStackView(views: views)
+            row.spacing = 2
+            row.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
+            row.translatesAutoresizingMaskIntoConstraints = false
+            well.addSubview(row)
+            NSLayoutConstraint.activate([row.topAnchor.constraint(equalTo: well.topAnchor), row.bottomAnchor.constraint(equalTo: well.bottomAnchor),
+                                         row.leadingAnchor.constraint(equalTo: well.leadingAnchor), row.trailingAnchor.constraint(equalTo: well.trailingAnchor)])
+            return well
+        }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), spacer, mirrorButton, group(layoutButtons), shot, recordButton])
+        bar.spacing = 8
+        bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(bar)
+
+        let rails: [(String, String, String, Selector)] = [
+            ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
+            ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
+            ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
+        ]
+        let column = NSStackView(views: rails.map { id, symbol, label, action in
+            let b = GlassButton(symbol: symbol, label: label, target: self, action: action)
+            railButtons[id] = b
+            return b
+        })
+        column.orientation = .vertical
+        column.spacing = 4
+        column.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        rail.addSubview(column)
+
+        for v in [header, rail] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: host.topAnchor, constant: 4),
+            header.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 6),
+            header.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
+            header.heightAnchor.constraint(equalToConstant: 44),
+            bar.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            bar.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            rail.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            rail.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -Design.margin),
+            column.topAnchor.constraint(equalTo: rail.topAnchor),
+            column.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
+            column.leadingAnchor.constraint(equalTo: rail.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: rail.trailingAnchor),
+        ])
+    }
+
+    private func updateChrome() {
+        guard appChip != nil else { return }
+        let alive = Engine.shared.simulators.filter(\.isAlive).count
+        if let sim = selected {
+            let state = sim.state == .running ? "  ● Live" : (sim.state == .starting ? "  Starting…" : "  Ended")
+            let text = NSMutableAttributedString(string: sim.name, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.ink])
+            text.append(NSAttributedString(string: state, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                                                                       .foregroundColor: sim.state == .running ? Design.accent : Design.mute]))
+            if alive > 1 { text.append(NSAttributedString(string: "  \(alive) devices", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.mute])) }
+            appChip.title = sim.name
+            appChip.attributedTitle = text
+        } else {
+            appChip.title = "Open an APK"
+        }
+        let kind = selected.flatMap { s -> String? in
+            guard let i = s.options.firstIndex(of: "--device"), let d = s.options.dropFirst(i + 1).first else { return nil }
+            return Self.title(d)
+        } ?? "Phone"
+        deviceButton.title = kind
+        deviceButton.isEnabled = live != nil
+        for b in deviceButtons { b.isEnabled = live != nil }
+        mirrorButton.isOn = mirror
+        mirrorButton.title = mirror ? "Mirroring to all" : "Mirror"
+        mirrorButton.isHidden = alive < 2 && !mirror
+        layoutButtons[0].isOn = !sideBySide
+        layoutButtons[1].isOn = sideBySide && !comparing
+        layoutButtons[2].isOn = comparing
+        for b in layoutButtons.dropFirst() { b.isEnabled = alive > 1 || sideBySide }
+        recordButton.isOn = isRecording
+        recordButton.title = isRecording ? "Recording" : "Record"
+        recordButton.isEnabled = live != nil
+        railButtons["inspect"]?.isOn = inspecting
+        railButtons["log"]?.isOn = showingLog
+        railButtons["agent"]?.isOn = agentActivity.client != nil
+    }
+
+    @objc func toggleLibrary(_ sender: Any?) {
+        guard let item = splitController.splitViewItems.first else { return }
+        item.animator().isCollapsed.toggle()
+    }
+
+    @objc private func showOne(_ sender: Any?) { setSideBySide(false) }
+    @objc private func showAll(_ sender: Any?) { if comparing { setComparing(false) }; setSideBySide(true) }
+    @objc func shake(_ sender: Any?) { targets.forEach { $0.send("sensor shake") }; scheduleCompare() }
+
+    @objc private func showAppMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        for sim in Engine.shared.simulators {
+            let item = menu.addItem(withTitle: sim.name + (sim.isAlive ? "" : " (ended)"), action: #selector(pickSimulator(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = sim
+            item.state = sim === selected ? .on : .off
+        }
+        if !Engine.shared.simulators.isEmpty { menu.addItem(.separator()) }
+        let open = menu.addItem(withTitle: "Open APK…", action: Selector(("openDocument:")), keyEquivalent: "")
+        open.target = nil
+        if selected != nil {
+            menu.addItem(withTitle: "Restart App", action: #selector(restart(_:)), keyEquivalent: "").target = self
+            menu.addItem(withTitle: "Close Simulator", action: #selector(closeSelected(_:)), keyEquivalent: "").target = self
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    @objc private func pickSimulator(_ sender: NSMenuItem) {
+        if let sim = sender.representedObject as? Simulator { select(sim) }
+    }
+
+    @objc private func showDeviceMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        for d in Self.devices {
+            let m = menu.addItem(withTitle: Self.title(d), action: #selector(device(_:)), keyEquivalent: "")
+            m.target = self
+            m.representedObject = d
+        }
+        menu.addItem(.separator())
+        let again = NSMenuItem(title: "Open Beside As", action: nil, keyEquivalent: "")
+        again.submenu = NSMenu()
+        for d in Self.devices {
+            let m = again.submenu!.addItem(withTitle: Self.title(d), action: #selector(openBeside(_:)), keyEquivalent: "")
+            m.target = self
+            m.representedObject = d
+        }
+        menu.addItem(again)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
 
     // MARK: Sidebar
@@ -348,7 +539,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         Tool(id: "record", label: "Record", symbol: "record.circle", command: #selector(toggleRecording(_:))),
         Tool(id: "log", label: "Log", symbol: "text.alignleft", command: #selector(toggleLog(_:))),
     ]
-    private static let devices = ["phone", "foldable", "tablet", "desktop", "tv"]
+    private static let devices = ["phone", "foldable", "pixel-10-pro-fold", "watch", "tablet", "desktop", "tv"]
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         ["back", "rotate", "appearance", "device", "flex", "grid", "mirror", "compare", "flex", "agent", "record", "shot", "log", "inspect"].map {
@@ -446,7 +637,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         return on ? image?.withSymbolConfiguration(.init(paletteColors: [.controlAccentColor])) : image
     }
 
-    private static func title(_ device: String) -> String { device == "tv" ? "TV" : device.capitalized }
+    static func title(_ device: String) -> String {
+        switch device {
+        case "tv": return "TV"
+        case "pixel-10-pro-fold": return "Pixel 10 Pro Fold"
+        default: return device.capitalized
+        }
+    }
 
     private var live: Simulator? { selected?.state == .running ? selected : nil }
 
@@ -462,9 +659,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     func setShowingLog(_ on: Bool) {
         showingLog = on
         logPanel.isHidden = !on
-        logHeight.constant = on ? 190 : 0
+        Design.animate { self.logHeight.animator().constant = on ? 210 : 0 }
         logPanel.follow(on ? selected : nil)
         window.toolbar?.validateVisibleItems()
+        updateChrome()
     }
 
     /// The log lines shown (for scripted checks).
@@ -484,7 +682,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             if answer.hasPrefix("error") { self.window.subtitle = "Recorder: \(answer)"; return }
             if on { self.recording.insert(key) } else { self.recording.remove(key) }
             self.window.subtitle = on ? "Recording \(sim.name)" : sim.name
-            self.window.toolbar?.validateVisibleItems()
+            self.updateChrome()
         }
     }
 
@@ -696,7 +894,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @discardableResult
     func openBeside(apk: URL, device: String) -> Simulator? {
         let keep = selected
-        let sim = open(apk, remember: false, options: ["--device", device])
+        var options: [String] = []
+        var rest = ArraySlice(keep?.options ?? [])
+        while let o = rest.popFirst() { if o == "--device" { _ = rest.popFirst() } else { options.append(o) } }
+        let sim = open(apk, remember: false, options: options + ["--device", device])
         sideBySide = true
         if let keep { selected = keep; window.subtitle = keep.name }
         reload()
@@ -713,16 +914,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if agentPopover.isShown { agentPopover.close(); return }
         agentPopover.contentViewController = agentPanel
         agentPopover.behavior = .transient
-        let item = window.toolbar?.items.first { $0.itemIdentifier.rawValue == "agent" }
-        if let anchor = item?.view ?? window.contentView {
-            agentPopover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        if let anchor = railButtons["agent"] ?? window.contentView {
+            agentPopover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minX)
         }
         agentPanel.refresh()
     }
 
     func agentChanged() {
         agentPanel?.refresh()
-        window.toolbar?.validateVisibleItems()
+        updateChrome()
     }
 
     /// A click made as the mouse would make it, at a fraction of the simulator view's size (for scripted checks).
@@ -796,7 +996,7 @@ private final class DropTarget: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
         NSLayoutConstraint.activate([
-            content.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
+            content.topAnchor.constraint(equalTo: topAnchor),
             content.bottomAnchor.constraint(equalTo: bottomAnchor),
             content.leadingAnchor.constraint(equalTo: leadingAnchor),
             content.trailingAnchor.constraint(equalTo: trailingAnchor),
