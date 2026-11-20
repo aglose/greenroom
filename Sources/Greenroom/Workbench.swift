@@ -78,6 +78,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     let toast = Toast(frame: .zero)
     let palette = Palette(frame: .zero)
     private let scrim = Scrim()
+    // Screenshot tests (SnapshotReview.swift): a full-stage sheet.
+    let snapshotReview = SnapshotReview(frame: .zero)
     private(set) var showingPalette = false
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
@@ -350,6 +352,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
             ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
             ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
+            ("snapshots", "photo.stack", "Screenshot tests", #selector(toggleSnapshots(_:))),
         ]
         let column = NSStackView(views: rails.map { id, symbol, label, action in
             let b = GlassButton(symbol: symbol, label: label, target: self, action: action)
@@ -367,6 +370,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         for v in [networkPane, devicePane, recordingsPane, header, rail, scrim, palette] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(v) }
         scrim.isHidden = true
         palette.isHidden = true
+        installSnapshotReview(in: host)
         scrim.onClick = { [weak self] in self?.hidePalette() }
         palette.onClose = { [weak self] in self?.hidePalette() }
         palette.source = { [weak self] in self?.paletteItems() ?? [] }
@@ -472,6 +476,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         railButtons["timeline"]?.isOn = showingTimeline
         timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
+        railButtons["snapshots"]?.isOn = snapshotReview.isOpen
     }
 
     @objc func toggleNetwork(_ sender: Any?) { setShowingNetwork(!showingNetwork) }
@@ -481,6 +486,25 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleTests(_ sender: Any?) { setShowingTests(!showingTests) }
     @objc func toggleDiagnostics(_ sender: Any?) { setShowingDiagnostics(!showingDiagnostics) }
     @objc func toggleRecordings(_ sender: Any?) { setShowingRecordings(!showingRecordings) }
+
+    // MARK: Screenshot tests
+
+    private func installSnapshotReview(in host: NSView) {
+        snapshotReview.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(snapshotReview, positioned: .below, relativeTo: scrim)
+        NSLayoutConstraint.activate([snapshotReview.topAnchor.constraint(equalTo: host.topAnchor), snapshotReview.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+                                     snapshotReview.leadingAnchor.constraint(equalTo: host.leadingAnchor), snapshotReview.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+        snapshotReview.defaultAPK = { [weak self] in self?.selected?.apk }
+        snapshotReview.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+        snapshotReview.onToggle = { [weak self] in self?.updateChrome() }
+    }
+
+    @objc func toggleSnapshots(_ sender: Any?) { if snapshotReview.isOpen { snapshotReview.close() } else { showSnapshots() } }
+
+    func showSnapshots(run: Bool = false) {
+        snapshotReview.open()
+        if run { snapshotReview.runIfReady() }
+    }
 
     // MARK: Command palette
 
@@ -616,6 +640,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
         add("pane.inspect", inspecting ? "Stop inspecting" : "Inspect the screen", "Panes", "cursorarrow.rays", "⌥⌘I", keywords: "nodes accessibility tree") { [weak self] in self?.toggleInspector(nil) }
         add("pane.agent", "Agent activity", "Panes", "sparkles", "⌥⌘A", keywords: "claude mcp") { [weak self] in self?.showAgent(nil) }
+        add("snapshots.run", "Run screenshot tests…", "Panes", "photo.stack", keywords: "golden snapshot visual regression compare") { [weak self] in self?.showSnapshots(run: true) }
+        add("snapshots.show", "Show screenshot test results", "Panes", "photo.stack", keywords: "golden snapshot visual regression review") { [weak self] in self?.showSnapshots() }
         add("pane.library", "Show or hide the library", "Panes", "sidebar.left") { [weak self] in self?.toggleLibrary(nil) }
         // Recordings saved before.
         let files = (try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []

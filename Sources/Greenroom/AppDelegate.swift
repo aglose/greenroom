@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         extrasCheckIfAsked()
         devHooksCheckIfAsked()
         replayCheckIfAsked()
+        SnapshotCheck.runIfAsked(workbench)   // `--snapshots-check`, SnapshotCheck.swift
     }
 
     /// `Greenroom --mock-check DIR APK`: the test app fetches a page; the request is failed from the network pane and
