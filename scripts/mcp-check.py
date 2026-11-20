@@ -27,7 +27,10 @@ def rpc(method, params=None):
     return json.loads(line)
 
 def call(name, **args):
-    r = rpc("tools/call", {"name": name, "arguments": args}).get("result", {})
+    answer = rpc("tools/call", {"name": name, "arguments": args})
+    if "result" not in answer:
+        return "no result: " + json.dumps(answer)[:300], True, []
+    r = answer["result"]
     text = "\n".join(c["text"] for c in r.get("content", []) if c["type"] == "text")
     return text, bool(r.get("isError")), [c for c in r.get("content", []) if c["type"] == "image"]
 
