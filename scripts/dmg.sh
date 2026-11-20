@@ -36,7 +36,8 @@ notary() { # FILE
 
 if [[ -n "$NOTARIZE" ]]; then
   [[ -n "$IDENTITY" ]] || { echo "error: --notarize needs --identity (a Developer ID Application identity)" >&2; exit 1; }
-  codesign -dvv "$APP" 2>&1 | grep -q 'Authority=Developer ID Application' \
+  signer=$(codesign -dvv "$APP" 2>&1 || true)
+  [[ "$signer" == *"Authority=Developer ID Application"* ]] \
     || { echo "error: the app is not signed with a Developer ID identity; Apple will refuse it" >&2; exit 1; }
   ZIP="$ROOT/build/Greenroom-notarize.zip"
   ditto -c -k --keepParent "$APP" "$ZIP"
