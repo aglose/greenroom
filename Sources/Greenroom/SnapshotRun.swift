@@ -182,7 +182,7 @@ final class SnapshotRun {
         if wait { stop() } else { DispatchQueue.global(qos: .utility).async(execute: stop) }
     }
 
-    private static func descendants(of pid: Int32) -> [Int32] {
+    static func descendants(of pid: Int32) -> [Int32] {
         var all: [Int32] = [], frontier = [pid]
         while let next = frontier.popLast() {
             let p = Process(), pipe = Pipe()

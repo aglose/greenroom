@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         devHooksCheckIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
+        mapCheckIfAsked()
         PerfCheck.runIfAsked(self)   // `--snapshots-check`, SnapshotCheck.swift
     }
 

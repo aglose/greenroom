@@ -80,6 +80,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private let scrim = Scrim()
     // Screenshot tests (SnapshotReview.swift): a full-stage sheet.
     let snapshotReview = SnapshotReview(frame: .zero)
+    // The screen map (ScreenMap.swift): a full-stage sheet too.
+    let screenMap = ScreenMap(frame: .zero)
     private(set) var showingPalette = false
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
@@ -353,6 +355,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             ("-", "", "", #selector(toggleLog(_:))),
             ("tests", "checkmark.circle", "Tests: run an androidTest APK", #selector(toggleTests(_:))),
             ("snapshots", "photo.stack", "Screenshot tests", #selector(toggleSnapshots(_:))),
+            ("map", "point.3.connected.trianglepath.dotted", "Screen map: walk the app and see every screen", #selector(toggleMap(_:))),
             ("recordings", "film", "Recordings: replay, and find the first build that differs", #selector(toggleRecordings(_:))),
             ("-", "", "", #selector(toggleLog(_:))),
             ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
@@ -385,6 +388,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         scrim.isHidden = true
         palette.isHidden = true
         installSnapshotReview(in: host)
+        installScreenMap(in: host)
         scrim.onClick = { [weak self] in self?.hidePalette() }
         palette.onClose = { [weak self] in self?.hidePalette() }
         palette.source = { [weak self] in self?.paletteItems() ?? [] }
@@ -491,6 +495,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         timeline.saveButton.isEnabled = isRecording
         railButtons["agent"]?.isOn = agentActivity.client != nil
         railButtons["snapshots"]?.isOn = snapshotReview.isOpen
+        railButtons["map"]?.isOn = screenMap.isOpen
     }
 
     @objc func toggleNetwork(_ sender: Any?) { setShowingNetwork(!showingNetwork) }
@@ -516,8 +521,58 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleSnapshots(_ sender: Any?) { if snapshotReview.isOpen { snapshotReview.close() } else { showSnapshots() } }
 
     func showSnapshots(run: Bool = false) {
+        if screenMap.isOpen { screenMap.close() }
         snapshotReview.open()
         if run { snapshotReview.runIfReady() }
+    }
+
+    // MARK: Screen map
+
+    private func installScreenMap(in host: NSView) {
+        screenMap.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(screenMap, positioned: .below, relativeTo: scrim)
+        NSLayoutConstraint.activate([screenMap.topAnchor.constraint(equalTo: host.topAnchor), screenMap.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+                                     screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+        screenMap.defaultAPK = { [weak self] in self?.selected?.apk }
+        screenMap.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+        screenMap.onToggle = { [weak self] in self?.updateChrome() }
+        screenMap.onGo = { [weak self] screen, map in self?.goThere(screen, map) }
+    }
+
+    @objc func toggleMap(_ sender: Any?) { if screenMap.isOpen { screenMap.close() } else { showMap() } }
+
+    func showMap(walk: Bool = false) {
+        if snapshotReview.isOpen { snapshotReview.close() }
+        screenMap.open()
+        if walk, screenMap.run == nil { screenMap.walk() }
+    }
+
+    /// Replays a screen's route from the map on the selected device: restart (at the route's deep link), then each
+    /// step, settling after each. The map closes first so the device can be watched getting there.
+    func goThere(_ screen: MapScreen, _ map: ScreenMapData, done: ((Bool) -> Void)? = nil) {
+        guard let sim = selected ?? Engine.shared.simulators.first(where: { $0.state == .running }), sim.state == .running else {
+            toast.show("Open the app first: the route is replayed on a running device", problem: true); done?(false); return
+        }
+        let mapped = map.apk?.lastPathComponent ?? map.apkName
+        if sim.apk.lastPathComponent != mapped {
+            toast.show("The selected device runs \(sim.apk.lastPathComponent); this map is of \(mapped)", problem: true); done?(false); return
+        }
+        screenMap.close()
+        grid.view(for: sim).map { window.makeFirstResponder($0) }
+        toast.show("Going to \(screen.label)…")
+        let commands = [screen.start.map { "restart \($0)" } ?? "restart"] + screen.steps
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var failed: String?
+            for (i, c) in commands.enumerated() {
+                let answer = sim.sendSync(c)
+                if answer.hasPrefix("error") { failed = "Step \(i) (\(ScreenMap.describe(c))) failed: " + answer.replacingOccurrences(of: "error: ", with: ""); break }
+                _ = sim.sendSync("settle 1500 100")
+            }
+            DispatchQueue.main.async {
+                self?.toast.show(failed ?? "On \(screen.label)", problem: failed != nil)
+                done?(failed == nil)
+            }
+        }
     }
 
     // MARK: Command palette
@@ -656,6 +711,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         add("pane.agent", "Agent activity", "Panes", "sparkles", "⌥⌘A", keywords: "claude mcp") { [weak self] in self?.showAgent(nil) }
         add("snapshots.run", "Run screenshot tests…", "Panes", "photo.stack", keywords: "golden snapshot visual regression compare") { [weak self] in self?.showSnapshots(run: true) }
         add("snapshots.show", "Show screenshot test results", "Panes", "photo.stack", keywords: "golden snapshot visual regression review") { [weak self] in self?.showSnapshots() }
+        add("map.walk", "Map the app's screens…", "Map", "point.3.connected.trianglepath.dotted", keywords: "crawl explore walk graph screens") { [weak self] in self?.showMap(walk: true) }
+        add("map.show", "Show the screen map", "Map", "point.3.connected.trianglepath.dotted", keywords: "crawl explore graph screens") { [weak self] in self?.showMap() }
+        if let map = screenMap.data {
+            for s in map.screens.prefix(30) {
+                add("map.go." + s.id, "Go to " + s.label, "Map", "arrow.forward.circle", keywords: s.activity + " " + s.texts.prefix(6).joined(separator: " ")) { [weak self] in self?.goThere(s, map) }
+            }
+        }
         add("pane.library", "Show or hide the library", "Panes", "sidebar.left") { [weak self] in self?.toggleLibrary(nil) }
         // Recordings saved before.
         let files = (try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
