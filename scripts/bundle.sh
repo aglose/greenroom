@@ -65,7 +65,8 @@ done < <(find "$C/Resources/engine" -type f \( -perm +111 -o -name '*.dylib' -o 
 # Sparkle's nested programs, then the framework (its own order, per Sparkle's documentation).
 SP="$C/Frameworks/Sparkle.framework"
 for f in "$SP/Versions/B/Autoupdate" "$SP/Versions/B/Updater.app" "$SP"; do "${SIGN[@]}" "$f" 2>/dev/null; n=$((n+1)); done
-"${SIGN[@]}" "$APP" 2>/dev/null
+if [[ "$IDENTITY" == - ]]; then "${SIGN[@]}" --entitlements Resources/greenroom.dev.entitlements "$APP" 2>/dev/null
+else "${SIGN[@]}" "$APP" 2>/dev/null; fi
 echo "signed $n binaries and the app as: $IDENTITY"
 echo "$APP ($(du -sh "$APP" | cut -f1)), engine $ENGINE_VERSION"
 
