@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         devHooksCheckIfAsked()
         sessionsCheckIfAsked()
         buildsCheckIfAsked()
+        claudeCheckIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
@@ -482,6 +483,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--builds-check"), i + 2 < args.count else { return }
         BuildsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
+    /// `Greenroom --claude-check DIR`: see ClaudeCheck.
+    private func claudeCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--claude-check"), i + 1 < args.count else { return }
+        ClaudeCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]))
     }
 
     private func defaults_forgetRecent(_ apk: URL) {

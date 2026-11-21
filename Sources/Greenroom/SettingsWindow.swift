@@ -29,6 +29,7 @@ struct SettingsView: View {
     @State private var crashes = Reports.shared.crashes
     @State private var usage = Reports.shared.usage
     @State private var waiting: [String] = []
+    @State private var claudeSessions = ClaudeSessions.shared.enabled
 
     private func refresh() {
         waiting = Reports.shared.waiting().map(\.1)
@@ -51,6 +52,12 @@ struct SettingsView: View {
                 } else {
                     Text("Updates are off in this build (not a packaged app).").foregroundStyle(.secondary)
                 }
+            }
+            Section("Claude Code") {
+                Toggle("Show my Claude Code sessions", isOn: $claudeSessions)
+                    .onChange(of: claudeSessions) { _, on in ClaudeSessions.shared.enabled = on }
+                Text("Titles and status of your Claude Code sessions appear on the matching rows in Sessions. Read from Claude Code\u{2019}s own files on this Mac while this is on (small transcripts whole, long ones at their ends), checking whether each session\u{2019}s process still runs and running git, read-only, in the folders of sessions from repositories you have not added, whose names then show in the sidebar. Shown in this window and sent nowhere.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Privacy") {
                 Toggle("Send crash reports", isOn: $crashes)

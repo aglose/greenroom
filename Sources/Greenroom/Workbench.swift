@@ -110,6 +110,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         case session(Session)
         case simulator(Simulator)
         case recent(URL)
+        case claudeOffer(ClaudeOffer)
     }
 
     private static let hint = ""
@@ -312,6 +313,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             rows.append(.header(group.header))
             rows += group.sessions.map { .session($0) }
         }
+        rows += ClaudeSessions.shared.offers.map { .claudeOffer($0) }   // W1
         let loose = sims.filter { sessions.session(forSimulator: $0) == nil }   // a session's own is on its row
         if !loose.isEmpty {
             rows.append(.header("Running"))
@@ -330,7 +332,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             table.selectRowIndexes([i], byExtendingSelection: false)
         }
         let alive = sims.filter(\.isAlive).count
-        status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac"
+        status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac" + (ClaudeSessions.shared.note.map { "\n" + $0 } ?? "")
         window.toolbar?.validateVisibleItems()
         updateChrome()
     }
@@ -972,6 +974,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Open in Claude", action: #selector(openInClaudeClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
         menu.delegate = self
         table.menu = menu
@@ -984,7 +987,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
         status.font = .systemFont(ofSize: 11)
         status.textColor = .tertiaryLabelColor
-        status.maximumNumberOfLines = 2
+        status.maximumNumberOfLines = 4
 
         let view = NSView()
         for v in [scroll, status] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(v) }
@@ -1011,7 +1014,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session: return true
+        case .simulator, .session, .claudeOffer: return true
         default: return false
         }
     }
@@ -1043,6 +1046,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             return label
         case .session(let session):
             return sessions.cell(for: session)
+        case .claudeOffer(let offer):
+            return ClaudeUI.offerCell(offer)
         case .simulator(let sim):
             let detail: String
             let symbol: String
@@ -1087,6 +1092,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
+        if case .claudeOffer(let offer) = rows[row] { sessions.addRepositories([offer.repository]) }
     }
 
     @objc private func rowDoubleClicked() {
@@ -1109,6 +1115,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { Engine.shared.close(sim) }
         if case .session(let session) = rows[row] { sessions.closeSimulator(of: session) }
+    }
+
+    @objc private func openInClaudeClicked() {
+        let row = table.clickedRow
+        guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
+        if !ClaudeSessions.openInClaude(session.claude) { toast.show("Claude is not installed on this Mac", problem: true) }
     }
 
     @objc private func removeRepositoryClicked() {
