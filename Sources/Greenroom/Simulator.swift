@@ -19,6 +19,8 @@ final class Simulator {
 
     /// Each decodable frame, on the frame reader's thread.
     var onSample: ((CMSampleBuffer) -> Void)?
+    /// A second listener for each decodable frame (the Recorder's), on the frame reader's thread; nil unless recording.
+    var sampleTap: ((CMSampleBuffer) -> Void)?
     /// Called on the main thread.
     var onState: ((State) -> Void)?
     var onSize: ((CGSize) -> Void)?
@@ -147,6 +149,7 @@ final class Simulator {
                 self.framesShown += 1
                 self.activity.frameShown()
                 self.onSample?(sample)
+                self.sampleTap?(sample)
             } else {
                 frames.requestKeyframe()
             }

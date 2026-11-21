@@ -96,6 +96,7 @@ final class SimulatorView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        NotificationCenter.default.addObserver(forName: Recorder.didChange, object: nil, queue: .main) { [weak self] _ in self?.updateCaption() }
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         display.videoGravity = .resizeAspect
@@ -329,6 +330,7 @@ final class SimulatorView: NSView {
         guard let sim = simulator else { caption.attributedStringValue = NSAttributedString(); return }
         let size = sim.deviceSize
         let text = NSMutableAttributedString(string: kindName, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink])
+        if Recorder.isRecording(sim) { text.insert(NSAttributedString(string: "●  ", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.record]), at: 0) }
         var rest = "   \(sim.cellLabel ?? sim.name)"
         if size.width > 0 { rest += "   \(Int(size.width))×\(Int(size.height))" }
         if !captionExtra.isEmpty { rest += "   ·   \(captionExtra)" }
