@@ -6,20 +6,30 @@ import AVFoundation
 // `ChangesRun` resolves the base and asks for that folder, and `ChangeTour` records both builds at each screen that
 // differs. The sheet is ChangesSheet.swift.
 
+extension URL {
+    /// Whether this path, with symlinks and `..` resolved, is inside `folder`: a path read from a crawl's JSON must not lead out of it.
+    func isInside(_ folder: URL) -> Bool {
+        let root = folder.resolvingSymlinksInPath().standardizedFileURL.path
+        return resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+    }
+}
+
 // MARK: - The model
 
 enum ChangeStatus: String {
     case new, changed, gone, same
+    /// The other side's walk did not finish, so this screen may be there after all: neither new nor gone.
+    case unreached
 
     var color: NSColor {
         switch self {
         case .new: return Design.accent
         case .changed: return Design.warning
         case .gone: return Design.record
-        case .same: return Design.mute
+        case .same, .unreached: return Design.mute
         }
     }
-    var word: String { rawValue }
+    var word: String { self == .unreached ? "not reached" : rawValue }
 }
 
 /// What a comparison found for one screen of the map: its edge colour and badge (MapCanvas).
@@ -59,6 +69,7 @@ struct ChangeScreen {
         case .new: return "new screen"
         case .gone: return "no longer there"
         case .same: return "the same"
+        case .unreached: return why ?? "a walk did not finish"
         case .changed:
             if sizeChanged { return "size changed" }
             if let p = pixels {
@@ -84,6 +95,10 @@ struct ChangeFinding {
 struct ChangeSet {
     let folder: URL
     let summary: Evidence.ChangesSummary
+    /// Screens one build reached that the other's unfinished walk may simply not have got to: not counted as new or gone.
+    let unreached: Int
+    /// Head and base are one build: nothing was walked, there is nothing to differ.
+    var identical = false
     /// Every pair, in the crawler's order: the head's screens, then those only the base has.
     let screens: [ChangeScreen]
     let headMap: ScreenMapData
@@ -96,7 +111,7 @@ struct ChangeSet {
     let unfinished: [String]
     let reportURL: URL?
 
-    var differing: [ChangeScreen] { screens.filter { $0.status != .same } }
+    var differing: [ChangeScreen] { screens.filter { $0.status == .new || $0.status == .changed || $0.status == .gone } }
     var isUnchanged: Bool { summary.differing == 0 }
     func screen(_ id: String) -> ChangeScreen? { screens.first { $0.id == id } }
 
@@ -114,10 +129,17 @@ struct ChangeSet {
             return s.captures.first { $0.combo == combo }?.file ?? s.captures.first?.file
         }
 
+        // A walk cut short (a time or screen limit; a depth limit is the budget's choice) leaves screens the other side reached
+        // looking new or gone: they are "not reached" instead.
+        let cut = ((raw["incomplete"] as? [String]) ?? []).filter { !($0.hasPrefix("base: ") ? String($0.dropFirst(6)) : $0).hasPrefix("--max-depth") }
+        let headCut = cut.contains { !$0.hasPrefix("base: ") }, baseCut = cut.contains { $0.hasPrefix("base: ") }
         var screens: [ChangeScreen] = []
         var baseToMerged: [String: String] = [:]
         for p in pairs {
-            let status = ChangeStatus(rawValue: (p["status"] as? String) ?? "") ?? .same
+            var status = ChangeStatus(rawValue: (p["status"] as? String) ?? "") ?? .same
+            var why = p["why"] as? String
+            if status == .gone, headCut { status = .unreached; why = "the head's walk did not finish, so it may still be there" }
+            if status == .new, baseCut { status = .unreached; why = "the base's walk did not finish, so it may be there too" }
             let headID = p["id"] as? String, baseID = p["base"] as? String
             let id = headID ?? ("base:" + (baseID ?? "?"))
             if let baseID { baseToMerged[baseID] = id }
@@ -126,13 +148,13 @@ struct ChangeSet {
             func part(_ c: String) -> [String: Any]? { d[c] as? [String: Any] }
             let combo = combos.first { (part($0)?["differs"] as? Bool) == true } ?? combos.first { part($0)?["map"] != nil } ?? combos.first
             let info = combo.flatMap { part($0) }
-            let diffFile = (info?["map"] as? String).map { folder.appendingPathComponent($0) }
+            let diffFile = (info?["map"] as? String).map { folder.appendingPathComponent($0) }.flatMap { $0.isInside(folder) ? $0 : nil }
             screens.append(ChangeScreen(
                 id: id, headID: headID, baseID: baseID, title: hs?.label ?? bs?.label ?? id, activity: hs?.activity ?? bs?.activity ?? "",
                 status: status, head: capture(hs, combo), base: capture(bs, combo),
                 diff: diffFile.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil },
                 pixels: info?["pixels"] as? Int, total: info?["total"] as? Int, sizeChanged: (info?["sizeChanged"] as? Bool) ?? false,
-                why: p["why"] as? String))
+                why: why))
         }
 
         // The merged map: the head's screens, plus the base's that no screen of the head reaches, with the edges that
@@ -156,7 +178,13 @@ struct ChangeSet {
                 mergedEdges.append(MapEdge(from: from, action: e.action, cmd: e.cmd, to: to, note: e.note))
             }
         }
-        let merged = ScreenMapData(folder: folder, apkName: headMap.apkName, screens: mergedScreens, edges: mergedEdges, findings: headMap.findings,
+        // The head's findings only: the base build's crashes are marked on the base-only screens by their edges, not as the head's.
+        var headFindings: [MapFinding] = []
+        for f in (raw["findings"] as? [[String: Any]]) ?? [] where (f["build"] as? String) != "base" {
+            headFindings.append(MapFinding(kind: (f["kind"] as? String) ?? "", detail: (f["detail"] as? String) ?? "",
+                                           steps: ((f["path"] as? [String: Any])?["steps"] as? [String]) ?? []))
+        }
+        let merged = ScreenMapData(folder: folder, apkName: headMap.apkName, screens: mergedScreens, edges: mergedEdges, findings: headFindings,
                                    combos: combos, incomplete: headMap.incomplete, seconds: headMap.seconds, apk: headMap.apk)
         var marks: [String: MapMark] = [:]
         for s in screens {
@@ -164,6 +192,7 @@ struct ChangeSet {
             case .new: marks[s.id] = MapMark(label: "new", color: s.status.color, tintRoutes: true)
             case .changed: marks[s.id] = MapMark(label: "changed", color: s.status.color, tintRoutes: false)
             case .gone: marks[s.id] = MapMark(label: "gone", color: s.status.color, tintRoutes: true)
+            case .unreached: marks[s.id] = MapMark(label: "not reached", color: s.status.color, tintRoutes: false)
             case .same: break
             }
         }
@@ -186,29 +215,51 @@ struct ChangeSet {
             unfinished.append("The walk of the \(isBase ? "base" : "head") \(what)")
         }
         let report = folder.appendingPathComponent("report.html")
-        return ChangeSet(folder: folder, summary: Evidence.summary(of: folder), screens: screens, headMap: headMap, baseMap: baseMap, merged: merged,
+        var counts = Evidence.ChangesSummary()
+        for c in screens { switch c.status { case .new: counts.new += 1; case .changed: counts.changed += 1; case .gone: counts.gone += 1; case .same: counts.same += 1; case .unreached: break } }
+        return ChangeSet(folder: folder, summary: counts, unreached: screens.filter { $0.status == .unreached }.count, screens: screens, headMap: headMap, baseMap: baseMap, merged: merged,
                          marks: marks, crashes: crashes, unfinished: unfinished,
                          reportURL: FileManager.default.fileExists(atPath: report.path) ? report : nil)
     }
 
+    /// Head and base are one build: nothing is walked. `map` is the head's evidence map when it has one (its screens count as the same).
+    static func identical(folder: URL, map: ScreenMapData?) -> ChangeSet {
+        let empty = ScreenMapData(folder: folder, apkName: "", screens: [], edges: [], findings: [], combos: [], incomplete: [], seconds: 0, apk: nil)
+        let m = map ?? empty
+        var counts = Evidence.ChangesSummary()
+        counts.same = m.screens.count
+        var set = ChangeSet(folder: folder, summary: counts, unreached: 0, screens: [], headMap: m, baseMap: nil, merged: m, marks: [:], crashes: [],
+                            unfinished: [], reportURL: nil)
+        set.identical = true
+        return set
+    }
+
+    /// A line of text from the app or the crawler for a Markdown summary: one line, and an `@name` in backticks so that pasting
+    /// it into GitHub notifies nobody.
+    static func plain(_ text: String) -> String {
+        let one = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
+        return one.contains("@") ? "`" + one.replacingOccurrences(of: "`", with: "'") + "`" : one
+    }
+
     /// The summary for a pull request description: counts, then a line per screen that differs.
     func markdown(head: String, base: String) -> String {
-        var out = ["## Changes: \(head) against \(base)", ""]
+        var out = ["## Changes: \(Self.plain(head)) against \(Self.plain(base))", ""]
         let s = summary
-        out.append("\(s.new) new, \(s.changed) changed, \(s.gone) gone, \(s.same) the same.")
+        out.append("\(s.new) new, \(s.changed) changed, \(s.gone) gone, \(s.same) the same" + (unreached > 0 ? ", \(unreached) not reached (a walk did not finish)." : "."))
         if !differing.isEmpty { out.append("") }
         for c in differing {
             switch c.status {
-            case .new: out.append("+ \(c.title) (new)")
-            case .changed: out.append("~ \(c.title): \(c.detail)")
-            case .gone: out.append("- \(c.title) (gone)")
-            case .same: break
+            case .new: out.append("+ \(Self.plain(c.title)) (new)")
+            case .changed: out.append("~ \(Self.plain(c.title)): \(Self.plain(c.detail))")
+            case .gone: out.append("- \(Self.plain(c.title)) (gone)")
+            case .same, .unreached: break
             }
         }
-        if isUnchanged { out.append(""); out.append("No screen differs.") }
+        if identical { out.append(""); out.append("Head and base are the same build.") }
+        else if isUnchanged { out.append(""); out.append(unreached > 0 ? "No screen differs among those both walks reached." : "No screen differs.") }
         if !crashes.isEmpty {
             out.append("")
-            for c in crashes { out.append("Crash in the \(c.side == .base ? "base" : "head"): \(c.detail.split(separator: "\n").first.map(String.init) ?? c.detail)") }
+            for c in crashes { out.append("Crash in the \(c.side == .base ? "base" : "head"): \(Self.plain(c.detail.split(separator: "\n").first.map(String.init) ?? c.detail))") }
         }
         if !unfinished.isEmpty { out.append(""); out += unfinished.map { "Note: " + $0 + "." } }
         return out.joined(separator: "\n") + "\n"
@@ -284,6 +335,13 @@ final class ChangesRun {
             case .offer(let o): self.state = .offer(o)
             case .build(let base):
                 self.base = base
+                if base.key == head.key, baseOption.isEmpty {
+                    // One build against itself: nothing to walk twice.
+                    let evidence = self.controller.evidence
+                    let map = ScreenMapData.read(evidence.mapFolder(for: head.key))
+                    self.state = .done(ChangeSet.identical(folder: evidence.changesFolder(head: head.key, base: base.key), map: map))
+                    return
+                }
                 self.state = .walking(depth: nil, known: 0, since: Date())
                 self.token = self.controller.evidence.changes(head: head, base: base, start: start, baseOption: baseOption, progress: { [weak self] e in
                     guard let self, gen == self.generation, case .walking(var depth, var known, let since) = self.state else { return }
@@ -367,6 +425,21 @@ final class ChangeTour {
     private var cancelled = false
     private var sims: [Simulator] = []
     private var slots: [String] = []
+    private var logs: [URL] = []
+    /// The engine processes of the simulators this tour started, for checks.
+    private(set) var processIDs: [Int32] = []
+
+    /// Tours running now. Their simulators are not on the stage (`Engine.simulators`), so nothing else would quit them
+    /// when the app does.
+    private static var active: [ChangeTour] = []
+    private static let quitObserver: NSObjectProtocol = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { _ in
+        quitAll()
+    }
+
+    /// Quits every running tour's simulators and removes their data slots and logs (the app is quitting). Bounded.
+    static func quitAll() {
+        for t in active { t.cancelled = true; t.teardown(wait: true) }
+    }
 
     /// The screens a tour visits, the first 12 that are new or changed.
     static func stops(of set: ChangeSet) -> [ChangeScreen] {
@@ -384,9 +457,12 @@ final class ChangeTour {
         guard !isRunning else { return }
         isRunning = true
         cancelled = false
+        _ = Self.quitObserver
+        Self.active.append(self)
         Task { @MainActor in
             let outcome = await self.run(set: set, head: head, base: base, baseOptions: baseOptions, progress: progress)
             self.isRunning = false
+            Self.active.removeAll { $0 === self }
             completion(outcome)
         }
     }
@@ -402,23 +478,32 @@ final class ChangeTour {
         try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]).write(to: folder.appendingPathComponent("tour.json"), options: .atomic)
     }
 
-    /// A simulator that is not on the stage. Engine.prepare is not called here: with no simulator on the stage it clears the
-    /// tokens folder, which would take the first of the two simulators' token away before the second started.
+    /// A simulator that is not on the stage, so it is not in `Engine.simulators`: this tour (and `ChangeTour.quitAll`) quits it.
+    /// The caller calls `Engine.prepare` once before the first: it clears the tokens folder while no simulator is on the
+    /// stage, and these are not, so calling it again here would delete the first simulator's token before the second started.
     private func sim(apk: URL, options: [String]) throws -> Simulator {
         let log = Engine.shared.logs.appendingPathComponent("tour-\(UUID().uuidString.prefix(8)).log")
+        logs.append(log)
         let s = Simulator(apk: apk, log: log)
         try s.start(launcher: Engine.shared.launcher, stateDir: Engine.shared.engineState, options: options, controlToken: Engine.shared.supportsControlToken)
         sims.append(s)
+        processIDs.append(s.processID)
         return s
     }
 
-    private func teardown() {
-        let all = sims, names = slots, root = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
-        sims = []; slots = []
+    private func teardown(wait: Bool = false) {
+        let all = sims, names = slots, files = logs, root = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
+        sims = []; slots = []; logs = []
         for s in all { s.quit() }
-        DispatchQueue.global(qos: .utility).async {
+        let finish = {
             for s in all { s.waitUntilExit() }
             for n in names { SlotClone.remove(n, in: root) }
+            for f in files { try? FileManager.default.removeItem(at: f) }
+        }
+        if wait {
+            finish()   // the app is quitting: Simulator.quit ends a process that ignores "quit" after 3 s
+        } else {
+            DispatchQueue.global(qos: .utility).async(execute: finish)
         }
     }
 
@@ -439,11 +524,10 @@ final class ChangeTour {
         let wanted = Self.stops(of: set)
         try? FileManager.default.removeItem(at: folder.appendingPathComponent("tour.json"))
         if wanted.isEmpty { return skip(folder, "No screen is new or changed, so there is nothing to record.") }
-        let headFile = folder.appendingPathComponent("tour-head.mp4"), baseFile = folder.appendingPathComponent("tour-base.mp4")
-        for f in [headFile, baseFile] {
-            try? FileManager.default.removeItem(at: f)
-            try? FileManager.default.removeItem(at: f.deletingPathExtension().appendingPathExtension("chapters.json"))
-        }
+        // Each tour records under names of its own and moves them into place at the end, so a tour that was cancelled and is
+        // still finishing never shares a file with the one that replaced it.
+        let tag = String(UUID().uuidString.prefix(8))
+        let headFile = folder.appendingPathComponent("tour-\(tag)-head.mp4"), baseFile = folder.appendingPathComponent("tour-\(tag)-base.mp4")
 
         // A route per screen: the head's for a new or changed screen, the base's for a changed one.
         struct Route { var start: String?; var steps: [String] }
@@ -502,15 +586,27 @@ final class ChangeTour {
         async let bFiles: [URL] = withCheckedContinuation { c in br.stop { c.resume(returning: $0) } }
         let (hf, bf) = await (hFiles, bFiles)
         teardown()
-        if cancelled {
-            for f in hf + bf { try? FileManager.default.removeItem(at: f); try? FileManager.default.removeItem(at: f.deletingPathExtension().appendingPathExtension("chapters.json")) }
-            return .cancelled
+        func discard(_ files: [URL]) {
+            for f in files { try? FileManager.default.removeItem(at: f); try? FileManager.default.removeItem(at: f.deletingPathExtension().appendingPathExtension("chapters.json")) }
         }
-        guard !stops.isEmpty, stops.contains(where: { $0.head }), hf.first != nil else {
-            for f in hf + bf { try? FileManager.default.removeItem(at: f) }
+        if cancelled { discard(hf + bf); return .cancelled }
+        guard !stops.isEmpty, stops.contains(where: { $0.head }), let hFile = hf.first else {
+            discard(hf + bf)
             return skip(folder, "No route could be replayed on the head build, so there is no tour.", stops: stops)
         }
+        // Into place: the clips and their chapters under their final names (the files this tour made are all there is of them).
+        func place(_ file: URL?, as name: String) -> URL? {
+            let fm = FileManager.default
+            let final = folder.appendingPathComponent(name)
+            for u in [final, final.deletingPathExtension().appendingPathExtension("chapters.json")] { try? fm.removeItem(at: u) }
+            guard let file, (try? fm.moveItem(at: file, to: final)) != nil else { return nil }
+            let side = file.deletingPathExtension().appendingPathExtension("chapters.json")
+            try? fm.moveItem(at: side, to: final.deletingPathExtension().appendingPathExtension("chapters.json"))
+            return final
+        }
+        let placedHead = place(hFile, as: "tour-head.mp4"), placedBase = place(bf.first, as: "tour-base.mp4")
+        discard(Array(hf.dropFirst()) + Array(bf.dropFirst()))
         write(folder, skipped: nil, stops: stops)
-        return .done(Result(folder: folder, head: hf.first, base: bf.first, skipped: nil, stops: stops))
+        return .done(Result(folder: folder, head: placedHead, base: placedBase, skipped: nil, stops: stops))
     }
 }

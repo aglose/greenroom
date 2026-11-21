@@ -1,7 +1,11 @@
 # Sessions: worktrees, builds and what changed
 
 A plan (2026-11-20). W0 (the model and store, git, the sidebar section, switching, data slots, warm simulators,
-reload on a new build) is built; everything else here is not yet.
+reload on a new build) is built, and so are the builds, evidence, Claude link and pull request rows. **W4 (Changes) is
+built** (`Changes.swift`, `ChangesSheet.swift`, `ChangesCheck.swift`, `--changes-check`): the sheet with Summary,
+Screens, Map, Video (the tour) and Live, export as Markdown and the report, ⌘D. Left over: the offer's remote
+build is not wired (it only checks the commit out as a worktree), the cache key of a pair ignores a start link and
+base options (only the check uses them), and posting to a pull request.
 
 ## Goal
 

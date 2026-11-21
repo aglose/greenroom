@@ -119,7 +119,7 @@ enum ChangesCheck {
 
             let store = SessionStore(root: base.appendingPathComponent("state", isDirectory: true))
             sessions.use(store: store)
-            ev.budget = Evidence.Budget(depth: 1, seconds: 60, jobs: 2)
+            ev.budget = Evidence.Budget(depth: 1, seconds: 240, jobs: 2)
             _ = await sessions.addRepository(wt).value
             func row() -> Session? { sessions.sessions.first { $0.worktree.lastPathComponent == "wt-feature" } }
             _ = await wait("the row", 30) { row()?.outputs != nil }
@@ -152,17 +152,33 @@ enum ChangesCheck {
             let failed = await wait("the failure", 30) { sheet.stateTitleText == "Could not compare" }
             expect(failed && sheet.stateDetailText.contains("No branch or commit"), "an unknown branch fails with a message: \(sheet.stateDetailText.prefix(70))")
 
-            // 2. The build against itself.
+            // 2. The build against itself: one build, so nothing is walked at all.
+            let startedSelf = ev.started
             sheet.compare(base: .apk(vh), name: "itself")
-            let selfDone = await wait("the self comparison", 300) { sheet.changeSet != nil }
+            let selfDone = await wait("the self comparison", 60) { sheet.changeSet != nil }
             if let set = sheet.changeSet, selfDone {
-                expect(set.isUnchanged && set.summary.same > 0 && set.summary.differing == 0, "the build against itself differs on no screen (same \(set.summary.same), changed \(set.summary.changed), new \(set.summary.new), gone \(set.summary.gone))")
+                expect(set.identical && set.isUnchanged && set.summary.differing == 0 && ev.started == startedSelf && crawlers() == 0, "the build against itself answers at once with no differences and no walk (changed \(set.summary.changed), new \(set.summary.new), gone \(set.summary.gone))")
                 expect(sheet.summaryLines.contains { $0 == "No differences" }, "the Summary says there are no differences")
                 expect(sheet.tileCount == 0, "the Screens tab has no tiles")
                 await sleep(1)
                 shot("1-no-differences.png")
                 expect(sheet.tour == nil && !sheet.tourIsRunning && !fm.fileExists(atPath: set.folder.appendingPathComponent("tour-head.mp4").path), "no tour is recorded when nothing differs")
             } else { expect(false, "the self comparison ended") }
+
+            // A walk that did not finish: what only the other side reached is "not reached", never new or gone.
+            do {
+                let fake = base.appendingPathComponent("fake-pair", isDirectory: true)
+                try? fm.createDirectory(at: fake, withIntermediateDirectories: true)
+                func screen(_ id: String) -> [String: Any] { ["id": id, "activity": "a.\(id)Activity", "title": id, "depth": 0, "path": ["steps": [String]()], "captures": [String: String](), "actions": [[String: Any]]()] }
+                let doc: [String: Any] = ["apk": "x.apk", "combos": [String](), "screens": [screen("s1")], "edges": [[String: Any]](), "findings": [[String: Any]](),
+                                          "incomplete": ["--max-seconds 60"], "seconds": ["total": 1], "base_screens": [screen("s1"), screen("s2"), screen("s3")], "base_edges": [[String: Any]](),
+                                          "compare": [["id": "s1", "base": "s1", "status": "same"], ["id": NSNull(), "base": "s2", "status": "gone"], ["id": NSNull(), "base": "s3", "status": "gone"]], "diffs": [String: Any]()]
+                try? JSONSerialization.data(withJSONObject: doc).write(to: fake.appendingPathComponent("crawl.json"))
+                if let cut = ChangeSet.read(fake) {
+                    expect(cut.summary.gone == 0 && cut.unreached == 2 && cut.summary.same == 1 && cut.isUnchanged, "a head walk that did not finish: the base's other screens are not reached, not gone (gone \(cut.summary.gone), not reached \(cut.unreached))")
+                    expect(cut.markdown(head: "h", base: "b").contains("2 not reached"), "and the summary says so")
+                } else { expect(false, "the cut-short fixture reads") }
+            }
 
             // 3. The changed build.
             let startedBefore = ev.started
@@ -247,7 +263,38 @@ enum ChangesCheck {
             let cachedTour = await wait("the cached tour", 30) { sheet.tour != nil }
             expect(cachedTour && sheet.tour?.head != nil, "and its tour is kept with the pair")
 
-            let leftovers = (run("/usr/bin/pgrep", ["-f", "changes-check/engine-state.*--data-slots"]) ?? "").split(separator: "\n").count
+            // A tour cancelled mid-recording leaves nothing running or half-written, and a tour can be recorded again.
+            var tourPIDs: [Int32] = []
+            func hidden() -> Int { tourPIDs.filter { kill($0, 0) == 0 }.count }
+            func tourFiles() -> [String] { ((try? fm.contentsOfDirectory(atPath: set.folder.path)) ?? []).filter { $0.hasPrefix("tour-") || $0.hasSuffix(".part") } }
+            sheet.recordTour(force: true)
+            let up = await wait("both hidden simulators", 120) { tourPIDs = sheet.tourProcessIDs.isEmpty ? tourPIDs : sheet.tourProcessIDs; return tourPIDs.count >= 2 && hidden() >= 2 }
+            expect(up && sheet.tourIsRunning, "a tour that starts has two hidden simulators running (\(hidden()))")
+            await sleep(3)   // recording
+            sheet.cancelTour()
+            let ended = await wait("the cancelled tour to end", 60) { !sheet.tourIsRunning }
+            let gone = await wait("the hidden simulators to quit", 30) { hidden() == 0 }
+            expect(ended && gone, "cancelling a tour mid-recording ends it and both hidden apksim processes (\(hidden()) left)")
+            expect(tourFiles().isEmpty && sheet.tour == nil, "and leaves no .part file or clip behind (\(tourFiles().joined(separator: ", ")))")
+            func tourLogs() -> [String] { ((try? fm.contentsOfDirectory(atPath: Engine.shared.logs.path)) ?? []).filter { $0.hasPrefix("tour-") } }
+            _ = await wait("the logs to go", 20) { tourLogs().isEmpty }   // removed once each process has exited
+            let logsLeft = tourLogs()
+            expect(logsLeft.isEmpty, "the tour's simulator logs are removed (\(logsLeft.count) left)")
+            sheet.recordTour(force: true)
+            let again2 = await wait("the tour again", 400) { sheet.tour != nil }
+            expect(again2 && sheet.tour?.skipped == nil && sheet.tour?.head != nil && sheet.tour?.base != nil, "a tour can be recorded again after a cancelled one")
+            expect(Set(tourFiles()) == ["tour-head.mp4", "tour-head.chapters.json", "tour-base.mp4", "tour-base.chapters.json"], "and its files are the final ones alone (\(tourFiles().sorted().joined(separator: ", ")))")
+            if let hf = sheet.tour?.head { expect(((try? await AVURLAsset(url: hf).load(.duration).seconds) ?? 0) > 1, "and it plays") }
+
+            // A rebuild since the comparison: reopening the sheet does not show the old build's result.
+            if let v3 = variant(), let b3 = store.record(apk: v3, source: .local, sha: a.head, ref: a.branch, dirty: false, date: Date().addingTimeInterval(5)) {
+                sessions.adopt(b3, forWorktree: a.worktree.path)
+                if let fresh = row() { sheet.open(session: fresh, compare: false) }
+                let reset = await wait("the new build to be compared", 30) { sheet.changeSet == nil && sheet.run?.head?.key == b3.key }
+                expect(reset, "reopening after a rebuild drops the old comparison and compares the new build (\(sheet.stateTitleText))")
+            } else { expect(false, "a third build could be filed") }
+
+            let leftovers = hidden()
             expect(leftovers == 0 && crawlers() == 0, "no hidden simulator or crawler is left running (\(leftovers))")
             finish()
         }

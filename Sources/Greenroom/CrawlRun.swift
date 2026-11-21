@@ -70,7 +70,7 @@ struct ScreenMapData {
             let captures = order.compactMap { c -> (String, URL)? in
                 guard let rel = caps[c] else { return nil }
                 let u = folder.appendingPathComponent(rel)
-                return FileManager.default.fileExists(atPath: u.path) ? (c, u) : nil
+                return u.isInside(folder) && FileManager.default.fileExists(atPath: u.path) ? (c, u) : nil
             }
             let controls = ((s["actions"] as? [[String: Any]]) ?? []).map {
                 (label: ($0["label"] as? String) ?? "", cmd: ($0["cmd"] as? String) ?? "", skipped: $0["skipped"] as? String)

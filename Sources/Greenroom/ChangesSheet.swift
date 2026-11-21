@@ -553,8 +553,12 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     /// Opens on `session`. `compare`: starts a comparison with the repository's base branch at once.
     func open(session: Session, compare: Bool) {
         let changed = self.session?.worktree.path != session.worktree.path
+        // A rebuild since the comparison: what the sheet holds is of the old build.
+        let current = controller?.builds[session.worktree.path] ?? session.build
+        let stale = !changed && run?.head != nil && current != nil && current?.key != run?.head?.key
+        let compareNow = compare || stale
         self.session = session
-        if changed || run == nil {
+        if changed || stale || run == nil {
             run?.cancel()
             tourRunner?.cancel()
             resetResult()
@@ -578,7 +582,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             }, done: { if self.tab == .map { self.fitMap() } })
             onToggle?()
         }
-        if compare, !(run?.isActive ?? false), changeSet == nil { self.compare(base: baseRef, name: baseName) }
+        if compareNow, !(run?.isActive ?? false), changeSet == nil { self.compare(base: baseRef, name: baseName) }
         else if run.map({ if case .idle = $0.state { return true } else { return false } }) ?? true { stateChanged(.idle) }
     }
 
@@ -815,7 +819,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         basePopup.isEnabled = !running
         if let set = changeSet, let b = run?.base {
             let c = set.summary
-            statusLabel.stringValue = "\(ChangeSet.describe(b, name: baseName))  ·  \(c.new) new, \(c.changed) changed, \(c.gone) gone, \(c.same) the same"
+            statusLabel.stringValue = "\(ChangeSet.describe(b, name: baseName))  ·  \(c.new) new, \(c.changed) changed, \(c.gone) gone, \(c.same) the same" + (set.unreached > 0 ? ", \(set.unreached) not reached" : "")
         }
     }
 
@@ -897,14 +901,17 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             return w
         }
         let tiles = NSStackView(views: [tile(s.new, "new", ChangeStatus.new.color), tile(s.changed, "changed", ChangeStatus.changed.color),
-                                        tile(s.gone, "gone", ChangeStatus.gone.color), tile(s.same, "the same", Design.mute)])
+                                        tile(s.gone, "gone", ChangeStatus.gone.color), tile(s.same, "the same", Design.mute)]
+                                       + (set.unreached > 0 ? [tile(set.unreached, "not reached", Design.mute)] : []))
         tiles.spacing = 10
         summaryStack.addArrangedSubview(tiles)
         if set.isUnchanged {
             let ok = NSImageView(image: NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 22, weight: .medium)) ?? NSImage())
             ok.contentTintColor = Design.accent
             let words = NSStackView(views: [label("No differences", size: 15, weight: .semibold, color: Design.ink),
-                                            label("Every one of the \(s.same) screens the walk reached looks and is built the same as in the base.", size: 12)])
+                                            label(set.identical ? "Head and base are the same build, so nothing was walked." : (set.unreached > 0
+                                                  ? "None of the \(s.same) screens both walks reached differs. \(set.unreached) more were reached by one walk only, because the other did not finish."
+                                                  : "Every one of the \(s.same) screens the walk reached looks and is built the same as in the base."), size: 12)])
             words.orientation = .vertical
             words.alignment = .leading
             words.spacing = 2
@@ -923,8 +930,9 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
                 ("!", Design.record, "\(c.side == .base ? "Base" : "Head"): " + (c.detail.split(separator: "\n").first.map(String.init) ?? c.detail))
             }))
         }
-        if !set.unfinished.isEmpty {
-            summaryStack.addArrangedSubview(section("NOT FINISHED", set.unfinished.map { ("·", Design.warning, $0) }))
+        let skipped = set.screens.filter { $0.status == .unreached }
+        if !set.unfinished.isEmpty || !skipped.isEmpty {
+            summaryStack.addArrangedSubview(section("NOT FINISHED", set.unfinished.map { ("·", Design.warning, $0) } + skipped.map { ("?", Design.mute, $0.title + "  ·  not reached: " + $0.detail) }))
         }
         let limits = label(Evidence.limits, size: 11)
         limits.lineBreakMode = .byWordWrapping
@@ -1139,12 +1147,24 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         })
     }
 
-    /// Starts the tour now and waits for it (checks that turn the automatic one off).
-    func recordTour() { tourRunner = nil; startTour() }
+    /// Records the tour again now, whatever is kept (the check's, and "Try again").
+    func recordTour(force: Bool = false) {
+        tourRunner?.cancel()
+        tourRunner = nil
+        if force, let set = changeSet {
+            tour = nil
+            for n in ["tour.json", "tour-head.mp4", "tour-base.mp4", "tour-head.chapters.json", "tour-base.chapters.json"] { try? FileManager.default.removeItem(at: set.folder.appendingPathComponent(n)) }
+        }
+        startTour()
+    }
+    /// Stops the tour that is recording (what its Stop button does).
+    func cancelTour() { tourRunner?.cancel() }
     var tourIsRunning: Bool { tourRunner != nil }
+    /// The engine processes of the tour recording now (checks).
+    var tourProcessIDs: [Int32] { tourRunner?.processIDs ?? [] }
 
     @objc private func recordTourPressed() { tourRunner = nil; startTour() }
-    @objc private func stopTourPressed() { tourRunner?.cancel() }
+    @objc private func stopTourPressed() { cancelTour() }
 
     private func unloadVideo() {
         pausePlayers()
@@ -1218,6 +1238,9 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         playing = true
         playButton.title = "Pause"
         // One start time on the host clock for both, so the two clips begin together.
+        // setRate(_:time:atHostTime:) raises before the items are ready to play: until then, plain play().
+        let ready = [baseVideo.player, headVideo.player].allSatisfy { $0 == nil || $0?.currentItem?.status == .readyToPlay }
+        guard ready else { for p in [baseVideo.player, headVideo.player] { p?.play() }; return }
         let at = CMTimeAdd(CMClockGetTime(CMClockGetHostTimeClock()), CMTime(seconds: 0.15, preferredTimescale: 1000))
         for p in [baseVideo.player, headVideo.player] { p?.setRate(1, time: .invalid, atHostTime: at) }
     }
