@@ -177,6 +177,8 @@ final class PullRows {
             case .build(let b):
                 states[p.id] = .idle
                 if let i = items.firstIndex(where: { $0.id == p.id }) { items[i].buildKey = b.key; save() }
+                // The pull request's build is walked like a session's (its row owner is "pr:ID").
+                sessions?.evidence.buildArrived(worktree: "pr:" + p.id, build: b, auto: sessions?.workspaces.first { $0.root.path == p.workspace }?.auto ?? .onBuild)
                 change()
                 if openWhenReady.remove(p.id) != nil, let current = all.first(where: { $0.id == p.id }) { open(current) }
                 else if let current = all.first(where: { $0.id == p.id }), let sim = simulator(of: current), sim.apk.resolvingSymlinksInPath().path != b.apk.resolvingSymlinksInPath().path {
