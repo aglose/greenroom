@@ -87,7 +87,7 @@ final class EmptyStage: NSView {
     override func layout() {
         super.layout()
         cardDash?.frame = card.bounds
-        cardDash?.path = CGPath(roundedRect: card.bounds.insetBy(dx: 1, dy: 1), cornerWidth: 21, cornerHeight: 21, transform: nil)
+        cardDash?.path = CGPath.rounded(card.bounds.insetBy(dx: 1, dy: 1), radius: 21)
     }
 
     /// The last three APKs opened, as buttons.

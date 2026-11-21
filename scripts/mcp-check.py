@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Checks the agent interface as an agent uses it: `Greenroom --mcp` on stdin/stdout, against the bundled test app.
 Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK
-Starts Greenroom if it is not running (and quits the copy it started)."""
-import json, os, signal, subprocess, sys, time
+Starts Greenroom (its executable, in the background) if it is not running, and quits the copy it started."""
+import glob, json, os, signal, subprocess, sys, time
 
 exe, apk = sys.argv[1], sys.argv[2]
 state = os.path.expanduser("~/Library/Application Support/Greenroom/agent.json")
@@ -14,6 +14,19 @@ def running_pid():
     except Exception:
         return None
 was_running = running_pid()
+started = None
+if not was_running:
+    # Started here rather than by the shim (which uses LaunchServices: on CI's runners the app it opened never served
+    # its endpoint within the shim's 15 s), and given a minute: a cold first launch on a runner is slow.
+    import tempfile
+    app_log = tempfile.NamedTemporaryFile(prefix="greenroom-mcp-check-", suffix=".log", delete=False)
+    started = subprocess.Popen([exe, "--background"], stdout=app_log, stderr=subprocess.STDOUT)
+    for _ in range(600):
+        if running_pid():
+            break
+        time.sleep(0.1)
+    else:
+        sys.exit("mcp-check: Greenroom did not start its agent endpoint within 60 s")
 p = subprocess.Popen([exe, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 n, failures = [0], []
 
@@ -43,7 +56,14 @@ try:
     r = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp-check", "version": "1"}})
     expect("initialize answers with the asked version", r["result"]["protocolVersion"] == "2025-06-18", json.dumps(r))
     p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()
-    tools = rpc("tools/list")["result"]["tools"]
+    listed = rpc("tools/list")
+    if "result" not in listed:
+        print("FAIL tools/list: " + json.dumps(listed)[:500])
+        if started:
+            print("the app " + ("is running" if started.poll() is None else f"ended with status {started.returncode}"))
+            print(open(app_log.name, errors="replace").read()[-3000:])
+        sys.exit(1)
+    tools = listed["result"]["tools"]
     expect("tools are listed", {"launch", "tap", "type", "screen", "check", "screenshot", "logs"} <= {t["name"] for t in tools}, str([t["name"] for t in tools]))
     r = rpc("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "1999-01-01"}})
     expect("an unknown protocol version is refused", r.get("error", {}).get("code") == -32022, json.dumps(r))
@@ -109,6 +129,18 @@ finally:
     if pid and pid != was_running:
         os.kill(pid, signal.SIGTERM)
         time.sleep(1)
+    if started:
+        try:
+            started.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            started.kill()
 
+if failures and started:
+    print("the app it started " + ("is running" if started.poll() is None else f"ended with status {started.returncode}") + "; its output:")
+    print(open(app_log.name, errors="replace").read()[-4000:])
+    reports = sorted(glob.glob(os.path.expanduser("~/Library/Logs/DiagnosticReports/Greenroom*")), key=os.path.getmtime)
+    if reports:
+        print("its newest crash report, " + reports[-1] + ":")
+        print(open(reports[-1], errors="replace").read()[:4000])
 print(f"mcp-check: {len(failures)} failed" if failures else "mcp-check: all passed")
 sys.exit(1 if failures else 0)

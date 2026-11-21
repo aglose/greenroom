@@ -160,3 +160,20 @@ final class GlassButton: NSButton {
 
     override var isEnabled: Bool { didSet { refresh(); alphaValue = isEnabled ? 1 : 0.45 } }
 }
+
+extension CGPath {
+    /// A rounded rectangle whose radius fits the rectangle. CoreGraphics asserts (and ends the app) when twice the
+    /// radius is larger than a side, which a view a moment after it is laid out at a tiny or empty size can be: it
+    /// ended the app on CI's runners.
+    static func rounded(_ rect: CGRect, radius: CGFloat) -> CGPath {
+        let r = max(0, min(radius, rect.width / 2, rect.height / 2))
+        return CGPath(roundedRect: rect.standardized, cornerWidth: r, cornerHeight: r, transform: nil)
+    }
+}
+
+extension CGMutablePath {
+    func addRounded(_ rect: CGRect, radius: CGFloat) {
+        let r = max(0, min(radius, rect.width / 2, rect.height / 2))
+        addRoundedRect(in: rect.standardized, cornerWidth: r, cornerHeight: r)
+    }
+}

@@ -230,7 +230,7 @@ final class MapCanvas: NSView {
         shadow.shadowOpacity = 0.55
         shadow.shadowRadius = 14
         shadow.shadowOffset = CGSize(width: 0, height: 6)
-        shadow.shadowPath = CGPath(roundedRect: CGRect(origin: .zero, size: image.frame.size), cornerWidth: 12, cornerHeight: 12, transform: nil)
+        shadow.shadowPath = CGPath.rounded(CGRect(origin: .zero, size: image.frame.size), radius: 12)
         if s.captures.isEmpty {
             let name = text(s.activity, size: 10, weight: .medium, color: Design.mute, width: f.width - 10)
             name.frame.origin = CGPoint(x: 5, y: thumbHeight / 2 - 7)

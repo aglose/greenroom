@@ -373,7 +373,7 @@ final class SimulatorView: NSView {
         let rimRect = bezelRect.insetBy(dx: -3, dy: -3)
         rimLayer.frame = rimRect
         rimLayer.cornerRadius = body == .watch ? rimRect.width / 2 : screenR + b + 3
-        rimLayer.shadowPath = CGPath(roundedRect: CGRect(origin: .zero, size: rimRect.size), cornerWidth: rimLayer.cornerRadius, cornerHeight: rimLayer.cornerRadius, transform: nil)
+        rimLayer.shadowPath = CGPath.rounded(CGRect(origin: .zero, size: rimRect.size), radius: rimLayer.cornerRadius)
         let ringRect = rimRect.insetBy(dx: -3, dy: -3)
         ringLayer.frame = ringRect
         ringLayer.cornerRadius = rimLayer.cornerRadius + 3

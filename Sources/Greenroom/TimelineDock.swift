@@ -212,7 +212,7 @@ final class TimelineTracks: NSView {
         let wells = CGMutablePath()
         for i in 0..<4 {
             let r = row(i)
-            wells.addRoundedRect(in: r, cornerWidth: 6, cornerHeight: 6)
+            wells.addRounded(r, radius: 6)
             labels[i].frame = CGRect(x: 0, y: r.midY - 8, width: labelWidth - 6, height: 16)
         }
         shapes["well"]?.path = wells
@@ -222,7 +222,7 @@ final class TimelineTracks: NSView {
         // Touches.
         let touches = CGMutablePath(), tr = row(0)
         for t in activity?.touches ?? [] where t >= from && t <= now {
-            touches.addRoundedRect(in: CGRect(x: px(t) - 2, y: tr.minY + tr.height * 0.25, width: 4, height: tr.height * 0.5), cornerWidth: 2, cornerHeight: 2)
+            touches.addRounded(CGRect(x: px(t) - 2, y: tr.minY + tr.height * 0.25, width: 4, height: tr.height * 0.5), radius: 2)
         }
         shapes["touch"]?.path = touches
         // Frames: how many in each sliver of time, as one of four strengths of green.
@@ -246,7 +246,7 @@ final class TimelineTracks: NSView {
         for e in activity?.requests ?? [] where e.end >= from && e.start <= now {
             let x0 = px(e.start), x1 = max(x0 + 3, px(e.end))
             let r = CGRect(x: x0, y: nr.minY + nr.height * 0.25, width: x1 - x0, height: nr.height * 0.5)
-            (e.failed ? bad : e.mocked ? mocked : ok).addRoundedRect(in: r, cornerWidth: 3, cornerHeight: 3)
+            (e.failed ? bad : e.mocked ? mocked : ok).addRounded(r, radius: 3)
         }
         shapes["req"]?.path = ok
         shapes["reqFailed"]?.path = bad
