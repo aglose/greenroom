@@ -36,6 +36,15 @@ enum ClaudeConnect {
         "claude mcp add --scope user \(serverName) -- \"\(executable)\" --mcp"
     }
 
+    // MARK: The plugin (the other way to connect)
+    //
+    // The repository is its own Claude Code marketplace (.claude-plugin/marketplace.json, plugin/): the plugin brings
+    // the same server, started by a script that finds the installed app, and a skill that teaches the verify loop.
+    // Typed inside Claude Code by the person; Greenroom never runs these. scripts/plugin-check.py holds the names
+    // to the manifests.
+    static let pluginMarketplaceCommand = "/plugin marketplace add aglose/greenroom"
+    static let pluginInstallCommand = "/plugin install greenroom@greenroom"
+
     // MARK: Running claude
 
     enum State: Equatable {
@@ -287,6 +296,14 @@ struct ClaudeConnectView: View {
                 Text(message).font(.caption).foregroundStyle(failed ? .red : .secondary).textSelection(.enabled)
             }
             Text("Runs the command above with your own claude program, from your login shell\u{2019}s PATH. It changes only Claude Code\u{2019}s own list of servers; \"Disconnect\" removes it again.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider().padding(.vertical, 2)
+            Text("Or install the Greenroom plugin: the same simulators, and a skill that teaches Claude Code to verify a change with them (/greenroom:verify). Type these inside Claude Code:")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(ClaudeConnect.pluginMarketplaceCommand + "\n" + ClaudeConnect.pluginInstallCommand)
+                .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                .foregroundStyle(.secondary)
+            Text("The plugin starts the Greenroom installed on this Mac (Applications first, then the copy Spotlight finds). Use one or the other: with both, Claude Code lists the simulators\u{2019} tools twice. The state above is about Connect only.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear { look() }

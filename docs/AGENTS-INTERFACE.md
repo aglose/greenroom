@@ -5,7 +5,26 @@ and check Android apps in the same simulators the person at the Mac is looking a
 
 ## Connecting
 
-Claude Code: **Settings > Claude Code > Connect Claude Code** shows the exact command and runs it on a click, with
+Claude Code, two ways. Use one: with both, Claude Code lists the same tools twice.
+
+**The plugin** brings the server and a skill that teaches the loop under "Verifying a change" below, also run by
+hand as `/greenroom:verify`. This repository is its own marketplace; inside Claude Code:
+
+```
+/plugin marketplace add aglose/greenroom
+/plugin install greenroom@greenroom
+```
+
+(From a shell: `claude plugin marketplace add aglose/greenroom`, then `claude plugin install greenroom@greenroom`.)
+The plugin's server is a script, `plugin/scripts/greenroom-mcp.sh`, that runs `Greenroom --mcp` from
+`/Applications/Greenroom.app`, else `~/Applications`, else the copy Spotlight finds by bundle id, and says so on
+standard error when there is none. `GREENROOM_APP` names another copy (a build of your own). Its tools are named
+`mcp__plugin_greenroom_greenroom__launch` and so on. Settings > Claude Code shows the two lines; Greenroom does not
+run them, and its "connected" line is about Connect alone. `scripts/plugin-check.py` checks the manifests and runs
+the script against a built app; to try the plugin from a checkout without installing it,
+`claude --plugin-dir plugin` (not with `--strict-mcp-config`, which leaves out a plugin's servers too).
+
+**Connect**: Settings > Claude Code > Connect Claude Code shows the exact command and runs it on a click, with
 your own `claude` program found on your login shell's PATH. It says when Greenroom is already connected, when
 `claude` is not installed, and shows `claude`'s own words when the command fails; Disconnect runs the matching
 `claude mcp remove`. By hand it is:
