@@ -18,7 +18,9 @@ started = None
 if not was_running:
     # Started here rather than by the shim (which uses LaunchServices: on CI's runners the app it opened never served
     # its endpoint within the shim's 15 s), and given a minute: a cold first launch on a runner is slow.
-    started = subprocess.Popen([exe, "--background"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import tempfile
+    app_log = tempfile.NamedTemporaryFile(prefix="greenroom-mcp-check-", suffix=".log", delete=False)
+    started = subprocess.Popen([exe, "--background"], stdout=app_log, stderr=subprocess.STDOUT)
     for _ in range(600):
         if running_pid():
             break
@@ -54,7 +56,14 @@ try:
     r = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp-check", "version": "1"}})
     expect("initialize answers with the asked version", r["result"]["protocolVersion"] == "2025-06-18", json.dumps(r))
     p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()
-    tools = rpc("tools/list")["result"]["tools"]
+    listed = rpc("tools/list")
+    if "result" not in listed:
+        print("FAIL tools/list: " + json.dumps(listed)[:500])
+        if started:
+            print("the app " + ("is running" if started.poll() is None else f"ended with status {started.returncode}"))
+            print(open(app_log.name, errors="replace").read()[-3000:])
+        sys.exit(1)
+    tools = listed["result"]["tools"]
     expect("tools are listed", {"launch", "tap", "type", "screen", "check", "screenshot", "logs"} <= {t["name"] for t in tools}, str([t["name"] for t in tools]))
     r = rpc("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "1999-01-01"}})
     expect("an unknown protocol version is refused", r.get("error", {}).get("code") == -32022, json.dumps(r))
