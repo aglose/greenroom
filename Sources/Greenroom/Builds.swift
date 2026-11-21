@@ -29,6 +29,10 @@ final class BuildJob {
     fileprivate var variant: String
     fileprivate var out: URL
     fileprivate var logFile: URL
+    /// The workspace's recipe settings, as the recipe's environment (RecipeSettings.swift).
+    fileprivate var extra: [String: String]
+    /// A sandbox the remote recipe made from a template (it says so in a line of its log).
+    fileprivate(set) var createdSandbox: String?
 
     init(session: Session, workspace: Workspace, recipeName: String, recipe: Recipe, store: SessionStore) {
         self.session = session.worktree.path
@@ -39,6 +43,7 @@ final class BuildJob {
         self.recipe = recipe
         self.module = workspace.module ?? ""
         self.variant = workspace.variant
+        self.extra = workspace.recipeEnvironment
         let work = store.root.appendingPathComponent("sessions/work/\(session.slot)", isDirectory: true)
         self.out = work.appendingPathComponent("app.apk")
         self.logFile = work.appendingPathComponent("build.log")
@@ -86,6 +91,7 @@ final class Builds {
         if let j = jobs[session.worktree.path], j.isActive { error("\(session.title) is already building"); return nil }
         let name = recipeName ?? workspace.defaultRecipeName
         guard let recipe = workspace.recipe(named: name) else { error("There is no recipe called \(name)"); return nil }
+        if let why = workspace.refusal(forRecipe: name) { error(why); return nil }   // the remote recipe needs the person's yes
         let job = BuildJob(session: session, workspace: workspace, recipeName: name, recipe: recipe, store: store)
         jobs[job.session] = job
         queued.append(job)
@@ -99,6 +105,7 @@ final class Builds {
     /// At once, for the app quitting: every running recipe's group gets SIGKILL, synchronously.
     func terminateAll() {
         for job in jobs.values where job.isActive { job.cancelRequested = true; job.run?.killNow() }
+        Bases.killAll()
     }
 
     func cancel(_ worktree: String) {
@@ -135,7 +142,9 @@ final class Builds {
             let sha = state?.head ?? hint?.head ?? ""
             let ref = state?.branch ?? hint?.branch ?? ""
             let dirty = state?.dirty ?? hint?.dirty ?? false
-            let rj = RecipeJob(worktree: wt, repo: job.workspace, ref: ref, sha: sha, dirty: dirty, module: job.module, variant: job.variant, out: job.out)
+            var extra = job.extra
+            if let slug = await GitHubRemote.repoSlug(for: wt) { extra["GREENROOM_REPO_SLUG"] = slug }
+            let rj = RecipeJob(worktree: wt, repo: job.workspace, ref: ref, sha: sha, dirty: dirty, module: job.module, variant: job.variant, out: job.out, extra: extra)
             let run = RecipeRun(recipe: job.recipe, job: rj)
             job.run = run
             if job.cancelRequested {
@@ -145,6 +154,7 @@ final class Builds {
             run.onLine = { [weak self, weak job] line in
                 guard let self, let job else { return }
                 job.append(line)
+                if line.hasPrefix("greenroom: sandbox-created ") { job.createdSandbox = String(line.dropFirst(27)).trimmingCharacters(in: .whitespaces) }
                 self.onLine?(job, line)
             }
             run.start { [weak self] outcome in
@@ -156,6 +166,8 @@ final class Builds {
     private func finish(_ job: BuildJob, outcome: RecipeOutcome, store: SessionStore, sha: String, ref: String, dirty: Bool) {
         let work = job.logFile.deletingLastPathComponent()
         let log = job.run?.logText ?? (job.lines.joined(separator: "\n") + "\n")
+        // The remote recipe made a sandbox from a template: keep its id in the workspace's settings, so the next build resumes it.
+        if let made = job.createdSandbox { sessions?.noteCreatedSandbox(made, workspaceRoot: job.workspace.path) }
         let release = { [self] in
             running[job.workspace.path] = nil
             onChange?()
@@ -180,7 +192,8 @@ final class Builds {
             job.handingOff = true
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 // Hashing and cloning a big APK is off the main thread.
-                let build = store.record(apk: out, source: source, sha: sha.isEmpty ? nil : sha, ref: ref.isEmpty ? nil : ref, dirty: dirty, date: Date())
+                // CI built the pushed commit, whatever the worktree has changed since.
+                let build = store.record(apk: out, source: source, sha: sha.isEmpty ? nil : sha, ref: ref.isEmpty ? nil : ref, dirty: source == .ci ? false : dirty, date: Date())
                 if let build {
                     store.note(build: build.key, of: job.session)
                     try? log.write(to: store.folder(of: build.key).appendingPathComponent("build.log"), atomically: true, encoding: .utf8)

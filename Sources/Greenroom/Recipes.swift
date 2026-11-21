@@ -5,9 +5,8 @@ import Foundation
 // declared with the model in Sessions.swift so a workspace's settings round-trip.
 
 extension Recipe {
-    /// The recipes that ship in `Resources/recipes/`. W2b adds "ci" and W2c "remote" here (and their scripts to the
-    /// folder); nothing else changes for them: the runner, the queue and the UI take any name listed.
-    static let builtInNames = ["local"]
+    /// The recipes that ship in `Resources/recipes/`: the runner, the queue and the UI take any name listed.
+    static let builtInNames = ["local", "ci", "remote"]
 
     /// Where the bundled recipes are: the app's Resources, else (a `swift run` build) the source tree's.
     static var bundledFolder: URL {
@@ -38,8 +37,11 @@ extension Workspace {
     /// A recipe by name: the workspace's own (a custom one) first, then the built-in of that name.
     func recipe(named name: String) -> Recipe? { recipes[name] ?? Recipe.builtIn(name) }
 
-    /// Every recipe name offered, built-ins first.
-    var recipeNames: [String] { Recipe.builtInNames + recipes.keys.filter { !Recipe.builtInNames.contains($0) }.sorted() }
+    /// Every recipe name offered, built-ins first; "ci" only for a repository with a GitHub remote.
+    var recipeNames: [String] {
+        Recipe.builtInNames.filter { $0 != "ci" || recipes["ci"] != nil || GitHubRemote.has(root) }
+            + recipes.keys.filter { !Recipe.builtInNames.contains($0) }.sorted()
+    }
 
     /// The name of the recipe the Build button runs: the last one chosen for this workspace, else "local".
     var defaultRecipeName: String {
@@ -62,12 +64,14 @@ struct RecipeJob {
     var variant: String
     /// Where the recipe writes the APK.
     var out: URL
+    /// The workspace's recipe settings (`Workspace.recipeEnvironment`), beside the contract's variables.
+    var extra: [String: String] = [:]
 
     var environment: [String: String] {
-        [
+        extra.merging([
             "GREENROOM_WORKTREE": worktree.path, "GREENROOM_REPO": repo.path, "GREENROOM_REF": ref, "GREENROOM_SHA": sha,
             "GREENROOM_DIRTY": dirty ? "1" : "0", "GREENROOM_MODULE": module, "GREENROOM_VARIANT": variant, "GREENROOM_OUT": out.path,
-        ]
+        ]) { _, contract in contract }
     }
 }
 
@@ -96,7 +100,13 @@ enum ProcessGroup {
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+        // The app ignores SIGTERM (it quits through its own handler) and ignored signals survive exec: a recipe would
+        // never hear a cancel, and a shell cannot trap what it inherited as ignored. Default dispositions, nothing blocked.
+        var noSignals = sigset_t(), allSignals = sigset_t()
+        sigemptyset(&noSignals); sigfillset(&allSignals)
+        posix_spawnattr_setsigmask(&attr, &noSignals)
+        posix_spawnattr_setsigdefault(&attr, &allSignals)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
         posix_spawnattr_setpgroup(&attr, 0)   // a group of its own, led by the child
         let argv = ([exe] + args).map { strdup($0) } + [nil]
         let envp = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
@@ -112,12 +122,13 @@ enum ProcessGroup {
 
     /// Reads the child's output until it has exited and its pipe is drained, calling `onData`. The pipe being closed
     /// (a recipe that closes stdout and goes on) does not end the wait; the child's exit does. After the exit a
-    /// grace of a second for a pipe a grandchild still holds. At `deadline` the whole group gets SIGKILL.
+    /// grace of a second for a pipe a grandchild still holds. At `deadline` the whole group gets SIGTERM, so a recipe's trap can clean up (a remote sandbox to stop), and SIGKILL `grace` seconds later (at once with 0).
     /// `reaped` runs the moment the child is reaped, so a later kill of its pid can be skipped.
-    static func drain(_ c: Child, deadline: Date, onData: (Data) -> Void, reaped: () -> Void) -> Drained {
+    static func drain(_ c: Child, deadline: Date, grace: TimeInterval = 0, onData: (Data) -> Void, reaped: () -> Void) -> Drained {
         var status: Int32 = 0
         var exited = false, eof = false, timedOut = false
         var exitedAt: Date?
+        var killedAt: Date?
         var buf = [UInt8](repeating: 0, count: 8192)
         while true {
             if !eof {
@@ -133,8 +144,12 @@ enum ProcessGroup {
             }
             if !exited, waitpid(c.pid, &status, WNOHANG) == c.pid { exited = true; exitedAt = Date(); reaped() }
             if exited && (eof || Date().timeIntervalSince(exitedAt!) > 1) { break }
-            if !timedOut, Date() > deadline { timedOut = true; killpg(c.pid, SIGKILL) }
-            if timedOut, Date() > deadline.addingTimeInterval(5), !exited { break }   // unkillable: give up waiting
+            if !timedOut, Date() > deadline {
+                timedOut = true
+                if grace > 0 { killpg(c.pid, SIGTERM) } else { killpg(c.pid, SIGKILL); killedAt = Date() }
+            }
+            if timedOut, killedAt == nil, Date() > deadline.addingTimeInterval(grace) { killpg(c.pid, SIGKILL); killedAt = Date() }
+            if let k = killedAt, Date() > k.addingTimeInterval(5), !exited { break }   // unkillable: give up waiting
         }
         close(c.fd)
         if exited { killpg(c.pid, SIGKILL) }   // whatever is left of the group
@@ -288,23 +303,29 @@ final class RecipeRun {
         }
     }
 
-    /// Ends the recipe and everything it started in its group (SIGTERM, then SIGKILL after two seconds unless it has
+    /// Ends the recipe and everything it started in its group (SIGTERM, then SIGKILL after ten seconds, time for a remote recipe to stop its sandbox, unless it has
     /// been reaped by then: its pid may be someone else's by then).
     func cancel() {
         lock.lock(); cancelled = true; let p = pid; lock.unlock()
         guard p > 0 else { return }
         killpg(p, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self else { return }
             self.lock.lock(); let gone = self.reaped; self.lock.unlock()
             if !gone { killpg(p, SIGKILL) }
         }
     }
 
-    /// At once and without waiting, for the app quitting: SIGKILL to the group.
-    func killNow() {
+    /// For the app quitting.
+    /// SIGTERM first, so the recipe's own cleanup runs (a remote recipe stops its sandbox); the group gets up to
+    /// `grace` seconds to end, then SIGKILL. Blocks for that long at most.
+    func killNow(grace: TimeInterval = 10) {
         lock.lock(); cancelled = true; let p = pid; let gone = reaped; lock.unlock()
-        if p > 0 && !gone { killpg(p, SIGKILL) }
+        guard p > 0 && !gone else { return }
+        killpg(p, SIGTERM)
+        let end = Date().addingTimeInterval(grace)
+        while Date() < end, killpg(p, 0) == 0 { usleep(50_000) }
+        if killpg(p, 0) == 0 { killpg(p, SIGKILL) }
     }
 
     private func add(_ new: [String]) {
@@ -335,7 +356,7 @@ final class RecipeRun {
 
         var splitter = LineSplitter()
         let started = Date()
-        let r = ProcessGroup.drain(child, deadline: started.addingTimeInterval(timeout),
+        let r = ProcessGroup.drain(child, deadline: started.addingTimeInterval(timeout), grace: 10,
                                    onData: { add(splitter.feed($0)) },
                                    reaped: { lock.lock(); reaped = true; lock.unlock() })
         if let last = splitter.finish() { add([last]) }

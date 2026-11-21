@@ -51,6 +51,29 @@ of the apps you run and acts on them, on this Mac, through a connection only pro
 token in a file only you can read; web pages are refused). What the agent's own provider receives is between you
 and that agent; Greenroom sends it nothing by itself.
 
+## Build recipes
+
+If you add a git repository (Sessions) and build it, Greenroom runs a **recipe**: a program that makes an APK, told
+what to build through environment variables. The recipes that come with Greenroom are readable files in the app
+(`Resources/recipes`), and you can choose any program of your own. A recipe runs *your* tools with *your*
+credentials: `git` and Gradle for `local`, the GitHub CLI (`gh`) with your own sign-in for `ci`. Those tools talk to
+the network as themselves, when you press Build, add a pull request or choose a recipe, and only then. Greenroom
+makes no connection of its own for it, and shares your sign-ins with no one: it never sees them (`gh` keeps its own).
+The **remote** recipe is the one that sends something away: it uploads this repository's source code (the committed
+files, your uncommitted changes and the untracked files `.gitignore` does not ignore) to your own boat.dev account,
+with the `boat` tool and your own sign-in. Untracked files named like secrets (`*.jks`, `*.keystore`, `*.p12`,
+`.env*`, `keystore.properties`, `local.properties`, `google-services.json`, `*.pem`, `id_rsa*`) and nested
+repositories are not sent and the build log says which; a secret in an untracked file with an ordinary name is. The
+sandbox is stopped when a build ends normally or is cancelled, and at the next launch if the app was killed; the
+source stays in the stopped sandbox until you delete it on boat.dev. Greenroom says all this in a sheet before the
+first run and needs your yes for each repository; no run happens without it. The APK comes back; none is uploaded.
+
+The **ci** recipe starts a GitHub Actions workflow (`gh workflow run`) only when you press Build on a session with a
+workflow set in its settings, never when Greenroom looks for a base or a pull request's build.
+
+Adding a pull request runs `gh` for that pull request's head commit and its CI artifact; the APK it fetches is
+opened on this Mac like any other. What a build leaves comes back to this Mac; no APK is uploaded.
+
 This file changes in the same commit as any change to what the app sends.
 
 ## Claude Code's sessions

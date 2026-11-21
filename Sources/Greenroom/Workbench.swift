@@ -108,6 +108,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private enum Row {
         case header(String)
         case session(Session)
+        case pull(PullRow)
         case simulator(Simulator)
         case recent(URL)
         case claudeOffer(ClaudeOffer)
@@ -314,7 +315,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             rows += group.sessions.map { .session($0) }
         }
         rows += ClaudeSessions.shared.offers.map { .claudeOffer($0) }   // W1
-        let loose = sims.filter { sessions.session(forSimulator: $0) == nil }   // a session's own is on its row
+        let pullRows = sessions.pullRows()
+        if !pullRows.isEmpty {
+            rows.append(.header("Review"))
+            rows += pullRows.map { .pull($0) }
+        }
+        let loose = sims.filter { sessions.session(forSimulator: $0) == nil && !sessions.pulls.owns($0) }   // a session's or pull request's own is on its row
         if !loose.isEmpty {
             rows.append(.header("Running"))
             rows += loose.map { .simulator($0) }
@@ -327,6 +333,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         table.reloadData()
         if let s = selected, let i = rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }
+            if case .pull(let x) = $0 { return x.simulator === s }
             return false
         }) ?? rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) {
             table.selectRowIndexes([i], byExtendingSelection: false)
@@ -1015,7 +1022,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session, .claudeOffer: return true
+        case .simulator, .session, .claudeOffer, .pull: return true
         default: return false
         }
     }
@@ -1035,6 +1042,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         if case .header = rows[row] { return 24 }
         if case .session = rows[row] { return 42 }
+        if case .pull = rows[row] { return 42 }
         return 36
     }
 
@@ -1049,6 +1057,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             return sessions.cell(for: session)
         case .claudeOffer(let offer):
             return ClaudeUI.offerCell(offer)
+        case .pull(let pull):
+            return sessions.pullCell(pull)
         case .simulator(let sim):
             let detail: String
             let symbol: String
@@ -1094,6 +1104,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
         if case .claudeOffer(let offer) = rows[row] { sessions.addRepositories([offer.repository]) }
+        if case .pull(let pull) = rows[row] { sessions.openPull(pull) }
     }
 
     @objc private func rowDoubleClicked() {
@@ -1106,8 +1117,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.items.filter { $0.tag == 77 }.forEach { menu.removeItem($0) }
         let row = table.clickedRow
-        guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
-        let items = sessions.buildMenuItems(for: session) + [.separator()]
+        guard row >= 0, row < rows.count else { return }
+        var items: [NSMenuItem] = []
+        if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
+        else if case .pull(let pull) = rows[row] { items = sessions.pullMenuItems(for: pull) + [.separator()] }
+        else { return }
         for (i, item) in items.enumerated() { item.tag = 77; menu.insertItem(item, at: i) }
     }
 
@@ -1116,6 +1130,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { Engine.shared.close(sim) }
         if case .session(let session) = rows[row] { sessions.closeSimulator(of: session) }
+        if case .pull(let pull) = rows[row] { sessions.closePullSimulator(pull) }
     }
 
     @objc private func openInClaudeClicked() {
