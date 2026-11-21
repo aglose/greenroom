@@ -66,8 +66,11 @@ done < <(find "$C/Resources/engine" -type f \( -perm +111 -o -name '*.dylib' -o 
 # Sparkle's nested programs, then the framework (its own order, per Sparkle's documentation).
 SP="$C/Frameworks/Sparkle.framework"
 for f in "$SP/Versions/B/Autoupdate" "$SP/Versions/B/Updater.app" "$SP"; do "${SIGN[@]}" "$f" 2>/dev/null; n=$((n+1)); done
-if [[ "$IDENTITY" == - ]]; then "${SIGN[@]}" --entitlements Resources/greenroom.dev.entitlements "$APP" 2>/dev/null
-else "${SIGN[@]}" "$APP" 2>/dev/null; fi
+# The app itself: no entitlements with a real identity. Ad hoc, library validation off (greenroom.dev.entitlements):
+# an ad hoc signature has no team, so validation would refuse the app's own Sparkle.framework. (No comments inside
+# an entitlements file: AMFI's parser refuses them.) Errors show: a failure here stops the script.
+if [[ "$IDENTITY" == - ]]; then "${SIGN[@]}" --entitlements Resources/greenroom.dev.entitlements "$APP"
+else "${SIGN[@]}" "$APP"; fi
 echo "signed $n binaries and the app as: $IDENTITY"
 echo "$APP ($(du -sh "$APP" | cut -f1)), engine $ENGINE_VERSION"
 
