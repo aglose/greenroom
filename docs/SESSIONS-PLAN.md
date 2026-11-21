@@ -92,6 +92,8 @@ under a size cap in Settings (default 5 GB), oldest first.
 - **Keyboard**: ⌃1-9 for the first nine, ⌃Tab for the last used, all rows in the ⌘K palette.
 - **A new build** of a session reloads its simulator in place (`DevHooks.relaunch`: same options, same data),
   whether or not it is the selected one. One FSEvents stream watches every session's outputs folder.
+  This is one call site (the watcher's callback), where hot swap's swap -> recreate -> relaunch ladder plugs in when
+  phase 6 lands; a resource-only change always relaunches.
 
 ## 2. Builds
 
@@ -139,6 +141,8 @@ What Greenroom captures for a build by itself, in the background, on hidden simu
 
 Video comes from the H.264 stream the app already receives: a `Recorder` writes the samples into an MP4
 (`AVAssetWriter`, passthrough, no second encode), so recording costs nothing in the engine and works headless.
+If local display moves to shared IOSurfaces (PLAN.md phase 0, S1), the stream stays on, or is started, whenever
+something records, or the Recorder encodes from the surfaces itself.
 
 - **When** (`Workspace.auto`): `off`, `onBuild` (default: every new build is walked), `onTurnEnd` (when the
   session's Claude turn ends and the sources are newer than the build: build, then walk). A walk is cancelled when
@@ -252,13 +256,13 @@ it self-sufficient; W3 and W4 are the reason to keep it open.
 
 ## Spikes (an hour or two each, before the stream that needs them)
 
-- S1 (W1): the `claude://` link that opens a given session in the desktop app, if there is one.
-- S2 (W2b): `gh run download` on a repository whose workflow uploads a debug APK: artifact naming, time to fetch.
-- S3 (W2c): a boat.dev template with the Android SDK; first and second build times of a mid-sized app; whether
+- SS1 (W1): the `claude://` link that opens a given session in the desktop app, if there is one.
+- SS2 (W2b): `gh run download` on a repository whose workflow uploads a debug APK: artifact naming, time to fetch.
+- SS3 (W2c): a boat.dev template with the Android SDK; first and second build times of a mid-sized app; whether
   `rsync` works over `boat ssh` (it would replace the archive upload); the 30 s exec default and detached polling.
-- S4 (W3b): `crawl.py --keep-data` on a clone of a slot: that the clone is what it uses and the original is
+- SS4 (W3b): `crawl.py --keep-data` on a clone of a slot: that the clone is what it uses and the original is
   untouched.
-- S5 (W0): three warm simulators of a large app: memory, and whether the least recently used should quit or drop
+- SS5 (W0): three warm simulators of a large app: memory, and whether the least recently used should quit or drop
   to `--max-fps 1`.
 
 ## Open decisions
