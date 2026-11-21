@@ -75,6 +75,7 @@ final class SimulatorGrid: NSView {
         placements = placements.filter { known.contains($0.key) }
         stacking.removeAll { !known.contains($0) }
         arrangeable = sideBySide && views.count > 1
+        restoreSaved()
         if let g = gesture, !arrangeable || !views.contains(where: { $0 === g.view }) { gesture = nil }
         for v in views {
             v.showsCaption = sideBySide && views.count > 1
@@ -94,6 +95,7 @@ final class SimulatorGrid: NSView {
         placements = [:]
         stacking = []
         gesture = nil
+        save()
         animateNext = true
         applyStacking()
         needsLayout = true
@@ -248,20 +250,23 @@ final class SimulatorGrid: NSView {
         return Placement(origin: CGPoint(x: last.minX + 32, y: last.minY + 32), longSide: longSide)
     }
 
+    /// From tiles to places: each device keeps its picture where it is, in a frame that fits it exactly.
+    private func adoptTiles() {
+        guard !isArranged else { return }
+        for other in views {
+            guard let s = other.simulator, other.frame.width > 0 else { continue }
+            let longSide = other.pictureLongSide
+            let cell = other.cell(longSide: longSide)
+            let picture = other.pictureFrame.origin
+            placements[ObjectIdentifier(s)] = Placement(origin: CGPoint(x: other.frame.minX + picture.x - cell.picture.x,
+                                                                        y: other.frame.minY + picture.y - cell.picture.y),
+                                                        longSide: longSide)
+        }
+    }
+
     func beginArranging(_ v: SimulatorView, at event: NSEvent, resizing: Bool) {
         guard arrangeable, let sim = v.simulator else { return }
-        if !isArranged {
-            // From tiles to places: each device keeps its picture where it is, in a frame that fits it exactly.
-            for other in views {
-                guard let s = other.simulator, other.frame.width > 0 else { continue }
-                let longSide = other.pictureLongSide
-                let cell = other.cell(longSide: longSide)
-                let picture = other.pictureFrame.origin
-                placements[ObjectIdentifier(s)] = Placement(origin: CGPoint(x: other.frame.minX + picture.x - cell.picture.x,
-                                                                            y: other.frame.minY + picture.y - cell.picture.y),
-                                                            longSide: longSide)
-            }
-        }
+        adoptTiles()
         let id = ObjectIdentifier(sim)
         guard var p = placements[id] else { return }
         // Start from where it is drawn, so a device a small window had pushed in does not jump.
@@ -300,7 +305,82 @@ final class SimulatorGrid: NSView {
     func endArranging(_ v: SimulatorView) {
         guard gesture?.view === v else { return }
         gesture = nil
+        save()
         needsLayout = true
+    }
+
+    // MARK: Without a mouse (VoiceOver's actions on a device)
+
+    /// Moves a device by a step, or makes it larger or smaller by a factor, as a drag would.
+    func adjust(_ v: SimulatorView, by d: CGSize = .zero, scale: CGFloat = 1) {
+        guard arrangeable, let sim = v.simulator else { return }
+        adoptTiles()
+        let id = ObjectIdentifier(sim)
+        guard var p = placements[id] else { return }
+        p.longSide = clampedLongSide(v, p.longSide, within: bounds.size)
+        p.origin = frame(v, p).origin
+        if scale != 1 {
+            let room = CGSize(width: bounds.width - p.origin.x, height: bounds.height - p.origin.y)
+            p.longSide = clampedLongSide(v, p.longSide * scale, within: room)
+        }
+        let size = v.cell(longSide: p.longSide).size
+        p.origin = clampedOrigin(CGPoint(x: p.origin.x + d.width, y: p.origin.y + d.height), size: size)
+        placements[id] = p
+        stacking.removeAll { $0 == id }
+        stacking.append(id)
+        applyStacking()
+        save()
+        needsLayout = true
+    }
+
+    // MARK: Kept across launches
+
+    /// The arrangement is saved under each device's app, kind and place among devices of the same app and kind, so
+    /// opening the same set again (or Greenroom reopening it) puts them back. Positions are the stage's points,
+    /// kept to the stage when laid out.
+    private static let savedKey = "stageArrangement"
+
+    private func keys() -> [ObjectIdentifier: String] {
+        var seen: [String: Int] = [:], out: [ObjectIdentifier: String] = [:]
+        for v in views {
+            guard let sim = v.simulator else { continue }
+            var device = "phone"
+            if let i = sim.options.firstIndex(of: "--device"), i + 1 < sim.options.count { device = sim.options[i + 1] }
+            let base = sim.apk.lastPathComponent + "|" + device
+            let n = seen[base, default: 0]
+            seen[base] = n + 1
+            out[ObjectIdentifier(sim)] = base + "|" + String(n)
+        }
+        return out
+    }
+
+    private func save() {
+        let defaults = UserDefaults.standard
+        guard isArranged else { defaults.removeObject(forKey: Self.savedKey); return }
+        var saved = defaults.dictionary(forKey: Self.savedKey) as? [String: [Double]] ?? [:]
+        for (id, key) in keys() {
+            if let p = placements[id] { saved[key] = [p.origin.x, p.origin.y, p.longSide] }
+        }
+        defaults.set(saved, forKey: Self.savedKey)
+    }
+
+    /// The check's relaunch: places forgotten in memory, then read back from what was saved.
+    func reloadSavedForCheck() {
+        placements = [:]
+        stacking = []
+        restoreSaved()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    /// On a stage not arranged yet, the saved places of the devices shown, if any of them has one.
+    private func restoreSaved() {
+        guard arrangeable, !isArranged, gesture == nil,
+              let saved = UserDefaults.standard.dictionary(forKey: Self.savedKey) as? [String: [Double]], !saved.isEmpty else { return }
+        for (id, key) in keys() {
+            if let s = saved[key], s.count == 3 { placements[id] = Placement(origin: CGPoint(x: s[0], y: s[1]), longSide: s[2]) }
+        }
+        if isArranged { animateNext = true }
     }
 
     /// Lines a moving device's edges up with the stage's and the other devices' when they come within a few points.

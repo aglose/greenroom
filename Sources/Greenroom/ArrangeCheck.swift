@@ -13,6 +13,7 @@ extension AppDelegate {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let apk = URL(fileURLWithPath: args[i + 2])
         let wb = workbench!
+        UserDefaults.standard.removeObject(forKey: "stageArrangement")   // start tiled, whatever an earlier run saved
         wb.window.setContentSize(NSSize(width: 1500, height: 1000))
         wb.window.center()
         guard let first = wb.open(apk, remember: false) else { return }
@@ -93,6 +94,21 @@ extension AppDelegate {
                 drag(b, from: CGPoint(x: b.pictureFrame.midX, y: b.pictureFrame.midY), by: .zero)
                 check(grid.subviews.firstIndex(of: b)! > grid.subviews.firstIndex(of: c)!, "a click brings a device to the front (it was \(behind ? "behind" : "in front"))")
 
+                // VoiceOver's actions do what a drag does.
+                let actions = b.accessibilityCustomActions() ?? []
+                check(b.accessibilityLabel()?.isEmpty == false && actions.count == 8, "VoiceOver: \"\(b.accessibilityLabel() ?? "")\", actions \(actions.map(\.name).joined(separator: ", "))")
+                let longBefore = b.pictureLongSide, xBefore = b.frame.minX
+                _ = actions.first { $0.name == "Make smaller" }?.handler?()
+                _ = actions.first { $0.name == "Move right" }?.handler?()
+                grid.layoutSubtreeIfNeeded()
+                check(b.pictureLongSide < longBefore && b.frame.minX > xBefore, "smaller and moved right by its actions: \(Int(longBefore)) -> \(Int(b.pictureLongSide)), x \(Int(xBefore)) -> \(Int(b.frame.minX))")
+
+                // Kept across a relaunch: forgotten in memory, read back from what was saved.
+                let framesBefore = grid.views.map(\.frame)
+                let saved = UserDefaults.standard.dictionary(forKey: "stageArrangement")?.count ?? 0
+                grid.reloadSavedForCheck()
+                check(saved == 3 && grid.isArranged && grid.views.map(\.frame) == framesBefore, "saved (\(saved) places) and put back: " + grid.views.map { r($0.frame) }.joined(separator: " | "))
+
                 // A device opened now gets a free spot rather than the tiles.
                 wb.openBeside(apk: apk, device: "phone")
                 after(4) {
@@ -114,6 +130,7 @@ extension AppDelegate {
                             check(grid.views.count == 3 && grid.isArranged, "the rest keep their places (\(grid.views.count))")
                             wb.tidyUp(nil)
                             after(1) {
+                                check(UserDefaults.standard.object(forKey: "stageArrangement") == nil, "Tidy Up forgets the saved places")
                                 check(!grid.isArranged, "Tidy Up tiles them again: " + grid.views.map { r($0.frame) }.joined(separator: " | "))
                                 self.captureWindow(to: dir.appendingPathComponent("4-tidy.png"))
                                 print("[greenroom] arrange: \(failures == 0 ? "passed" : "\(failures) failed")")

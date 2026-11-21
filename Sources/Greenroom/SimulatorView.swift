@@ -462,6 +462,35 @@ final class SimulatorView: NSView {
 
     @objc private func tidyClicked() { arranger?.tidy() }
 
+    // MARK: Accessibility
+
+    override func isAccessibilityElement() -> Bool { simulator != nil }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? {
+        guard let sim = simulator else { return nil }
+        return "\(kindName), \(sim.name)"
+    }
+
+    /// What a drag does, for VoiceOver and Full Keyboard Access: move a step, larger or smaller, close, Tidy Up.
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        guard arrangeable, let arranger, simulator != nil else { return nil }
+        let step: CGFloat = 40
+        func action(_ name: String, _ f: @escaping () -> Void) -> NSAccessibilityCustomAction {
+            NSAccessibilityCustomAction(name: name) { f(); return true }
+        }
+        var actions = [
+            action("Move left") { [weak self] in self.map { arranger.adjust($0, by: CGSize(width: -step, height: 0)) } },
+            action("Move right") { [weak self] in self.map { arranger.adjust($0, by: CGSize(width: step, height: 0)) } },
+            action("Move up") { [weak self] in self.map { arranger.adjust($0, by: CGSize(width: 0, height: -step)) } },
+            action("Move down") { [weak self] in self.map { arranger.adjust($0, by: CGSize(width: 0, height: step)) } },
+            action("Make larger") { [weak self] in self.map { arranger.adjust($0, scale: 1.15) } },
+            action("Make smaller") { [weak self] in self.map { arranger.adjust($0, scale: 1 / 1.15) } },
+            action("Close") { [weak self] in self?.closeClicked() },
+        ]
+        if arranger.isArranged { actions.append(action("Tidy Up") { arranger.tidy() }) }
+        return actions
+    }
+
     // MARK: Arranging on the canvas
 
     /// The view's size that holds a picture with this long side exactly, and where the picture's top left then is:
