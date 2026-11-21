@@ -31,8 +31,12 @@ enum Git {
         p.arguments = ["-p"]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
+        // Waits without waitUntilExit, which runs the run loop: on the main thread that let layout and table callbacks
+        // run inside this initializer, and anything there that asked for `available` again re-entered it.
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
         guard (try? p.run()) != nil else { return false }
-        p.waitUntilExit()
+        done.wait()
         return p.terminationStatus == 0
     }()
 
