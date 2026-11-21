@@ -97,8 +97,54 @@ final class StageBackground: NSView {
     }
 }
 
+/// Lays out a GlassButton's content itself: AppKit's own layout put a leading image against the button's edge and
+/// spread the rest of the width between image and title, so every icon-and-title button looked lopsided. Here the
+/// icon and title are one group with fixed insets and gap, centred in whatever width the button is given.
+final class GlassButtonCell: NSButtonCell {
+    static let inset: CGFloat = 12, gap: CGFloat = 6, iconOnly = NSSize(width: 32, height: 30)
+
+    private var iconSize: NSSize { imagePosition == .noImage ? .zero : (image?.size ?? .zero) }
+    private var titleSize: NSSize { title.isEmpty ? .zero : attributedTitle.size() }
+    private var groupWidth: CGFloat {
+        let i = iconSize.width, t = titleSize.width
+        return i + t + (i > 0 && t > 0 ? Self.gap : 0)
+    }
+
+    override var cellSize: NSSize {
+        if title.isEmpty { return Self.iconOnly }
+        return NSSize(width: ceil(groupWidth + 2 * Self.inset), height: Self.iconOnly.height)
+    }
+
+    private func groupOrigin(in bounds: NSRect) -> CGFloat { bounds.minX + floor((bounds.width - groupWidth) / 2) }
+
+    override func imageRect(forBounds rect: NSRect) -> NSRect {
+        let s = iconSize
+        guard s.width > 0 else { return .zero }
+        return NSRect(x: groupOrigin(in: rect), y: rect.minY + floor((rect.height - s.height) / 2), width: s.width, height: s.height)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        let s = titleSize
+        guard s.width > 0 else { return .zero }
+        let i = iconSize.width
+        let x = groupOrigin(in: rect) + (i > 0 ? i + Self.gap : 0)
+        return NSRect(x: x, y: rect.minY + floor((rect.height - s.height) / 2), width: ceil(s.width), height: ceil(s.height))
+    }
+
+    override func drawImage(_ image: NSImage, withFrame frame: NSRect, in view: NSView) {
+        super.drawImage(image, withFrame: imageRect(forBounds: view.bounds), in: view)
+    }
+
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in view: NSView) -> NSRect {
+        let r = titleRect(forBounds: view.bounds)
+        title.draw(in: r)
+        return r
+    }
+}
+
 /// A button on glass: a symbol, a title, or both, in a soft well; tinted while on.
 final class GlassButton: NSButton {
+    override class var cellClass: AnyClass? { get { GlassButtonCell.self } set {} }
     enum Style { case plain, well, accent, record }
     var style: Style = .plain { didSet { refresh() } }
     var isOn = false { didSet { refresh() } }
@@ -131,11 +177,14 @@ final class GlassButton: NSButton {
         refresh()
     }
 
-    override var intrinsicContentSize: NSSize {
-        var s = super.intrinsicContentSize
-        if !title.isEmpty { s.width += 20 }
-        return s
-    }
+    override var intrinsicContentSize: NSSize { cell?.cellSize ?? super.intrinsicContentSize }
+    // AppKit gives a button its symbol's alignment insets (doc.on.doc has some), so constraints then sized an inner
+    // rectangle: "Copy route" came out 33 pt tall and 1.5 pt higher than "Go there" beside it. The well is the button.
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+
+    // A new title or symbol keeps the button's colours and re-measures it (the Walk/Stop and count buttons).
+    override var title: String { didSet { if title != oldValue { refresh(); invalidateIntrinsicContentSize() } } }
+    override var image: NSImage? { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
 
     override var isHighlighted: Bool { didSet { refresh() } }
     override func mouseEntered(with event: NSEvent) { hovering = true }
