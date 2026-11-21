@@ -94,6 +94,7 @@ final class AgentTools {
 
     /// Runs a tool. Never on the main thread. Answers with MCP content blocks.
     func call(_ name: String, _ args: [String: Any]) throws -> [[String: Any]] {
+        Reports.shared.count(.agentTool)
         guard AgentTools.tools.contains(where: { $0.name == name }) else { throw Failure(message: "unknown tool \(name)") }
         if paused, !AgentTools.readOnly.contains(name) {
             throw Failure(message: "The person at the Mac has paused the agent in Greenroom. Ask them to resume it.")

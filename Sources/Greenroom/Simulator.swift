@@ -104,6 +104,7 @@ final class Simulator {
                 self.control?.close()
                 self.netFeed?.close()
                 self.state = .ended(proc.terminationStatus)
+                Reports.shared.engineEnded(status: proc.terminationStatus)
             }
         }
         try process.run()

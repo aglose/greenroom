@@ -198,6 +198,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     @discardableResult
     func open(_ apk: URL, remember: Bool = true, options: [String] = [], fromAgent: Bool = false) -> Simulator? {
+        Reports.shared.count(.apkOpened)
         do {
             let sim = try Engine.shared.open(apk: apk, options: options)
             if remember {
@@ -521,6 +522,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleSnapshots(_ sender: Any?) { if snapshotReview.isOpen { snapshotReview.close() } else { showSnapshots() } }
 
     func showSnapshots(run: Bool = false) {
+        Reports.shared.count(.snapshots)
         if screenMap.isOpen { screenMap.close() }
         snapshotReview.open()
         if run { snapshotReview.runIfReady() }
@@ -542,6 +544,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleMap(_ sender: Any?) { if screenMap.isOpen { screenMap.close() } else { showMap() } }
 
     func showMap(walk: Bool = false) {
+        Reports.shared.count(.screenMap)
         if snapshotReview.isOpen { snapshotReview.close() }
         screenMap.open()
         if walk, screenMap.run == nil { screenMap.walk() }
@@ -578,6 +581,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     // MARK: Command palette
 
     @objc func showPalette(_ sender: Any?) {
+        Reports.shared.count(.palette)
         if showingPalette { hidePalette(); return }
         showingPalette = true
         scrim.isHidden = false
@@ -765,6 +769,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     /// Puts `pane` in the right slot (nil: empties it, when `closing` is the one there now). The pane that leaves
     /// stops following its device, so nothing it shows keeps polling.
     func show(_ pane: RightPane?, closing: RightPane? = nil) {
+        if let pane, pane != rightPane {
+            switch pane {
+            case .device: Reports.shared.count(.paneDevice)
+            case .network: Reports.shared.count(.paneNetwork)
+            case .tests: Reports.shared.count(.paneTests)
+            case .diagnostics: Reports.shared.count(.paneDiagnostics)
+            case .recordings: Reports.shared.count(.paneRecordings)
+            }
+        }
         if pane == nil, let closing, rightPane != closing { return }
         let old = rightPane
         rightPane = pane
@@ -809,6 +822,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     /// The timeline docks along the bottom, under the stage.
     func setShowingTimeline(_ on: Bool) {
+        if on { Reports.shared.count(.timeline) }
         showingTimeline = on
         timeline.follow(on ? selected : nil)
         timeline.setShown(on)
@@ -1156,6 +1170,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleLog(_ sender: Any?) { setShowingLog(!showingLog) }
 
     func setShowingLog(_ on: Bool) {
+        if on { Reports.shared.count(.log) }
         showingLog = on
         logPanel.isHidden = !on
         Design.animate { self.logHeight.animator().constant = on ? 210 : 0 }
@@ -1173,6 +1188,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     /// kept in the engine until saved. Recording takes checkpoints the app can notice (a brief stop and start), so
     /// it is off until asked for.
     @objc func toggleRecording(_ sender: Any?) {
+        Reports.shared.count(.recording)
         guard let sim = live else { return }
         let key = ObjectIdentifier(sim)
         let on = !recording.contains(key)
@@ -1246,7 +1262,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     // MARK: Inspecting
 
-    @objc func toggleInspector(_ sender: Any?) { setInspecting(!inspecting) }
+    @objc func toggleInspector(_ sender: Any?) { if !inspecting { Reports.shared.count(.inspector) }; setInspecting(!inspecting) }
 
     /// The inspector: the chosen simulator's nodes in a pane, picked by pointing at the picture. While it is open
     /// clicks on that picture pick instead of tapping; keys and the toolbar still reach the app.
@@ -1282,7 +1298,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     // MARK: Comparing
 
-    @objc func toggleCompare(_ sender: Any?) { setComparing(!comparing) }
+    @objc func toggleCompare(_ sender: Any?) { if !comparing { Reports.shared.count(.compare) }; setComparing(!comparing) }
 
     /// Compare mode: the simulators side by side, the differences from the chosen one marked on each picture
     /// (boxes: content only there or moved; shaded: pixels that differ) and listed under them.
@@ -1370,8 +1386,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         compareBar.stringValue = text.joined(separator: "\n")
     }
 
-    @objc func toggleSideBySide(_ sender: Any?) { setSideBySide(!sideBySide) }
-    @objc func toggleMirror(_ sender: Any?) { setMirror(!mirror) }
+    @objc func toggleSideBySide(_ sender: Any?) { if !sideBySide { Reports.shared.count(.sideBySide) }; setSideBySide(!sideBySide) }
+    @objc func toggleMirror(_ sender: Any?) { if !mirror { Reports.shared.count(.mirror) }; setMirror(!mirror) }
 
     func setSideBySide(_ on: Bool) {
         if !on, comparing { setComparing(false) }
@@ -1460,6 +1476,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     /// Saves the app's pixels as a PNG in the state folder, copies the picture to the clipboard and shows the file.
     @objc func screenshot(_ sender: Any?) {
+        Reports.shared.count(.screenshot)
         guard let sim = live else { return }
         let dir = Engine.shared.screenshots
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
