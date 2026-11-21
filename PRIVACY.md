@@ -10,12 +10,19 @@ recordings, logs, or the network traffic it makes.
 
 ## What Greenroom itself sends
 
-Today: nothing. The app makes no network connection of its own. There is no analytics, no crash reporting and no
-update check in this version, and the engine's one download (a test app it trains its startup cache with) ships
-inside the app instead.
+One thing, and only after you say yes: **an update check.** On its second launch Greenroom asks whether to check for
+updates automatically; until you agree (or choose Greenroom > Check for Updates…) it sends nothing. A check is one
+HTTPS request to GitHub for the list of Greenroom versions (`appcast.xml` on the project's releases page). It carries
+no identifier and no description of your Mac (Sparkle's system profile is off and cannot be turned on), so GitHub sees
+what any download would: your IP address and that Greenroom asked. An update it downloads is installed only if it is
+signed with the project's update key and by the same developer as the copy you have. Settings > Updates turns the
+checks off.
 
-Network traffic you will see comes from the Android app you are running, which reaches the network as it would on
-a phone.
+There is no analytics and no crash reporting in this version, and the engine's one download (a test app it trains its
+startup cache with) ships inside the app instead.
+
+Network traffic you will see otherwise comes from the Android app you are running, which reaches the network as it
+would on a phone.
 
 ## Agents
 
@@ -26,8 +33,6 @@ and that agent; Greenroom sends it nothing by itself.
 
 ## What will be added, and how
 
-- **Update checks**, when the app can update itself: a request for the list of versions, with no identifier, which
-  you can turn off.
 - **Crash reports and usage analytics**, opt-in: off until you turn them on, asked once, changeable in Settings.
   A report will hold Greenroom's own state only (app and macOS version, a stack trace cut to Greenroom's and the
   engine's own code, which feature was in use) and never anything from an APK, as listed above. Settings will show
@@ -43,11 +48,11 @@ removes all of it.
 
 ## Checking this yourself
 
-Greenroom and its engine are open source. The app's only code that starts a process or touches the network is in
-`Sources/Greenroom/Engine.swift`, and you can watch the app's connections with any network monitor: with no APK
-running there are none.
+Greenroom and its engine are open source. The engine is started from `Sources/Greenroom/Engine.swift`; the app's
+only request of its own is the update check, in `Sources/Greenroom/Updates.swift`. You can watch the app's
+connections with any network monitor: with no APK running and no update check under way there are none.
 
 CI checks it on every change: `scripts/network-check.sh` captures every packet leaving the Mac, tagged with the
 process that sent it (or asked for the DNS lookup), while the app launches the engine, trains its startup cache,
-streams a simulator, serves an agent and shows every pane, and fails if one came from Greenroom or its engine. You
-can run it yourself (`sudo -v && scripts/network-check.sh`).
+streams a simulator, serves an agent and shows every pane, with updates not yet agreed to, and fails if one came from
+Greenroom or its engine. You can run it yourself (`sudo -v && scripts/network-check.sh`).

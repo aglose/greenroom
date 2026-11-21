@@ -25,8 +25,14 @@ which Xcode makes by itself, is not enough). The account holder of the Apple Dev
    | `NOTARY_KEY_P8` | the `.p8`, base64: `base64 -i AuthKey_XXXX.p8 \| gh secret set NOTARY_KEY_P8` |
    | `NOTARY_KEY_ID` | the key's ID |
    | `NOTARY_ISSUER_ID` | the issuer ID |
+   | `SPARKLE_ED_PRIVATE_KEY` | the update-signing key: `generate_keys --account greenroom -x key.txt`, then `gh secret set SPARKLE_ED_PRIVATE_KEY < key.txt` |
 
-Keep the `.p12` and `.p8` out of the repository; delete the exported copies once the secrets are set.
+4. **Update-signing key.** Sparkle's `generate_keys` (in `.build/artifacts/sparkle/Sparkle/bin` after a build) made
+   it once and keeps it in the login keychain under the account `greenroom`; its public half is `SUPublicEDKey` in
+   `Resources/Info.plist`. Every update must be signed with it: lose it and installed copies can no longer update
+   (a new key needs a release signed with both). Export it for the secret above and keep a copy somewhere safe.
+
+Keep the `.p12`, `.p8` and the exported key out of the repository; delete the exported copies once the secrets are set.
 
 ## Releasing from a Mac instead
 
@@ -47,6 +53,13 @@ NOTARY_PROFILE=greenroom scripts/dmg.sh --identity "Developer ID Application" --
    disk image with the app and a link to /Applications, signs the image, notarizes and staples it too (so it opens
    on a Mac that is offline), and writes its SHA-256 beside it.
 
+## Updates
+
+Installed copies read `https://github.com/aglose/greenroom/releases/latest/download/appcast.xml`: the appcast of the
+newest *published* release, which the release job builds with `generate_appcast` and attaches. A draft is invisible
+to them until it is published. `scripts/update-check.sh IDENTITY` runs an update end to end on this Mac (an old build
+installed, a new one offered by a local appcast, downloaded, verified and installed on quit).
+
 ## Updating the engine
 
 Edit `engine.lock`: the apksim version and the two SHA-256 values from that release's `SHA256SUMS`. CI runs the
@@ -54,5 +67,5 @@ new engine through the smoke test.
 
 ## Not yet
 
-In-app updates (Sparkle), a background image for the disk image's window, the engine's startup cache trained with
+A background image for the disk image's window, the engine's startup cache trained with
 progress shown in the app at first run.
