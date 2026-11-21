@@ -1,6 +1,25 @@
 // Draws the app icon and writes Resources/AppIcon.icns: `swift scripts/make-icon.swift` from the repository root.
-// A dressing-room mirror with its bulbs, where the mirror is a phone.
+// The green room's door, ajar, with a star on it and the room's green light spilling out onto the floor. No phone in
+// it: Greenroom runs whatever app it is given. Colours are the app's own (Design.swift): a graphite stage and its
+// green accent. Drawn on a 1024-unit grid; every size is rendered from the same paths.
+// `swift scripts/make-icon.swift --png FILE` writes one 1024 px picture instead, for looking at.
 import AppKit
+
+func c(_ hex: UInt32, _ a: CGFloat = 1) -> NSColor {
+    NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: a)
+}
+
+/// A soft light: full colour at the centre fading to nothing at `radius`, with no edge (NSGradient's radial fill stops
+/// at its path's edge, which showed as a disc).
+func glow(_ center: NSPoint, _ radius: CGFloat, _ color: NSColor, squash: CGFloat = 1) {
+    guard let ctx = NSGraphicsContext.current?.cgContext,
+          let g = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                             colors: [color.cgColor, color.withAlphaComponent(0).cgColor] as CFArray, locations: [0, 1]) else { return }
+    ctx.saveGState()
+    ctx.translateBy(x: center.x, y: center.y); ctx.scaleBy(x: 1, y: squash)
+    ctx.drawRadialGradient(g, startCenter: .zero, startRadius: 0, endCenter: .zero, endRadius: radius, options: [])
+    ctx.restoreGState()
+}
 
 func draw(_ size: CGFloat) -> NSBitmapImageRep {
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size), pixelsHigh: Int(size), bitsPerSample: 8,
@@ -8,39 +27,76 @@ func draw(_ size: CGFloat) -> NSBitmapImageRep {
                                bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    let s = size / 1024
-    func c(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor { NSColor(srgbRed: r/255, green: g/255, blue: b/255, alpha: a) }
+    NSGraphicsContext.current?.imageInterpolation = .high
+    let t = NSAffineTransform(); t.scale(by: size / 1024); t.concat()
 
-    // The plate: Apple's icon grid, 824 pt inside 1024 with a continuous-looking corner.
-    let plate = NSRect(x: 100*s, y: 100*s, width: 824*s, height: 824*s)
-    let platePath = NSBezierPath(roundedRect: plate, xRadius: 186*s, yRadius: 186*s)
-    let shadow = NSShadow(); shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
-    shadow.shadowBlurRadius = 24*s; shadow.shadowOffset = NSSize(width: 0, height: -10*s)
-    NSGraphicsContext.saveGraphicsState(); shadow.set(); c(16, 68, 50).setFill(); platePath.fill(); NSGraphicsContext.restoreGraphicsState()
-    NSGradient(colors: [c(38, 140, 96), c(18, 84, 60), c(10, 52, 40)])!.draw(in: platePath, angle: -90)
+    let accent = c(0x3DD68C), light = c(0xB4F7D2), lowLight = c(0x1B9A60)
 
-    // The phone.
-    let phone = NSRect(x: 357*s, y: 232*s, width: 310*s, height: 560*s)
-    let phonePath = NSBezierPath(roundedRect: phone, xRadius: 58*s, yRadius: 58*s)
-    c(8, 34, 27).setFill(); phonePath.fill()
-    let screen = phone.insetBy(dx: 20*s, dy: 20*s)
-    let screenPath = NSBezierPath(roundedRect: screen, xRadius: 40*s, yRadius: 40*s)
-    NSGradient(colors: [c(214, 255, 226), c(120, 226, 164)])!.draw(in: screenPath, angle: -90)
-    c(8, 34, 27, 0.85).setFill()
-    NSBezierPath(roundedRect: NSRect(x: 472*s, y: 724*s, width: 80*s, height: 22*s), xRadius: 11*s, yRadius: 11*s).fill()
+    // The plate: Apple's icon grid, 824 inside 1024, graphite with a faint top light, a hairline rim, a drop shadow.
+    let plateRect = NSRect(x: 100, y: 100, width: 824, height: 824)
+    let plate = NSBezierPath(roundedRect: plateRect, xRadius: 185, yRadius: 185)
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow(); shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
+    shadow.shadowBlurRadius = 28; shadow.shadowOffset = NSSize(width: 0, height: -12); shadow.set()
+    c(0x101215).setFill(); plate.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    NSGradient(colors: [c(0x2B2F36), c(0x121418)])!.draw(in: plate, angle: -90)
 
-    // The bulbs, five a side.
-    for side in [CGFloat(248), CGFloat(776)] {
-        for i in 0..<5 {
-            let y = (300 + CGFloat(i) * 106) * s, x = side * s, r = 30 * s
-            let glow = NSGradient(colors: [c(255, 236, 170, 0.55), c(255, 236, 170, 0)])!
-            glow.draw(in: NSBezierPath(ovalIn: NSRect(x: x - 2.4*r, y: y - 2.4*r, width: 4.8*r, height: 4.8*r)), relativeCenterPosition: .zero)
-            NSGradient(colors: [c(255, 252, 235), c(255, 220, 130)])!
-                .draw(in: NSBezierPath(ovalIn: NSRect(x: x - r, y: y - r, width: 2*r, height: 2*r)), relativeCenterPosition: NSPoint(x: -0.3, y: 0.3))
-        }
+    NSGraphicsContext.saveGraphicsState()
+    plate.addClip()
+    let door = NSRect(x: 338, y: 250, width: 360, height: 540)   // the doorway
+    // The room's light: a soft glow round the doorway and a spill on the floor, widening towards the viewer.
+    glow(NSPoint(x: door.midX, y: door.midY), 360, accent.withAlphaComponent(0.34), squash: 1.15)
+    let spill = NSBezierPath()
+    spill.move(to: NSPoint(x: door.minX + 118, y: door.minY)); spill.line(to: NSPoint(x: door.maxX, y: door.minY))
+    spill.line(to: NSPoint(x: 940, y: 90)); spill.line(to: NSPoint(x: 330, y: 90)); spill.close()
+    NSGradient(colors: [accent.withAlphaComponent(0.62), accent.withAlphaComponent(0)])!.draw(in: spill, angle: -90)
+    NSGraphicsContext.restoreGraphicsState()
+
+    // The frame (casing) round the doorway, then the lit room inside it.
+    let casing = NSBezierPath(roundedRect: door.insetBy(dx: -22, dy: -22), xRadius: 34, yRadius: 34)
+    NSGradient(colors: [c(0x3A3F47), c(0x1C1F24)])!.draw(in: casing, angle: -90)
+    let opening = NSBezierPath(roundedRect: door, xRadius: 16, yRadius: 16)
+    NSGradient(colors: [light, accent, lowLight])!.draw(in: opening, angle: -90)
+
+    // The door, swung in on its left hinges: its far edge shorter (perspective), lit along the edge by the room.
+    let edgeX = door.minX + 132
+    let slab = NSBezierPath()
+    slab.move(to: NSPoint(x: door.minX, y: door.minY)); slab.line(to: NSPoint(x: edgeX, y: door.minY + 40))
+    slab.line(to: NSPoint(x: edgeX, y: door.maxY - 40)); slab.line(to: NSPoint(x: door.minX, y: door.maxY)); slab.close()
+    NSGradient(colors: [c(0x353A42), c(0x1A1D22)])!.draw(in: slab, angle: 0)
+    let edge = NSBezierPath(); edge.lineWidth = 9
+    edge.move(to: NSPoint(x: edgeX, y: door.minY + 40)); edge.line(to: NSPoint(x: edgeX, y: door.maxY - 40))
+    light.withAlphaComponent(0.85).setStroke(); edge.stroke()
+    // A handle near the free edge.
+    c(0xC9CDD3).setFill()
+    NSBezierPath(roundedRect: NSRect(x: edgeX - 34, y: door.midY - 20, width: 20, height: 40), xRadius: 10, yRadius: 10).fill()
+
+    // The star, large enough to stay a star at 32 px, with a little warm glow.
+    let sc = NSPoint(x: door.minX + 64, y: door.maxY - 150)
+    NSGraphicsContext.saveGraphicsState(); slab.addClip()
+    glow(sc, 70, c(0xFFD27A, 0.40))
+    NSGraphicsContext.restoreGraphicsState()
+    let star = NSBezierPath()
+    for k in 0..<10 {
+        let r: CGFloat = k % 2 == 0 ? 46 : 19, a = CGFloat.pi / 2 + CGFloat(k) * .pi / 5
+        let p = NSPoint(x: sc.x + r * cos(a), y: sc.y + r * sin(a))
+        k == 0 ? star.move(to: p) : star.line(to: p)
     }
+    star.close()
+    NSGradient(colors: [c(0xFFE7A8), c(0xF5B940)])!.draw(in: star, angle: -90)
+
+    // The plate's rim last, over everything.
+    let rim = NSBezierPath(roundedRect: plateRect.insetBy(dx: 1.5, dy: 1.5), xRadius: 184, yRadius: 184)
+    rim.lineWidth = 3; NSColor(white: 1, alpha: 0.10).setStroke(); rim.stroke()
+
     NSGraphicsContext.restoreGraphicsState()
     return rep
+}
+
+if CommandLine.arguments.count > 2, CommandLine.arguments[1] == "--png" {
+    try draw(1024).representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
+    exit(0)
 }
 
 let out = URL(fileURLWithPath: "build/AppIcon.iconset")
