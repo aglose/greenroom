@@ -12,13 +12,22 @@ final class Simulator {
 
     let apk: URL
     let log: URL
-    private(set) var state: State = .starting { didSet { if state != oldValue { onState?(state) } } }
+    private(set) var state: State = .starting { didSet { if state != oldValue { onState?(state); NotificationCenter.default.post(name: Self.stateChanged, object: self) } } }
     private(set) var control: ControlChannel?
     private(set) var deviceSize = CGSize.zero
     private(set) var framesShown = 0
 
     /// Each decodable frame, on the frame reader's thread.
     var onSample: ((CMSampleBuffer) -> Void)?
+    /// A second listener for each decodable frame (the Recorder's), on the frame reader's thread; nil unless recording.
+    var sampleTap: ((CMSampleBuffer) -> Void)? {
+        get { tapLock.lock(); defer { tapLock.unlock() }; return tap }
+        set { tapLock.lock(); tap = newValue; tapLock.unlock() }
+    }
+    private var tap: ((CMSampleBuffer) -> Void)?
+    private let tapLock = NSLock()
+    /// Posted (main thread) when `state` changes; the object is the simulator.
+    static let stateChanged = Notification.Name("GreenroomSimulatorStateChanged")
     /// Called on the main thread.
     var onState: ((State) -> Void)?
     var onSize: ((CGSize) -> Void)?
@@ -147,6 +156,7 @@ final class Simulator {
                 self.framesShown += 1
                 self.activity.frameShown()
                 self.onSample?(sample)
+                self.sampleTap?(sample)
             } else {
                 frames.requestKeyframe()
             }

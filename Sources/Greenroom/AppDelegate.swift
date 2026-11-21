@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionsCheckIfAsked()
         buildsCheckIfAsked()
         claudeCheckIfAsked()
+        recorderCheckIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
@@ -492,6 +493,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ClaudeCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]))
     }
 
+    /// `Greenroom --recorder-check DIR APK`: see RecorderCheck.
+    private func recorderCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--recorder-check"), i + 2 < args.count else { return }
+        RecorderCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
     private func defaults_forgetRecent(_ apk: URL) {
         var paths = UserDefaults.standard.stringArray(forKey: "recentApks") ?? []
         paths.removeAll { $0 == apk.path }
@@ -561,6 +569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TestRun.terminateAll()
         workbench.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
         ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
+        ScreenRecording.shared.stopAll()   // recordings end as finished files
         Engine.shared.stopAll()
     }
 
@@ -615,6 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         file.addItem(item("Clear Recent APKs", #selector(clearRecents(_:)), ""))
         file.addItem(.separator())
         file.addItem(to(workbench: #selector(Workbench.toggleRecording(_:)), "Record", "r", [.command, .option]))
+        file.addItem(to(workbench: #selector(Workbench.toggleScreenRecording(_:)), "Record Screen", "r", [.command, .control]))   // ⌘R is Rotate
         file.addItem(to(workbench: #selector(Workbench.saveRecordingAndShow(_:)), "Save Recording", "S", [.command, .shift]))
         file.addItem(to(workbench: #selector(Workbench.saveRecordingAndView(_:)), "Save Recording and Open Timeline", "S", [.command, .option]))
         file.addItem(.separator())
@@ -668,6 +678,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         i.target = self
         i.representedObject = NSStringFromSelector(action)
         return i
+    }
+
+    /// The Record Screen item reads "Stop Recording" while the selected simulator is being recorded.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.representedObject as? String == "toggleScreenRecording:" {
+            item.title = Recorder.isRecording(workbench.selected) ? "Stop Recording Screen" : "Record Screen"
+        }
+        return true
     }
 
     @objc private func forward(_ sender: NSMenuItem) {

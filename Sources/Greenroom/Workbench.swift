@@ -737,6 +737,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             add(isRecording ? "rec.stop" : "rec.start", isRecording ? "Stop recording" : "Start recording", "Record", "record.circle", "⌥⌘R") { [weak self] in self?.toggleRecording(nil) }
             if isRecording { add("rec.save", "Save recording", "Record", "square.and.arrow.down", "⇧⌘S") { [weak self] in self?.saveRecordingAndShow(nil) } }
         }
+        add("screen.rec", Recorder.isRecording(selected) ? "Stop recording the screen" : "Record the screen to a video", "Record", "video.circle", "⌃⌘R", keywords: "mp4 movie capture") { [weak self] in self?.toggleScreenRecording(nil) }
         out += DevHooks.shared.paletteItems(for: selected)   // developer hooks (DevHooks.swift)
         out += sessions.paletteItems()                       // worktree sessions (SessionsController.swift)
         // Layout and panes.

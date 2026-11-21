@@ -131,7 +131,26 @@ final class Toast: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    private var action: (() -> Void)?
+
+    /// A message with something to click: "Show in Finder".
+    func show(_ text: String, action title: String, _ run: @escaping () -> Void) {
+        show(text + "  ·  " + title)
+        action = run
+        hide?.invalidate()
+        hide = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.action = nil
+            Design.animate(Design.arrive, { self.animator().alphaValue = 0 })
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if let run = action, alphaValue > 0.5 { action = nil; run() } else { super.mouseDown(with: event) }
+    }
+
     func show(_ text: String, problem: Bool = false) {
+        action = nil
         label.stringValue = text
         label.textColor = problem ? Design.warning : Design.ink
         hide?.invalidate()

@@ -139,7 +139,7 @@ What Greenroom captures for a build by itself, in the background, on hidden simu
 3. **The agent's session**: while an agent drives a session's simulator, the stream is recorded
    (`evidence/<key>/video/agent-<time>.mp4`) with a `steps.jsonl` of its tool calls as chapter marks, and the
    flight recorder is on, so the same run can be saved as a `.apkrec` and replayed on another build.
-4. **By hand**: File > Record Screen (⌘R) and Save Screen, filed under the session's build.
+4. **By hand**: File > Record Screen (⌃⌘R: ⌘R is Rotate) and Save Screen, filed under the session's build.
 
 Video comes from the H.264 stream the app already receives: a `Recorder` writes the samples into an MP4
 (`AVAssetWriter`, passthrough, no second encode), so recording costs nothing in the engine and works headless.
