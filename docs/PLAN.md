@@ -130,6 +130,11 @@ Each phase ends in something shippable. Sizes are rough working days for one foc
   CPU 22-26% against 29-32%. Use Mach rights (or IOSurfaceCreateXPCObject), not global IDs, which any process of the
   user can look up. A real version needs a release/ack before a surface is reused, nothing that can block the raster
   thread, a resend for a late host, a windowed instance sharing its own surfaces, and a check of the sender.
+  On the host's screen (`surfaceshow`: a window whose display link blits the newest frame's IOSurface into a
+  CAMetalLayer, timed to the drawable's `presentedTime`), the shared frame reaches the glass 0.5-1 refresh sooner than
+  H.264 (p50 59.8 against 68-77 ms); the display ran at 60 Hz, not 120 (ProMotion's choice with the Mac unattended),
+  so repeat it at 120 Hz. The other ~40 ms is the window's own commit-to-glass (2 drawables and WindowServer's
+  compositing), the same for both paths: the host's presentation is the next latency to work on.
 - **S2 hot swap: done 2026-11-20 (apksim draft pull request 586, `docs/spike-s2-hot-swap.md` there).** JVMTI
   RedefineClasses from inside the instance (capability requested at the first swap, so warm launches work). JDK 24
   verifies redefined classes, and translated classes have no stack map frames: computing them with ASM fixes it
@@ -137,7 +142,11 @@ Each phase ends in something shippable. Sizes are rough working days for one foc
   string or lambda body is on screen 150-290 ms after the command with state kept (Compose invalidate-all; `recreate`
   for Views); the incremental Gradle build, 1.4-1.8 s, dominates the loop. Adding an `item { }` (D8 renumbers the
   file's synthetic lambdas) or a composable function needs a relaunch; matching renamed synthetic lambdas by content
-  is the largest gain left.
+  is the largest gain left. A relaunch of a rebuilt APK, for comparison, is ~0.54 s to the start screen with the AOT
+  cache (0.32 s for the same build again), state lost. Holding the redefine capability showed no lasting frame or CPU
+  cost after a swap. Two gaps for the product: a resource-only edit is missed silently (`0 changed`, the old colour
+  after `recreate`), so resources must be compared and a change relaunched; and the switch that allows swaps makes a
+  launch cold until the launcher passes it to standbys.
 
 ### Phase 1: a real Mac app in a DMG (4-6 days)
 The current simulator, properly packaged; no new UI yet.
