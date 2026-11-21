@@ -11,7 +11,7 @@ plain words, on 2026-11-20.
 - An ad hoc build of `main` plus the matrix wall branch, engine 0.54.0, the bundled test app.
 - The task, in full: launch the test app on a phone; find the trips list and rename "Italian vacation" to "Roman
   vacation" ("the app has a way to do this; find it") and verify it; check the Settings tab in dark mode and in German
-  and report anything broken or untranslated; close every simulator it started; report on the tools.
+  ("a second simulator side by side is fine") and report anything broken or untranslated; close every simulator it started; report on the tools.
 
 ```bash
 claude -p "$(cat task.txt)" --mcp-config mcp.json --strict-mcp-config --tools "" \

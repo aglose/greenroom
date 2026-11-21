@@ -25,7 +25,8 @@ The answers are built to be cheap to read:
 - **The screen is text.** `launch` and `screen` answer with one line per node: `e7 "Sign in" click`,
   `e9 "Email" field`. A reference (`e7`) stays the same node for as long as it is on screen.
 - **Every action answers with what changed**, after the app has gone quiet: `~ e3 "0" -> "1"` (changed),
-  `+ e12 "Saved" click` (new), `- e5 "Loading"` (gone). There is seldom a reason to read the whole screen again.
+  `+ e12 "Saved" click` (new), `- e5 "Loading"` (gone). There is seldom a reason to read the whole screen again. Only text is compared: when an action changes
+  colours or pictures alone (dark mode), the answer says the text did not change, and `screenshot` shows the rest.
 - **`check` verifies in one call**: texts that must be visible and texts that must not, answered `PASS` or
   `FAIL | ... | not on screen: "Saved"`.
 - **`wait_for`** waits for a text to appear or go, instead of sleeping.
