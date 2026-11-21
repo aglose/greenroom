@@ -354,7 +354,7 @@ def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, 
     # Against another build whose launches differ (the base is launched with a different Settings value).
     t, err = a.call("changes", base=base_apk, timeout_s=280)
     lines = [l for l in t.split("\n") if l.startswith("~ ")]
-    expect("changes against a base that looks different answers a ~ line with its pixels", not err and len(lines) == 1 and re.search(r": [0-9,]+ px differ \[", lines[0]), t)
+    expect("changes against a base that looks different answers a ~ line with its pixels", not err and len(lines) == 1 and re.search(r": [0-9,]+ px differ.* \[[^\]]+\]$", lines[0]), t)
     sid_screen = re.search(r"\[([^\]]+)\]$", lines[0]).group(1) if lines else ""
     for side in ("head", "base", "diff"):
         r = a.rpc("tools/call", {"name": "screenshot", "arguments": {"screen": sid_screen, "side": side, "max_size": 400}}).get("result", {})

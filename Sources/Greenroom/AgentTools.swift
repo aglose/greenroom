@@ -14,7 +14,7 @@ final class AgentTools {
     /// The simulator the tool being run acts on (set while it runs; tools run one at a time).
     var currentSim: Simulator?
     /// The folder of the newest `changes` answer of each session (by worktree path), for `screenshot`'s `screen`.
-    var lastChanges: [String: URL] = [:]
+    var lastChanges: [String: ChangeSet] = [:]
     let changesLock = NSLock()
     /// One line per call, for the person watching (main thread).
     var onActivity: ((_ tool: String, _ summary: String, _ failed: Bool, _ session: Session?) -> Void)?

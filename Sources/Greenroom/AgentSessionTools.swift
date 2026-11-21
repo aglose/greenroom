@@ -207,11 +207,21 @@ extension AgentTools {
         case .offer(let o): return o.message + "\nNothing was started: ask the person to build it in Greenroom, or compare with an apk path."
         case .build(let b): base = b
         }
+        let headNote = "\(label(s)) \(String(head.key.prefix(8))) (\(head.source.rawValue), \(age(head.date)))"
+        let baseNote = "\(String(base.key.prefix(8))) (\(base.source.rawValue), \(age(base.date)))" + (base.key == head.key ? ", the same build" : "")
+        let header = "changes: \(headNote) against \(baseNote)"
+        let evidence = mainSync { wb.sessions.evidence }
+        let (start, baseOption) = AgentCheckHooks.changesOptions(differentBuild: base.key != head.key)
+        // One build against itself: nothing to walk twice (as the Changes sheet does).
+        if base.key == head.key, baseOption.isEmpty {
+            let set = ChangeSet.identical(folder: evidence.changesFolder(head: head.key, base: base.key), map: ScreenMapData.read(evidence.mapFolder(for: head.key)))
+            setLastChanges(set, for: s.worktree.path)
+            return AgentChanges.describe(set, header: header)
+        }
         var result: Result<Evidence.ChangesResult, Evidence.Failure>?
         let done = DispatchSemaphore(value: 0)
-        var token: Evidence.Token?
         mainSync {
-            token = wb.sessions.evidence.changes(head: head, base: base) { r in result = r; done.signal() }
+            _ = evidence.changes(head: head, base: base, start: start, baseOption: baseOption) { r in result = r; done.signal() }
         }
         if done.wait(timeout: .now() + timeout) == .timedOut {
             throw Failure(message: "still comparing after \(Int(timeout)) s: the walk goes on in Greenroom while another call waits for it. Call changes again with the same base to join it.")
@@ -220,10 +230,9 @@ extension AgentTools {
         switch result {
         case .failure(let f): throw Failure(message: "the comparison failed: \(f.message)")
         case .success(let r):
-            setLastChanges(r.folder, for: s.worktree.path)
-            let headNote = "\(label(s)) \(String(head.key.prefix(8))) (\(head.source.rawValue), \(age(head.date)))"
-            let baseNote = "\(String(base.key.prefix(8))) (\(base.source.rawValue), \(age(base.date)))" + (base.key == head.key ? ", the same build" : "")
-            return AgentChanges.describe(folder: r.folder, header: "changes: \(headNote) against \(baseNote)")
+            guard let set = ChangeSet.read(r.folder) else { throw Failure(message: "the comparison finished but its result could not be read") }
+            setLastChanges(set, for: s.worktree.path)
+            return AgentChanges.describe(set, header: header)
         }
     }
 
@@ -231,11 +240,11 @@ extension AgentTools {
 
     func changePicture(_ args: [String: Any], _ connection: Connection) throws -> [[String: Any]] {
         let (s, _) = try tied(connection)
-        guard let folder = lastChanges(for: s.worktree.path) else { throw Failure(message: "no comparison yet for \(label(s)): call changes first, then pass one of its screen ids") }
+        guard let set = lastChanges(for: s.worktree.path) else { throw Failure(message: "no comparison yet for \(label(s)): call changes first, then pass one of its screen ids") }
         guard let screen = args["screen"] as? String, !screen.isEmpty else { throw Failure(message: "screen is a screen id from changes") }
         let side = (args["side"] as? String) ?? "head"
         guard ["head", "base", "diff"].contains(side) else { throw Failure(message: "side is head, base or diff") }
-        guard let file = AgentChanges.capture(folder: folder, screen: screen, side: side) else {
+        guard let file = AgentChanges.capture(set, screen: screen, side: side) else {
             throw Failure(message: "\(screen) has no \(side) capture in the last comparison (call changes to see the screen ids; new screens have no base, gone ones no head, same ones no diff)")
         }
         let maxSize = args["max_size"] as? Int ?? 1000
@@ -256,8 +265,8 @@ extension AgentTools {
                 ["type": "text", "text": "\(screen) \(side) \(w)x\(h) (capture \(cg.width)x\(cg.height))"]]
     }
 
-    func setLastChanges(_ f: URL, for worktree: String) { changesLock.lock(); lastChanges[worktree] = f; changesLock.unlock() }
-    func lastChanges(for worktree: String) -> URL? { changesLock.lock(); defer { changesLock.unlock() }; return lastChanges[worktree] }
+    func setLastChanges(_ set: ChangeSet, for worktree: String) { changesLock.lock(); lastChanges[worktree] = set; changesLock.unlock() }
+    func lastChanges(for worktree: String) -> ChangeSet? { changesLock.lock(); defer { changesLock.unlock() }; return lastChanges[worktree] }
 
     // MARK: Recording
 
@@ -285,106 +294,46 @@ extension AgentTools {
 
 // MARK: - Reading a comparison
 
-/// What `changes` says, read from the comparison folder's `crawl.json` (a small reader of its own: the Changes sheet
-/// has another).
+/// What `changes` says, from the Changes sheet's own model (`ChangeSet`, Changes.swift): the same pairing, the same
+/// "not reached" honesty for a walk that did not finish, the same crash and unfinished lines.
 enum AgentChanges {
-    private static func load(_ folder: URL) -> [String: Any]? {
-        (try? Data(contentsOf: folder.appendingPathComponent("crawl.json"))).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-    }
-
-    /// A screen as a breadcrumb of its titles from the first screen it was reached from: "Settings > Privacy".
-    private static func label(_ id: String, in screens: [[String: Any]]) -> String {
-        var byId: [String: [String: Any]] = [:]
-        for s in screens { if let i = s["id"] as? String { byId[i] = s } }
-        var chain: [String] = []
-        var at: String? = id
-        var guardCount = 0
-        while let cur = at, let s = byId[cur], guardCount < 8 {
-            let title = (s["title"] as? String) ?? ""
-            let activity = ((s["activity"] as? String) ?? cur).split(separator: ".").last.map(String.init) ?? cur
-            chain.insert(title.isEmpty ? activity : title, at: 0)
-            at = s["parent"] as? String
-            guardCount += 1
-        }
-        if chain.count > 1 { chain.removeFirst() }   // the first screen is where every walk starts
-        return chain.isEmpty ? id : chain.joined(separator: " > ")
-    }
-
-    private static func grouped(_ n: Int) -> String {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.locale = Locale(identifier: "en_US")
-        return f.string(from: NSNumber(value: n)) ?? String(n)
-    }
-
-    static func describe(folder: URL, header: String) -> String {
-        guard let doc = load(folder) else { return header + "\nthe comparison's crawl.json could not be read" }
-        let heads = (doc["screens"] as? [[String: Any]]) ?? []
-        let bases = (doc["base_screens"] as? [[String: Any]]) ?? []
-        let pairs = (doc["compare"] as? [[String: Any]]) ?? []
-        let diffs = (doc["diffs"] as? [String: [String: [String: Any]]]) ?? [:]
+    static func describe(_ set: ChangeSet, header: String) -> String {
         var lines = [header]
-        var counts = ["new": 0, "changed": 0, "gone": 0, "same": 0]
-        for p in pairs {
-            let status = (p["status"] as? String) ?? ""
-            counts[status, default: 0] += 1
-            let id = p["id"] as? String, base = p["base"] as? String
-            switch status {
-            case "new": if let id { lines.append("+ \(label(id, in: heads)) (new) [\(id)]") }
-            case "gone": if let base { lines.append("- \(label(base, in: bases)) (gone) [\(base)]") }
-            case "changed":
-                guard let id else { continue }
-                var px = 0, sizeChanged = false
-                for (_, d) in diffs[id] ?? [:] { px = max(px, (d["pixels"] as? Int) ?? 0); if d["sizeChanged"] as? Bool == true { sizeChanged = true } }
-                let why: String
-                if sizeChanged { why = "its size differs" }
-                else if px > 0 { why = "\(grouped(px)) px differ" }
-                else { why = ((p["why"] as? String) ?? "differs").replacingOccurrences(of: "\n", with: " ") }
-                lines.append("~ \(label(id, in: heads)): \(why) [\(id)]")
-            default: break
+        for c in set.screens {
+            switch c.status {
+            case .new: lines.append("+ \(c.title) (new) [\(c.id)]")
+            case .gone: lines.append("- \(c.title) (gone) [\(c.id)]")
+            case .changed: lines.append("~ \(c.title): \(c.detail) [\(c.id)]")
+            case .unreached: lines.append("? \(c.title) (not reached: \(c.detail)) [\(c.id)]")
+            case .same: break
             }
         }
-        lines.append("\(counts["new"]!) new, \(counts["changed"]!) changed, \(counts["gone"]!) gone, \(counts["same"]!) the same")
-        let findings = (doc["findings"] as? [[String: Any]]) ?? []
-        let crashes = findings.filter { ($0["kind"] as? String) == "crash" }
-        if crashes.isEmpty { lines.append("crashes: none") }
+        let n = set.summary
+        lines.append("\(n.new) new, \(n.changed) changed, \(n.gone) gone, \(n.same) the same" + (set.unreached > 0 ? ", \(set.unreached) not reached (a walk did not finish)" : ""))
+        if set.identical { lines.append("head and base are the same build: nothing was walked") }
+        if set.crashes.isEmpty { lines.append("crashes: none") }
         else {
-            lines.append("crashes: \(crashes.count)")
-            for c in crashes.prefix(3) { lines.append("  " + (((c["detail"] as? String) ?? "").split(separator: "\n").first.map(String.init) ?? "a crash")) }
+            lines.append("crashes: \(set.crashes.count)")
+            for c in set.crashes.prefix(3) { lines.append("  \(c.side == .base ? "base" : "head"): " + (c.detail.split(separator: "\n").first.map(String.init) ?? "a crash")) }
         }
-        let unfinished = ((doc["incomplete"] as? [String]) ?? []).filter { !$0.hasPrefix("--max-depth") }
-        if !unfinished.isEmpty { lines.append("not finished: " + unfinished.joined(separator: "; ")) }
-        if pairs.isEmpty { lines.append("(this walk compared no screens)") }
+        if !set.unfinished.isEmpty { lines.append("not finished: " + set.unfinished.joined(separator: "; ")) }
+        if set.screens.isEmpty, !set.identical { lines.append("(this walk compared no screens)") }
         return lines.joined(separator: "\n")
     }
 
-    /// The stored picture of a screen: `head` (the new build's), `base`, or `diff` (the map of differing pixels).
-    static func capture(folder: URL, screen: String, side: String) -> URL? {
-        guard let doc = load(folder) else { return nil }
-        let pairs = (doc["compare"] as? [[String: Any]]) ?? []
-        let p = pairs.first { ($0["id"] as? String) == screen } ?? pairs.first { ($0["base"] as? String) == screen }
-        guard let p else { return nil }
-        let id = p["id"] as? String, base = p["base"] as? String
-        let combos = (doc["combos"] as? [String]) ?? []
-        // A path in crawl.json is data: only a file that really lies inside the comparison's folder is served.
-        let root = folder.resolvingSymlinksInPath().path + "/"
-        func inside(_ rel: String) -> URL? {
-            let u = folder.appendingPathComponent(rel).resolvingSymlinksInPath()
-            return u.path.hasPrefix(root) && FileManager.default.fileExists(atPath: u.path) ? u : nil
-        }
-        func first(_ screens: [[String: Any]], _ want: String?) -> URL? {
-            guard let want, let s = screens.first(where: { ($0["id"] as? String) == want }), let caps = s["captures"] as? [String: String] else { return nil }
-            for c in combos + caps.keys.sorted() { if let rel = caps[c], let u = inside(rel) { return u } }
-            return nil
-        }
+    /// The stored picture of a screen (its id as `changes` printed it, or the base's own id): `head`, `base` or `diff`.
+    /// Only a file that really lies inside the comparison's folder is served.
+    static func capture(_ set: ChangeSet, screen: String, side: String) -> URL? {
+        let c = set.screens.first { $0.id == screen } ?? set.screens.first { $0.headID == screen || $0.baseID == screen }
+        guard let c else { return nil }
+        let url: URL?
         switch side {
-        case "head": return first((doc["screens"] as? [[String: Any]]) ?? [], id)
-        case "base": return first((doc["base_screens"] as? [[String: Any]]) ?? [], base)
-        default:
-            guard let id, let d = (doc["diffs"] as? [String: [String: [String: Any]]])?[id] else { return nil }
-            for c in combos + d.keys.sorted() { if let rel = d[c]?["map"] as? String, let u = inside(rel) { return u } }
-            return nil
+        case "head": url = c.head
+        case "base": url = c.base
+        default: url = c.diff
         }
+        guard let url, url.isInside(set.folder), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
     }
 }
 
@@ -415,15 +364,16 @@ enum AgentCheckHooks {
                 sessions.workspaces[i].recordAgent = false   // the per-workspace switch, off for this repository
             }
         }
+        if let d = env["GREENROOM_CHECK_CRAWL_DEPTH"].flatMap(Int.init) { sessions.evidence.budget.depth = d }
+        if let n = env["GREENROOM_CHECK_CRAWL_SECONDS"].flatMap(Int.init) { sessions.evidence.budget.seconds = n }
         sessions.store.saveWorkspaces(sessions.workspaces)
     }
 
-    /// A comparison's walk: a deep link to start from, a small budget, and (when the builds differ) launch options
-    /// for the base build only (`crawl.py --base-option`), so one APK can stand for two builds that look different.
-    static func tune(_ s: inout CrawlRun.Settings, differentBuild: Bool) {
-        if let u = env["GREENROOM_CHECK_CRAWL_START"], !u.isEmpty { s.start = u }
-        if let d = env["GREENROOM_CHECK_CRAWL_DEPTH"].flatMap(Int.init) { s.depth = d }
-        if let n = env["GREENROOM_CHECK_CRAWL_SECONDS"].flatMap(Int.init) { s.seconds = n }
-        if differentBuild, let o = env["GREENROOM_CHECK_BASE_OPTION"], !o.isEmpty { s.baseOption = o }
+    /// A comparison's walk: a deep link to start from, and (when the builds differ) launch options for the base build
+    /// only (`crawl.py --base-option`), so one APK can stand for two builds that look different. Empty off the check.
+    static func changesOptions(differentBuild: Bool) -> (start: String?, baseOption: String) {
+        guard Engine.agentCheck else { return (nil, "") }
+        let start = env["GREENROOM_CHECK_CRAWL_START"].flatMap { $0.isEmpty ? nil : $0 }
+        return (start, differentBuild ? (env["GREENROOM_CHECK_BASE_OPTION"] ?? "") : "")
     }
 }
