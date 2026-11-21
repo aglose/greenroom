@@ -102,9 +102,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
     private(set) var selected: Simulator?
+    /// The Sessions section of the sidebar (SessionsController.swift).
+    let sessions = SessionsController()
 
     private enum Row {
         case header(String)
+        case session(Session)
         case simulator(Simulator)
         case recent(URL)
     }
@@ -209,6 +212,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if window.frame.origin == .zero { window.center() }
         Engine.shared.onChange = { [weak self] in self?.reload() }
         reload()
+        sessions.onChange = { [weak self] in self?.reload() }
+        sessions.install(workbench: self)
     }
 
     // MARK: Opening and selecting
@@ -251,6 +256,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     func select(_ sim: Simulator?) {
         selected = sim
         window.subtitle = sim?.name ?? ""
+        sessions.selected(sim)
         reload()
         if let sim, let v = grid.view(for: sim) { window.makeFirstResponder(v) }
     }
@@ -264,6 +270,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 guard let self, let sim = v.simulator, sim !== self.selected else { return }
                 self.selected = sim
                 self.window.subtitle = sim.name
+                self.sessions.selected(sim)
                 self.reload()
             }
             view.onHover = { [weak self] v, inside in
@@ -301,6 +308,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if showingDiagnostics { diagnosticsPane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
         rows = []
+        for group in sessions.groups() {
+            rows.append(.header(group.header))
+            rows += group.sessions.map { .session($0) }
+        }
         if !sims.isEmpty {
             rows.append(.header("Running"))
             rows += sims.map { .simulator($0) }
@@ -311,7 +322,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             rows += recents.map { .recent($0) }
         }
         table.reloadData()
-        if let s = selected, let i = rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) {
+        if let s = selected, let i = rows.firstIndex(where: {
+            if case .session(let x) = $0 { return x.simulator === s }
+            return false
+        }) ?? rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) {
             table.selectRowIndexes([i], byExtendingSelection: false)
         }
         let alive = sims.filter(\.isAlive).count
@@ -721,6 +735,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             if isRecording { add("rec.save", "Save recording", "Record", "square.and.arrow.down", "⇧⌘S") { [weak self] in self?.saveRecordingAndShow(nil) } }
         }
         out += DevHooks.shared.paletteItems(for: selected)   // developer hooks (DevHooks.swift)
+        out += sessions.paletteItems()                       // worktree sessions (SessionsController.swift)
         // Layout and panes.
         add("layout.one", "Show one device", "View", "iphone") { [weak self] in self?.setSideBySide(false) }
         add("layout.all", "Show every device side by side", "View", "rectangle.split.2x1", "⌘\\") { [weak self] in self?.showAll(nil) }
@@ -882,6 +897,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         timeline.onClose = { [weak self] in self?.setShowingTimeline(false) }
     }
 
+    /// Shows the sidebar if it is folded away.
+    func showLibrary() {
+        guard let item = splitController.splitViewItems.first, item.isCollapsed else { return }
+        item.animator().isCollapsed = false
+    }
+
+    @objc func addRepository(_ sender: Any?) { sessions.chooseRepository() }
+
     @objc func toggleLibrary(_ sender: Any?) {
         guard let item = splitController.splitViewItems.first else { return }
         item.animator().isCollapsed.toggle()
@@ -948,7 +971,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
         table.menu = menu
+        table.registerForDraggedTypes([.fileURL])   // a folder dropped here is a repository to add
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -983,12 +1008,27 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        if case .simulator = rows[row] { return true }
-        return false
+        switch rows[row] {
+        case .simulator, .session: return true
+        default: return false
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation op: NSTableView.DropOperation) -> NSDragOperation {
+        guard !SessionsController.folders(in: info).isEmpty else { return [] }
+        tableView.setDropRow(-1, dropOperation: .on)   // the whole sidebar takes it
+        return .copy
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        let folders = SessionsController.folders(in: info)
+        sessions.addRepositories(folders)
+        return !folders.isEmpty
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         if case .header = rows[row] { return 24 }
+        if case .session = rows[row] { return 42 }
         return 36
     }
 
@@ -999,6 +1039,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             label.font = .systemFont(ofSize: 11, weight: .semibold)
             label.textColor = .secondaryLabelColor
             return label
+        case .session(let session):
+            return sessions.cell(for: session)
         case .simulator(let sim):
             let detail: String
             let symbol: String
@@ -1042,6 +1084,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { select(sim) }
+        if case .session(let session) = rows[row] { sessions.activate(session) }
     }
 
     @objc private func rowDoubleClicked() {
@@ -1052,8 +1095,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     @objc private func closeClicked() {
         let row = table.clickedRow
-        guard row >= 0, row < rows.count, case .simulator(let sim) = rows[row] else { return }
-        Engine.shared.close(sim)
+        guard row >= 0, row < rows.count else { return }
+        if case .simulator(let sim) = rows[row] { Engine.shared.close(sim) }
+        if case .session(let session) = rows[row] { sessions.closeSimulator(of: session) }
+    }
+
+    @objc private func removeRepositoryClicked() {
+        let row = table.clickedRow
+        guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
+        sessions.removeWorkspace(containing: session)
     }
 
     // MARK: Toolbar and its commands

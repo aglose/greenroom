@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mockCheckIfAsked()
         extrasCheckIfAsked()
         devHooksCheckIfAsked()
+        sessionsCheckIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
@@ -468,6 +469,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DevHooksCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2])) { [self] in captureWindow(to: $0) }
     }
 
+    /// `Greenroom --sessions-check DIR APK`: see SessionsCheck.
+    private func sessionsCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--sessions-check"), i + 2 < args.count else { return }
+        SessionsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
     private func defaults_forgetRecent(_ apk: URL) {
         var paths = UserDefaults.standard.stringArray(forKey: "recentApks") ?? []
         paths.removeAll { $0 == apk.path }
@@ -582,6 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let file = NSMenu(title: "File")
         file.addItem(item("Open APK…", #selector(openDocument(_:)), "o"))
         file.addItem(to(workbench: #selector(Workbench.compareWithAPK(_:)), "Compare With APK…", "O", [.command, .shift]))
+        file.addItem(to(workbench: #selector(Workbench.addRepository(_:)), "Add Repository…", "o", [.command, .option]))
         file.addItem(item("Clear Recent APKs", #selector(clearRecents(_:)), ""))
         file.addItem(.separator())
         file.addItem(to(workbench: #selector(Workbench.toggleRecording(_:)), "Record", "r", [.command, .option]))
