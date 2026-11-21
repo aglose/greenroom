@@ -27,6 +27,7 @@ enum ConnectCheck {
         let empty = base.appendingPathComponent("empty", isDirectory: true)
         try? fm.createDirectory(at: bin, withIntermediateDirectories: true)
         try? fm.createDirectory(at: empty, withIntermediateDirectories: true)
+        let N = ClaudeConnect.serverName   // "greenroom", or the debug copy's "greenroom-debug"
         let script = """
         #!/bin/sh
         D="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,15 +37,15 @@ enum ConnectCheck {
         case "$1 $2" in
           "mcp get")
             if [ -f "$D/get-unsupported" ]; then echo "error: unknown command 'get'" >&2; exit 2; fi
-            if [ "$(cat "$D/registered" 2>/dev/null)" = "greenroom" ]; then echo "greenroom:"; echo "  Scope: User config"; echo "  Command: $(cat "$D/registered-exe")"; exit 0; fi
-            echo "No MCP server named \"greenroom\". Configured servers: other" >&2; exit 1 ;;
+            if [ "$(cat "$D/registered" 2>/dev/null)" = "\(N)" ]; then echo "\(N):"; echo "  Scope: User config"; echo "  Command: $(cat "$D/registered-exe")"; exit 0; fi
+            echo "No MCP server named \"\(N)\". Configured servers: other" >&2; exit 1 ;;
           "mcp list") echo "Checking MCP server health..."; listed; exit 0 ;;
           "mcp add")
             if [ -f "$D/fail-add" ]; then echo "error: could not write the configuration: permission denied" >&2; exit 1; fi
-            echo greenroom > "$D/registered"; echo "$7" > "$D/registered-exe"; echo "Added stdio MCP server greenroom to user config"; exit 0 ;;
+            echo \(N) > "$D/registered"; echo "$7" > "$D/registered-exe"; echo "Added stdio MCP server \(N) to user config"; exit 0 ;;
           "mcp remove")
-            if [ -f "$D/registered" ]; then rm -f "$D/registered"; echo "Removed MCP server greenroom"; exit 0; fi
-            echo "No MCP server named \"greenroom\". Configured servers: other" >&2; exit 1 ;;
+            if [ -f "$D/registered" ]; then rm -f "$D/registered"; echo "Removed MCP server \(N)"; exit 0; fi
+            echo "No MCP server named \"\(N)\". Configured servers: other" >&2; exit 1 ;;
         esac
         echo "unexpected: $*" >&2; exit 3
         """
@@ -69,15 +70,15 @@ enum ConnectCheck {
         let exe = ClaudeConnect.executable
 
         // The command as shown.
-        expect(ClaudeConnect.displayCommand() == "claude mcp add --scope user greenroom -- \"\(exe)\" --mcp", "the command shown is claude mcp add --scope user greenroom -- \"<this app>\" --mcp", ClaudeConnect.displayCommand())
-        expect(ClaudeConnect.addArguments(executable: exe) == ["mcp", "add", "--scope", "user", "greenroom", "--", exe, "--mcp"], "the arguments are the shown command's")
+        expect(ClaudeConnect.displayCommand() == "claude mcp add --scope user \(N) -- \"\(exe)\" --mcp", "the command shown is claude mcp add --scope user \(N) -- \"<this app>\" --mcp", ClaudeConnect.displayCommand())
+        expect(ClaudeConnect.addArguments(executable: exe) == ["mcp", "add", "--scope", "user", "\(N)", "--", exe, "--mcp"], "the arguments are the shown command's")
 
         // Not connected: connect runs the add line.
-        expect(ClaudeConnect.status() == .notConnected, "a server list without greenroom is not connected")
+        expect(ClaudeConnect.status() == .notConnected, "a server list without \(N) is not connected")
         try? fm.removeItem(at: log)
         let first = ClaudeConnect.connect()
         if case .connected = first {} else { expect(false, "connect on a fresh stand-in connects", "\(first)") }
-        expect(calls().contains("mcp add --scope user greenroom -- \(exe) --mcp"), "connect ran claude mcp add --scope user greenroom -- <this app> --mcp", calls().joined(separator: " | "))
+        expect(calls().contains("mcp add --scope user \(N) -- \(exe) --mcp"), "connect ran claude mcp add --scope user \(N) -- <this app> --mcp", calls().joined(separator: " | "))
         expect(ClaudeConnect.status() == .connected, "after connecting, mcp get names it")
 
         // Already connected: no second add.
@@ -88,18 +89,18 @@ enum ConnectCheck {
 
         // `get` unsupported: the list names it.
         flag("get-unsupported", true)
-        expect(ClaudeConnect.status() == .connected, "with mcp get unusable, mcp list naming greenroom counts as connected")
+        expect(ClaudeConnect.status() == .connected, "with mcp get unusable, mcp list naming \(N) counts as connected")
         expect(ClaudeConnect.connect() == .alreadyConnected, "... and connect says already connected")
         // A server whose name only starts with ours is not ours.
-        registered(as: "greenroom-other")
-        expect(ClaudeConnect.status() == .notConnected, "a listed server called greenroom-other is not greenroom")
-        registered(as: "greenroom")
+        registered(as: "\(N)-other")
+        expect(ClaudeConnect.status() == .notConnected, "a listed server called \(N)-other is not \(N)")
+        registered(as: "\(N)")
         flag("get-unsupported", false)
 
         // An entry that runs another copy is not this one: Reconnect removes it and adds this.
-        registered(as: "greenroom", exe: "/Applications/Other.app/Contents/MacOS/Greenroom")
+        registered(as: "\(N)", exe: "/Applications/Other.app/Contents/MacOS/Greenroom")
         let other = ClaudeConnect.status()
-        expect(other == .otherCopy("/Applications/Other.app/Contents/MacOS/Greenroom"), "a greenroom entry running another program is connected to another copy", "\(other)")
+        expect(other == .otherCopy("/Applications/Other.app/Contents/MacOS/Greenroom"), "a \(N) entry running another program is connected to another copy", "\(other)")
         try? fm.removeItem(at: log)
         expect(ClaudeConnect.connect() == .otherCopy("/Applications/Other.app/Contents/MacOS/Greenroom"), "connect does not overwrite it by itself")
         expect(!calls().contains { $0.hasPrefix("mcp add") || $0.hasPrefix("mcp remove") }, "... and runs no add or remove", calls().joined(separator: " | "))
@@ -110,25 +111,25 @@ enum ConnectCheck {
         let re = ClaudeConnect.reconnect()
         if case .connected = re {} else { expect(false, "reconnect connects", "\(re)") }
         let seq = calls().filter { $0.hasPrefix("mcp remove") || $0.hasPrefix("mcp add") }
-        expect(seq == ["mcp remove --scope user greenroom", "mcp add --scope user greenroom -- \(exe) --mcp"], "reconnect runs remove, then add", seq.joined(separator: " | "))
+        expect(seq == ["mcp remove --scope user \(N)", "mcp add --scope user \(N) -- \(exe) --mcp"], "reconnect runs remove, then add", seq.joined(separator: " | "))
         expect(ClaudeConnect.status() == .connected, "and the entry then runs this copy")
         // The whole command is compared, not a piece of it: a longer path that contains this one, or a name that only starts with it.
         for lookalike in ["/Users/me" + ClaudeConnect.executable, ClaudeConnect.executable + "2"] {
-            registered(as: "greenroom", exe: lookalike)
+            registered(as: "\(N)", exe: lookalike)
             let st = ClaudeConnect.status()
             expect(st == .otherCopy(lookalike), "a command that only contains this program's path is another copy (\(lookalike.suffix(24)))", "\(st)")
         }
         // A path with a space is read whole, through get and through list.
         ClaudeConnect.executableOverride = "/tmp/Green room/Greenroom"
-        registered(as: "greenroom", exe: "/tmp/Green room/Greenroom")
+        registered(as: "\(N)", exe: "/tmp/Green room/Greenroom")
         expect(ClaudeConnect.status() == .connected, "a program path with a space is this copy (get)")
         flag("get-unsupported", true)
         expect(ClaudeConnect.status() == .connected, "... and through list")
-        registered(as: "greenroom", exe: "/tmp/Green room/Other")
+        registered(as: "\(N)", exe: "/tmp/Green room/Other")
         expect(ClaudeConnect.status() == .otherCopy("/tmp/Green room/Other"), "a different path with the same first word is another copy, named whole")
         flag("get-unsupported", false)
         ClaudeConnect.executableOverride = nil
-        registered(as: "greenroom")
+        registered(as: "\(N)")
         // A copy macOS runs from App Translocation is never registered.
         registered(as: nil)
         ClaudeConnect.executableOverride = "/private/var/folders/ab/xyz/T/AppTranslocation/ABC/d/Greenroom.app/Contents/MacOS/Greenroom"
@@ -138,7 +139,7 @@ enum ConnectCheck {
         else { expect(false, "an App Translocation path is refused", "\(moved)") }
         expect(ClaudeConnect.reconnect().message.contains("Applications"), "so is a reconnect")
         ClaudeConnect.executableOverride = nil
-        registered(as: "greenroom", exe: "/Applications/Other.app/Contents/MacOS/Greenroom")
+        registered(as: "\(N)", exe: "/Applications/Other.app/Contents/MacOS/Greenroom")
         // Reconnect says what happened at each step: a failing add after the remove, and a remove that finds nothing.
         flag("fail-add", true)
         let half = ClaudeConnect.reconnect()
@@ -148,19 +149,19 @@ enum ConnectCheck {
         let noEntry = ClaudeConnect.reconnect()
         if case .failed(let why) = noEntry { expect(why.contains("nothing was added"), "reconnect with no entry to remove says nothing was added", why) }
         else { expect(false, "reconnect with no entry fails", "\(noEntry)") }
-        registered(as: "greenroom")
+        registered(as: "\(N)")
         // `get` saying there is no such server is final: no mcp list after it.
         registered(as: nil)
         try? fm.removeItem(at: log)
         expect(ClaudeConnect.status() == .notConnected, "no such server")
         expect(!calls().contains { $0.hasPrefix("mcp list") }, "... without asking mcp list", calls().joined(separator: " | "))
-        registered(as: "greenroom")
+        registered(as: "\(N)")
 
         // Disconnect.
         try? fm.removeItem(at: log)
         let off = ClaudeConnect.disconnect()
         if case .disconnected = off {} else { expect(false, "disconnect removes it", "\(off)") }
-        expect(calls().contains("mcp remove --scope user greenroom"), "disconnect ran claude mcp remove --scope user greenroom", calls().joined(separator: " | "))
+        expect(calls().contains("mcp remove --scope user \(N)"), "disconnect ran claude mcp remove --scope user \(N)", calls().joined(separator: " | "))
         expect(ClaudeConnect.status() == .notConnected, "after disconnecting it is not connected")
         expect(ClaudeConnect.disconnect() == .notConnected, "disconnecting when it is not connected says so")
 

@@ -614,7 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let main = NSMenu()
 
         let app = NSMenu()
-        app.addItem(withTitle: "About Greenroom", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(withTitle: "About \(Variant.name)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         if Updates.shared.available {
             let check = app.addItem(withTitle: "Check for Updates…", action: #selector(Updates.checkForUpdates(_:)), keyEquivalent: "")
             check.target = Updates.shared
@@ -622,12 +622,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.addItem(.separator())
         app.addItem(item("Settings…", #selector(showSettings(_:)), ","))
         app.addItem(.separator())
-        app.addItem(withTitle: "Hide Greenroom", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        app.addItem(withTitle: "Hide \(Variant.name)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let others = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         others.keyEquivalentModifierMask = [.command, .option]
         app.addItem(.separator())
-        app.addItem(withTitle: "Quit Greenroom", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        main.addItem(submenu(app, title: "Greenroom"))
+        app.addItem(withTitle: "Quit \(Variant.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        main.addItem(submenu(app, title: Variant.name))
 
         let file = NSMenu(title: "File")
         file.addItem(item("Open APK…", #selector(openDocument(_:)), "o"))

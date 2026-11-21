@@ -83,6 +83,7 @@ This downloads the apksim release named in `engine.lock` (checked against the SH
 | `--engine DIR --testapp APK` | bundle an unpacked apksim release of your own |
 | `--version X.Y.Z` | the app's version |
 | `--check` | verify the signatures and run the smoke test |
+| `--variant debug` | build `build/Greenroom Debug.app` instead: a copy to keep beside the release, with its own name and bundle id, an orange icon and an orange line along the top of its window, its own state folder (`~/Library/Application Support/Greenroom Debug`, so both run at once without sharing simulators, data or the agent endpoint) and no in-app updates |
 
 A release is cut by pushing a `v*` tag: [docs/RELEASING.md](docs/RELEASING.md) has the certificate and secrets it needs.
 

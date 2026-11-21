@@ -1,21 +1,25 @@
 #!/bin/bash
 # Builds build/Greenroom.app: the Swift app, the apksim engine inside it, everything signed with the hardened runtime.
-#   scripts/bundle.sh [--identity NAME|-] [--engine DIR --testapp APK] [--version X.Y.Z] [--check]
+#   scripts/bundle.sh [--identity NAME|-] [--engine DIR --testapp APK] [--version X.Y.Z] [--variant release|debug] [--check]
+# --variant    debug: build/Greenroom Debug.app, a copy to install beside the release: its own name, bundle id, orange
+#              icon and window line, its own state folder (Application Support/Greenroom Debug), and no updates
 # --identity   a codesign identity; "-" (default) signs ad hoc, for running on this Mac only
 # --engine     an unpacked apksim release to bundle instead of the one engine.lock names (with --testapp)
 # GREENROOM_BUILD  the build number (CFBundleVersion, which Sparkle compares); the commit count by default
 # --check      afterwards, run the bundled training app headless through the app and verify the signatures
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-IDENTITY=-; ENGINE=; TESTAPP=; VERSION=0.1.0; CHECK=
+IDENTITY=-; ENGINE=; TESTAPP=; VERSION=0.1.0; CHECK=; VARIANT=release
 while [[ $# -gt 0 ]]; do case "$1" in
   --identity) IDENTITY=$2; shift 2 ;;
   --engine) ENGINE=$2; shift 2 ;;
   --testapp) TESTAPP=$2; shift 2 ;;
   --version) VERSION=$2; shift 2 ;;
+  --variant) VARIANT=$2; shift 2 ;;
   --check) CHECK=1; shift ;;
   *) echo "unknown option $1" >&2; exit 2 ;;
 esac; done
+[[ "$VARIANT" == release || "$VARIANT" == debug ]] || { echo "error: --variant is release or debug" >&2; exit 2; }
 
 if [[ -z "$ENGINE" ]]; then
   CACHE=$("$ROOT/scripts/fetch-engine.sh"); ENGINE="$CACHE/tree"; TESTAPP="$CACHE/testapp.apk"
@@ -26,7 +30,7 @@ ENGINE_VERSION=$(tr -d '[:space:]' < "$ENGINE/work/release")
 
 cd "$ROOT"
 swift build -c release --arch arm64
-APP="$ROOT/build/Greenroom.app"; C="$APP/Contents"
+if [[ "$VARIANT" == debug ]]; then APP="$ROOT/build/Greenroom Debug.app"; else APP="$ROOT/build/Greenroom.app"; fi; C="$APP/Contents"
 rm -rf "$APP"; mkdir -p "$C/MacOS" "$C/Resources"
 BIN_PATH=$(swift build -c release --arch arm64 --show-bin-path)
 cp "$BIN_PATH/Greenroom" "$C/MacOS/Greenroom"
@@ -37,6 +41,19 @@ rm -rf "$C/Frameworks/Sparkle.framework/Versions/B/XPCServices" "$C/Frameworks/S
 sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/${GREENROOM_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}/" \
     -e "s/@ENGINE@/$ENGINE_VERSION/" Resources/Info.plist > "$C/Info.plist"
 [[ -f Resources/AppIcon.icns ]] && cp Resources/AppIcon.icns "$C/Resources/"
+if [[ "$VARIANT" == debug ]]; then
+  # Its own app to macOS (bundle id: preferences, permissions), to the person (name, icon) and to Greenroom (the
+  # variant key: the state folder and the title badge). No feed: Sparkle would offer the release in its place.
+  PB=/usr/libexec/PlistBuddy
+  $PB -c "Set :CFBundleIdentifier io.github.aglose.greenroom.debug" -c "Set :CFBundleName Greenroom Debug" \
+      -c "Set :CFBundleDisplayName Greenroom Debug" -c "Add :GreenroomVariant string debug" \
+      -c "Delete :SUFeedURL" -c "Delete :SUPublicEDKey" "$C/Info.plist"
+  # Opening an .apk or .apkrec by double-click stays the release's: the debug copy only offers itself.
+  i=0; while $PB -c "Print :CFBundleDocumentTypes:$i" "$C/Info.plist" >/dev/null 2>&1; do
+    $PB -c "Set :CFBundleDocumentTypes:$i:LSHandlerRank Alternate" "$C/Info.plist"; i=$((i+1))
+  done
+  cp Resources/AppIcon-debug.icns "$C/Resources/AppIcon.icns"
+fi
 cp -Rc "$ENGINE" "$C/Resources/engine"
 cp "$TESTAPP" "$C/Resources/engine-testapp.apk"
 cp -R Resources/recipes "$C/Resources/recipes"

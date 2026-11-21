@@ -1,6 +1,9 @@
 // Draws the app icon and writes Resources/AppIcon.icns: `swift scripts/make-icon.swift` from the repository root.
-// A dressing-room mirror with its bulbs, where the mirror is a phone.
+// A dressing-room mirror with its bulbs, where the mirror is a phone. `--debug`: the debug build's icon, the same on an
+// orange plate, written to Resources/AppIcon-debug.icns (scripts/bundle.sh --variant debug).
 import AppKit
+
+let debug = CommandLine.arguments.contains("--debug")
 
 func draw(_ size: CGFloat) -> NSBitmapImageRep {
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size), pixelsHigh: Int(size), bitsPerSample: 8,
@@ -16,8 +19,8 @@ func draw(_ size: CGFloat) -> NSBitmapImageRep {
     let platePath = NSBezierPath(roundedRect: plate, xRadius: 186*s, yRadius: 186*s)
     let shadow = NSShadow(); shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
     shadow.shadowBlurRadius = 24*s; shadow.shadowOffset = NSSize(width: 0, height: -10*s)
-    NSGraphicsContext.saveGraphicsState(); shadow.set(); c(16, 68, 50).setFill(); platePath.fill(); NSGraphicsContext.restoreGraphicsState()
-    NSGradient(colors: [c(38, 140, 96), c(18, 84, 60), c(10, 52, 40)])!.draw(in: platePath, angle: -90)
+    NSGraphicsContext.saveGraphicsState(); shadow.set(); (debug ? c(92, 44, 10) : c(16, 68, 50)).setFill(); platePath.fill(); NSGraphicsContext.restoreGraphicsState()
+    NSGradient(colors: debug ? [c(246, 146, 48), c(204, 96, 22), c(132, 58, 12)] : [c(38, 140, 96), c(18, 84, 60), c(10, 52, 40)])!.draw(in: platePath, angle: -90)
 
     // The phone.
     let phone = NSRect(x: 357*s, y: 232*s, width: 310*s, height: 560*s)
@@ -43,7 +46,8 @@ func draw(_ size: CGFloat) -> NSBitmapImageRep {
     return rep
 }
 
-let out = URL(fileURLWithPath: "build/AppIcon.iconset")
+let name = debug ? "AppIcon-debug" : "AppIcon"
+let out = URL(fileURLWithPath: "build/\(name).iconset")
 try? FileManager.default.removeItem(at: out)
 try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 for (points, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)] {
@@ -51,6 +55,6 @@ for (points, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), 
     try draw(CGFloat(points * scale)).representation(using: .png, properties: [:])!.write(to: out.appendingPathComponent(name))
 }
 let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-p.arguments = ["-c", "icns", out.path, "-o", "Resources/AppIcon.icns"]
+p.arguments = ["-c", "icns", out.path, "-o", "Resources/\(name).icns"]
 try p.run(); p.waitUntilExit()
-print(p.terminationStatus == 0 ? "wrote Resources/AppIcon.icns" : "iconutil failed")
+print(p.terminationStatus == 0 ? "wrote Resources/\(name).icns" : "iconutil failed")
