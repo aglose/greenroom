@@ -52,8 +52,8 @@ The answers are built to be cheap to read:
 | `set` | appearance, locale, font scale, rotation, network, device, time zone, animation scale, permissions; home, resume, lock, unlock, recreate, restart, process-death |
 | `screen`, `check`, `wait_for`, `screenshot`, `logs` | reading and verifying |
 | `session` | this worktree's session: branch and commit, clean or not, its build (age, source, current or stale), the default recipe, the base, whether its simulator runs, the Claude session's title when known |
-| `build` | run a recipe for the session and wait (`recipe`, `timeout_s`: default 1500): answers the build's key and age, or the log's last error lines |
-| `changes` | the session's newest build against a base (`base`, `timeout_s`: default 600): `+ Settings > Privacy (new) [s4]`, `~ Trips: 4,812 px differ [s3]`, `- Legacy import (gone) [s9]`, then counts, crashes and what the walk did not finish; `screenshot` takes `screen` (an id in brackets) and `side` `head`, `base` or `diff` for the stored pictures |
+| `build` | run a recipe for the session and wait (`recipe`, `timeout_s`: 10 to 200 s, default 200): answers the build's key and age, or the log's last error lines |
+| `changes` | the session's newest build against a base (`base`, `timeout_s`: 10 to 200 s, default 200): `+ Settings > Privacy (new) [s4]`, `~ Trips: 4,812 px differ [s3]`, `- Legacy import (gone) [s9]`, then counts, crashes and what the walk did not finish; `screenshot` takes `screen` (an id in brackets) and `side` `head`, `base` or `diff` for the stored pictures |
 | `compare` | how two simulators' screens differ: `-` only on the base, `+` only on the other, `>` moved, and the share of pixels that differ; `map` adds a picture of where |
 
 With several simulators running, each tool takes `sim` (`s1`, `s2`...). A second `launch` puts its simulator
@@ -131,13 +131,16 @@ While an agent drives a session's simulator, Greenroom records its screen: the f
 `evidence/<build key>/video/agent-<time>.mp4` in the state folder, with a chapter per tool call and `steps.jsonl`
 beside it (one line per call: time, seconds into the video, tool, a short description, whether it failed).
 
-What is written about a call is its shape, never its content: `type` is "typed 14 characters", `open_url` is the
-link without its query or fragment, `set` is the setting's name without the value, a tapped or awaited text is "text
-of N characters", `check` is how many texts it looked for. Typed text, query strings and values are not in
-`steps.jsonl` or the chapter names. The video itself is the screen as it was, so what was on screen is in it.
+What is written about a call is its shape, never its content: `type` is "typed 14 characters"; `open_url` is the
+scheme alone for an app's own link and, for an http(s) link, host and path without query or fragment (a long or
+token-looking path segment becomes "…"); `set` is the setting's name (only if it is one of the known settings) without
+the value; `swipe` is its direction; a tapped or awaited text is "text of N characters"; `check` is how many texts it
+looked for. Typed text, query strings and values are not in `steps.jsonl` or the chapter names. The video itself is
+the screen as it was, so what was on screen is in it.
 
-- It stops after 60 s without an agent action (a call still waiting, such as `wait_for`, counts as activity), when
-  the simulator ends, when the repository's switch in the Agent popover goes off (at once), or when the app quits.
+- It stops after 60 s without an agent action (a call still waiting, such as `wait_for`, counts as activity, but never
+  for more than 10 minutes), when
+  the simulator ends, when the repository's switch in the Agent popover goes off (at once, for every session of that repository), or when the app quits.
 - A paused agent is not recorded: reading tools still answer while paused, but they neither start a recording nor
   add to one.
 - It never starts while you are recording that simulator yourself. If you choose File > Record Screen while an agent
@@ -147,8 +150,10 @@ of N characters", `check` is how many texts it looked for. Typed text, query str
 - The Agent popover says when it is recording and links the file. Files stay on this Mac under the build's evidence
   until the build is pruned; nothing leaves it. The switch is per repository, on by default.
 
-`build` and `changes` run beside the other tools, so `session`, `screen` and the rest answer while one waits. A call
-waits at most 4 minutes, then says it is still going; calling again joins the same build or walk.
+Calls on one agent connection are handled one at a time, except `build` and `changes`, which wait for minutes and run
+beside them: `session`, `screen` and the rest answer while one waits, and other agents' calls are never held up. One
+call waits at most 200 s in all (resolving the base included), then says it is still going; calling again joins the
+same build, base fetch or walk instead of starting another.
 
 ## What an agent cannot do
 

@@ -115,8 +115,8 @@ extension AgentTools {
         if name == "remote", ws.refusal(forRecipe: "remote") != nil {
             throw Failure(message: "The remote recipe uploads this repository's source code to the person's own boat.dev account, and they have not allowed it. Ask them to allow it in Greenroom (the row's Build with > remote); an agent cannot give that yes. Meanwhile use the local recipe.")
         }
-        // One call waits at most 4 minutes (the shim gives up at 5); the build goes on and a second call joins it.
-        let timeout = min(clamp(args["timeout_s"], 10, 7200, 1500), 240)
+        // One call waits at most 200 s (the shim gives up at 300); the build goes on and a second call joins it.
+        let timeout = clamp(args["timeout_s"], 10, 200, 200)
         var why = ""
         // Never start a CI workflow from an agent's call: only the person's own Build button may.
         let job: BuildJob? = mainSync {
@@ -196,11 +196,32 @@ extension AgentTools {
         let (s, ws) = try tied(connection)
         guard let wb = workbench else { throw Failure(message: Self.noSession) }
         guard let head = headBuild(s) else { throw Failure(message: "no build yet for \(label(s)): call build") }
-        let timeout = min(clamp(args["timeout_s"], 10, 7200, 600), 240)
+        let timeout = clamp(args["timeout_s"], 10, 200, 200)
+        let deadline = Date().addingTimeInterval(timeout)   // one deadline for the whole call, the base's fetch included
         let (sessions, store) = mainSync { (wb.sessions.sessions, wb.sessions.store) }
         let ref = try baseRef(args["base"] as? String, s, sessions)
         let wt = s.worktree
-        let resolution = blocking { await Bases.resolve(base: ref, in: ws, sessions: sessions, store: store, worktree: wt) }
+        // The fetch (CI, gh) may take long: it runs on, and a call that gave up waiting leaves it for the next one to join.
+        let key = wt.path + "|" + ((args["base"] as? String) ?? "")
+        var box: ResolveBox!
+        var begun = false
+        changesLock.lock()
+        if let b = pendingResolves[key] { box = b } else { box = ResolveBox(); pendingResolves[key] = box; begun = true }
+        changesLock.unlock()
+        if begun {
+            let mine: ResolveBox = box
+            mine.group.enter()
+            Task.detached { [weak self] in
+                let r = await Bases.resolve(base: ref, in: ws, sessions: sessions, store: store, worktree: wt)
+                mine.result = r
+                self?.finishResolve(key)
+                mine.group.leave()
+            }
+        }
+        if box.group.wait(timeout: .now() + max(0.5, deadline.timeIntervalSinceNow)) == .timedOut {
+            throw Failure(message: "still fetching the base: it goes on in Greenroom. Call changes again with the same base to join it.")
+        }
+        guard let resolution = box.result else { throw Failure(message: "the base could not be resolved") }
         let base: Build
         switch resolution {
         case .failed(let why): throw Failure(message: why)
@@ -223,7 +244,7 @@ extension AgentTools {
         mainSync {
             _ = evidence.changes(head: head, base: base, start: start, baseOption: baseOption) { r in result = r; done.signal() }
         }
-        if done.wait(timeout: .now() + timeout) == .timedOut {
+        if done.wait(timeout: .now() + max(0.5, deadline.timeIntervalSinceNow)) == .timedOut {
             throw Failure(message: "still comparing after \(Int(timeout)) s: the walk goes on in Greenroom while another call waits for it. Call changes again with the same base to join it.")
         }
         guard let result else { throw Failure(message: "the comparison ended with no answer") }
@@ -265,6 +286,7 @@ extension AgentTools {
                 ["type": "text", "text": "\(screen) \(side) \(w)x\(h) (capture \(cg.width)x\(cg.height))"]]
     }
 
+    func finishResolve(_ key: String) { changesLock.lock(); pendingResolves[key] = nil; changesLock.unlock() }
     func setLastChanges(_ set: ChangeSet, for worktree: String) { changesLock.lock(); lastChanges[worktree] = set; changesLock.unlock() }
     func lastChanges(for worktree: String) -> ChangeSet? { changesLock.lock(); defer { changesLock.unlock() }; return lastChanges[worktree] }
 

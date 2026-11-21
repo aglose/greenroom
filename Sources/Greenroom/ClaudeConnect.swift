@@ -22,7 +22,14 @@ enum ClaudeConnect {
     static let listArguments = ["mcp", "list"]
 
     /// This copy's program: what `claude` is told to run for the MCP server.
-    static var executable: String { Bundle.main.executablePath ?? CommandLine.arguments[0] }
+    static var executable: String { executableOverride ?? Bundle.main.executablePath ?? CommandLine.arguments[0] }
+    /// For a check: the program this copy claims to be.
+    static var executableOverride: String?
+
+    /// macOS runs an app opened from Downloads (or a disk image) from a temporary, randomised copy; a path there stops
+    /// existing, so it must not be registered.
+    static var translocated: Bool { executable.contains("/AppTranslocation/") }
+    static let translocatedMessage = "Greenroom is running from a temporary location macOS made for an app opened from Downloads or a disk image (App Translocation), and that path stops working. Move Greenroom.app to Applications, open it from there, then connect."
 
     /// The command as the person would type it (shown before it runs, and copied by the Agent popover).
     static func displayCommand(executable: String = ClaudeConnect.executable) -> String {
@@ -128,30 +135,51 @@ enum ClaudeConnect {
         return all.suffix(n).joined(separator: "\n")
     }
 
-    /// What `get` or `list` said about the server: connected here, connected to another program, or not at all.
-    private static func judge(_ text: String) -> State {
-        text.contains(executable) ? .connected : .otherCopy(command(in: text) ?? "an unknown program")
+    private static func same(_ a: String, _ b: String) -> Bool {
+        URL(fileURLWithPath: a).standardizedFileURL.path == URL(fileURLWithPath: b).standardizedFileURL.path
     }
 
-    /// The program path a `get` answer names: its `Command:` line, or the first absolute path.
+    /// What `get` or `list` said about the server: connected here (the whole command equals this program's path),
+    /// connected to another program, or not at all.
+    private static func judge(_ text: String) -> State {
+        guard let cmd = command(in: text) else { return .otherCopy("an unknown program") }
+        return same(cmd, executable) ? .connected : .otherCopy(cmd)
+    }
+
+    /// The program an answer names, whole (a path may hold spaces): the rest of `get`'s `Command:` line, or, for a
+    /// `list` line `greenroom: PATH --mcp - status`, what lies between the colon and ` --mcp` (else ` - `).
     private static func command(in text: String) -> String? {
+        func trimmed(_ s: Substring) -> String? {
+            var t = s.trimmingCharacters(in: .whitespaces)
+            if t.hasSuffix(" --mcp") { t = String(t.dropLast(6)).trimmingCharacters(in: .whitespaces) }
+            return t.isEmpty ? nil : t
+        }
         for line in text.split(whereSeparator: \.isNewline) {
             let t = line.trimmingCharacters(in: .whitespaces)
-            if t.lowercased().hasPrefix("command:") { return t.dropFirst(8).trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first }
+            if t.lowercased().hasPrefix("command:") { return trimmed(t.dropFirst(8)) }
         }
-        return text.split(whereSeparator: { $0.isWhitespace }).map(String.init).first { $0.hasPrefix("/") }
+        for line in text.split(whereSeparator: \.isNewline) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard t.hasPrefix(serverName + ":") else { continue }
+            var rest = String(t.dropFirst(serverName.count + 1)).trimmingCharacters(in: .whitespaces)
+            if let r = rest.range(of: " --mcp", options: .backwards) { rest = String(rest[..<r.lowerBound]) }
+            else if let r = rest.range(of: " - ") { rest = String(rest[..<r.lowerBound]) }
+            return rest.isEmpty ? nil : rest
+        }
+        return nil
     }
 
-    /// `claude mcp get greenroom`: an answer naming it, or "no such server", is final. Only when `get` itself is not
-    /// there (an old claude) is `claude mcp list` asked, naming it at the start of a line. Off the main thread.
+    /// `claude mcp get greenroom`. The exit code is the rule: 0 and the name is an entry, 1 is "no such server" (the CLI
+    /// says `No MCP server named "greenroom". Configured servers: ...`; the words are only a hint). Only when `get`
+    /// itself is not there (an old claude) is `claude mcp list` asked, naming it at the start of a line. Off the main thread.
     static func status() -> State {
         guard let (exe, env) = find() else { return .missing }
         let got = run(exe, getArguments, env: env)
         if got.timedOut { return .unknown("claude did not answer within \(Int(timeout)) s") }
         let said = got.output.lowercased()
         if got.status == 0, said.contains(serverName) { return judge(got.output) }
-        if said.contains("no mcp server") || said.contains("not found") { return .notConnected }
         let unsupported = said.contains("unknown command") || said.contains("unrecognized") || said.contains("unknown argument")
+        if got.status == 1, !unsupported { return .notConnected }
         guard unsupported else { return .unknown(lines(got.output)) }
         let list = run(exe, listArguments, env: env)
         if list.timedOut { return .unknown("claude did not answer within \(Int(timeout)) s") }
@@ -175,21 +203,42 @@ enum ClaudeConnect {
         return add()
     }
 
+    /// `claude mcp add`, then a `get` to see that the entry runs this copy: "Connected" only when it does.
     private static func add() -> Outcome {
+        if translocated { return .failed(translocatedMessage) }
         guard let (exe, env) = find() else { return .missing }
         let r = run(exe, addArguments(executable: executable), env: env)
         if r.timedOut { return .failed("claude mcp add did not finish within \(Int(timeout)) s and was stopped (timed out)") }
-        if r.status == 0 { return .connected(lines(r.output, 1)) }
-        if r.output.lowercased().contains("already exists") { return .alreadyConnected }
-        return .failed("claude mcp add failed (exit \(r.status)):\n" + lines(r.output))
+        if r.status != 0 {
+            if r.output.lowercased().contains("already exists") { return .alreadyConnected }
+            return .failed("claude mcp add failed (exit \(r.status)):\n" + lines(r.output))
+        }
+        switch status() {
+        case .connected: return .connected(lines(r.output, 1))
+        case .otherCopy(let path): return .failed("claude mcp add said it worked, but Claude Code's greenroom entry runs \(path), not this copy.")
+        case .notConnected: return .failed("claude mcp add said it worked, but claude mcp get finds no greenroom server.")
+        case .missing: return .missing
+        case .unknown(let why): return .failed("claude mcp add said it worked, but the entry could not be checked: \(why)")
+        }
     }
 
-    /// Points an entry that runs another copy at this one: remove, then add.
+    /// Points an entry that runs another copy at this one: remove, then add. Each step's own words are reported, and
+    /// "Connected" only when a `get` afterwards shows this copy.
     static func reconnect() -> Outcome {
+        if translocated { return .failed(translocatedMessage) }
         let off = disconnect()
-        if case .failed = off { return off }
-        if off == .missing { return off }
-        return add()
+        switch off {
+        case .disconnected: break
+        case .notConnected: return .failed("claude mcp remove said there is no greenroom server, so there was nothing to replace and nothing was added. Choose Connect Claude Code.")
+        case .missing: return .missing
+        case .failed(let why): return .failed("Reconnect stopped at the remove step, and nothing was added. " + why)
+        default: return off
+        }
+        switch add() {
+        case .connected(let how): return .connected(how)
+        case .failed(let why): return .failed("The old greenroom entry was removed, but adding this copy failed, so Claude Code now has none. " + why)
+        case let other: return other
+        }
     }
 
     static func disconnect() -> Outcome {

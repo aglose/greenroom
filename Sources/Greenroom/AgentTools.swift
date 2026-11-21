@@ -16,6 +16,9 @@ final class AgentTools {
     /// The folder of the newest `changes` answer of each session (by worktree path), for `screenshot`'s `screen`.
     var lastChanges: [String: ChangeSet] = [:]
     let changesLock = NSLock()
+    /// Base resolutions in progress (by session and base): a call that gives up waiting leaves one running, and the next call joins it.
+    var pendingResolves: [String: ResolveBox] = [:]
+    final class ResolveBox { let group = DispatchGroup(); var result: BaseResolution? }
     /// One line per call, for the person watching (main thread).
     var onActivity: ((_ tool: String, _ summary: String, _ failed: Bool, _ session: Session?) -> Void)?
 
@@ -53,7 +56,7 @@ final class AgentTools {
     }
 
     private static let devices = ["phone", "foldable", "tablet", "desktop", "tv", "watch"]
-    private static let settings: [String: String] = [
+    static let settings: [String: String] = [
         "appearance": "^(dark|light|toggle)$", "locale": "^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$", "fontscale": "^[0-9.]{1,4}$",
         "rotate": "^(left|right|portrait|landscape)$", "network": "^(online|offline|3g|lossy)$",
         "device": "^(phone|foldable|tablet|desktop|tv|watch|[0-9]{3,4}x[0-9]{3,4}(@[0-9.]+)?)$",
@@ -116,12 +119,12 @@ final class AgentTools {
             + "The session's simulator then reloads on it with its data kept. The remote recipe needs the person's yes in Greenroom "
             + "(an agent cannot give it); ci never starts a workflow from here.",
          schema(["recipe": ["type": "string", "description": "local, ci, remote or a custom recipe's name (default: the workspace's)"],
-                 "timeout_s": ["type": "integer", "description": "how long to wait (default 1500)"]], sim: false)),
+                 "timeout_s": ["type": "integer", "description": "how long this call waits, 10-200 s (default 200); the build goes on, and calling build again joins it"]], sim: false)),
         ("changes", "How this session's newest build differs from a base, as screens: + new, ~ changed (pixels), - gone, then counts, "
             + "crashes and what the walk did not finish. Walks both builds if this pair has not been compared. Screen ids in [brackets] go to "
             + "screenshot's screen. An unbuilt base is answered as text saying what would build it; nothing is started.",
          schema(["base": ["type": "string", "description": "default: the workspace's base branch. Or session:BRANCH, pr:NUMBER, a branch/tag/commit, or the path of an .apk"],
-                 "timeout_s": ["type": "integer", "description": "how long to wait (default 600)"]], sim: false)),
+                 "timeout_s": ["type": "integer", "description": "how long this call waits, 10-200 s (default 200); the walk goes on, and calling changes again joins it"]], sim: false)),
         ("logs", "The app's log lines since the last call (android.util.Log and the engine's own).",
          schema(["filter": ["type": "string", "description": "keep lines containing this"], "lines": int])),
     ]

@@ -37,14 +37,14 @@ enum ConnectCheck {
           "mcp get")
             if [ -f "$D/get-unsupported" ]; then echo "error: unknown command 'get'" >&2; exit 2; fi
             if [ "$(cat "$D/registered" 2>/dev/null)" = "greenroom" ]; then echo "greenroom:"; echo "  Scope: User config"; echo "  Command: $(cat "$D/registered-exe")"; exit 0; fi
-            echo "No MCP server found with name: greenroom" >&2; exit 1 ;;
+            echo "No MCP server named \"greenroom\". Configured servers: other" >&2; exit 1 ;;
           "mcp list") echo "Checking MCP server health..."; listed; exit 0 ;;
           "mcp add")
             if [ -f "$D/fail-add" ]; then echo "error: could not write the configuration: permission denied" >&2; exit 1; fi
             echo greenroom > "$D/registered"; echo "$7" > "$D/registered-exe"; echo "Added stdio MCP server greenroom to user config"; exit 0 ;;
           "mcp remove")
             if [ -f "$D/registered" ]; then rm -f "$D/registered"; echo "Removed MCP server greenroom"; exit 0; fi
-            echo "No MCP server found with name: greenroom" >&2; exit 1 ;;
+            echo "No MCP server named \"greenroom\". Configured servers: other" >&2; exit 1 ;;
         esac
         echo "unexpected: $*" >&2; exit 3
         """
@@ -112,6 +112,43 @@ enum ConnectCheck {
         let seq = calls().filter { $0.hasPrefix("mcp remove") || $0.hasPrefix("mcp add") }
         expect(seq == ["mcp remove --scope user greenroom", "mcp add --scope user greenroom -- \(exe) --mcp"], "reconnect runs remove, then add", seq.joined(separator: " | "))
         expect(ClaudeConnect.status() == .connected, "and the entry then runs this copy")
+        // The whole command is compared, not a piece of it: a longer path that contains this one, or a name that only starts with it.
+        for lookalike in ["/Users/me" + ClaudeConnect.executable, ClaudeConnect.executable + "2"] {
+            registered(as: "greenroom", exe: lookalike)
+            let st = ClaudeConnect.status()
+            expect(st == .otherCopy(lookalike), "a command that only contains this program's path is another copy (\(lookalike.suffix(24)))", "\(st)")
+        }
+        // A path with a space is read whole, through get and through list.
+        ClaudeConnect.executableOverride = "/tmp/Green room/Greenroom"
+        registered(as: "greenroom", exe: "/tmp/Green room/Greenroom")
+        expect(ClaudeConnect.status() == .connected, "a program path with a space is this copy (get)")
+        flag("get-unsupported", true)
+        expect(ClaudeConnect.status() == .connected, "... and through list")
+        registered(as: "greenroom", exe: "/tmp/Green room/Other")
+        expect(ClaudeConnect.status() == .otherCopy("/tmp/Green room/Other"), "a different path with the same first word is another copy, named whole")
+        flag("get-unsupported", false)
+        ClaudeConnect.executableOverride = nil
+        registered(as: "greenroom")
+        // A copy macOS runs from App Translocation is never registered.
+        registered(as: nil)
+        ClaudeConnect.executableOverride = "/private/var/folders/ab/xyz/T/AppTranslocation/ABC/d/Greenroom.app/Contents/MacOS/Greenroom"
+        try? fm.removeItem(at: log)
+        let moved = ClaudeConnect.connect()
+        if case .failed(let why) = moved { expect(why.contains("Applications") && !calls().contains { $0.hasPrefix("mcp add") }, "an App Translocation path is refused with a move-to-Applications message and no add", why) }
+        else { expect(false, "an App Translocation path is refused", "\(moved)") }
+        expect(ClaudeConnect.reconnect().message.contains("Applications"), "so is a reconnect")
+        ClaudeConnect.executableOverride = nil
+        registered(as: "greenroom", exe: "/Applications/Other.app/Contents/MacOS/Greenroom")
+        // Reconnect says what happened at each step: a failing add after the remove, and a remove that finds nothing.
+        flag("fail-add", true)
+        let half = ClaudeConnect.reconnect()
+        if case .failed(let why) = half { expect(why.contains("removed") && why.contains("none") && why.contains("permission denied"), "reconnect with a failing add says the old entry is gone and why", why) }
+        else { expect(false, "reconnect with a failing add fails", "\(half)") }
+        flag("fail-add", false)
+        let noEntry = ClaudeConnect.reconnect()
+        if case .failed(let why) = noEntry { expect(why.contains("nothing was added"), "reconnect with no entry to remove says nothing was added", why) }
+        else { expect(false, "reconnect with no entry fails", "\(noEntry)") }
+        registered(as: "greenroom")
         // `get` saying there is no such server is final: no mcp list after it.
         registered(as: nil)
         try? fm.removeItem(at: log)
@@ -152,6 +189,17 @@ enum ConnectCheck {
         expect(ClaudeConnect.connect() == .missing, "connect says claude was not found")
         expect(ClaudeConnect.connect().message.contains("not found"), "... in words")
         expect(ClaudeConnect.disconnect() == .missing, "so does disconnect")
+
+        // What the agent's recording stores of a call: shapes, never content.
+        func shape(_ tool: String, _ args: [String: Any]) -> String { AgentRecording.shape(tool: tool, args: args) }
+        expect(shape("set", ["setting": "appearance", "value": "dark"]) == "set: appearance", "a known setting is named, never its value")
+        expect(shape("set", ["setting": "hunter2-SECRET"]) == "set: a setting", "an unknown setting name is not stored")
+        expect(shape("swipe", ["direction": "up"]) == "swipe: up" && shape("swipe", ["direction": "SECRET"]) == "swipe: by points", "a swipe stores only a real direction")
+        expect(shape("open_url", ["url": "myapp://reset?token=SECRET#x"]) == "open_url: myapp", "an app's own link is stored as its scheme alone", shape("open_url", ["url": "myapp://reset?token=SECRET#x"]))
+        let web = shape("open_url", ["url": "https://example.com/docs/0123456789abcdef0123456789abcdef/page?q=SECRET#frag"])
+        expect(web == "open_url: https://example.com/docs/…/page", "a web link keeps host and path, token-like segments become an ellipsis, no query or fragment", web)
+        expect(shape("type", ["text": "hunter2"]) == "type: typed 7 characters", "typing stores only a count")
+        expect(shape("tap", ["text": "Sign in"]) == "tap: text of 7 characters", "a tap stores only the text's length")
 
         if failures == 0 { try? fm.removeItem(at: base) }
         say(failures == 0 ? "done" : "stopped with \(failures) failure(s)")

@@ -125,6 +125,9 @@ enum EvidenceCheck {
                     ((try? fm.contentsOfDirectory(at: pkg, includingPropertiesForKeys: nil)) ?? []).filter { $0.lastPathComponent.hasPrefix("evg") && !$0.lastPathComponent.hasSuffix(".device") }
                 }
             }
+            // A run that was killed (a stop, a crash) leaves its walk's clone in this check's own state folder; the product sweeps
+            // those after a day. This run starts from none, so the step below sees only what this run left.
+            for c in clones() { try? fm.removeItem(at: c); try? fm.removeItem(at: URL(fileURLWithPath: c.path + ".device")) }
             func mapDir(_ key: String) -> URL { store.root.appendingPathComponent("evidence/\(key)/map") }
             func hasMap(_ key: String) -> Bool { fm.fileExists(atPath: mapDir(key).appendingPathComponent("crawl.json").path) }
             func captures(_ key: String) -> Int {

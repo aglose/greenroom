@@ -277,7 +277,7 @@ def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, 
         stored += open(f).read().replace("\\/", "/")   # JSON may escape slashes
     mp4s = "".join(open(f, "rb").read().decode("latin-1") for f in glob.glob(state_dir + "/evidence/*/video/agent-*.mp4"))
     expect("steps.jsonl and the chapters say how much was typed, not what", f"typed {len(secret)} characters" in stored and secret not in stored and secret not in mp4s and "SECRET" not in stored, stored[-600:])
-    expect("... a link without its query or fragment", "open_url: apksim://composeapp/trips" in stored and query not in stored and "fragbit" not in stored, "open lines: " + " | ".join(l for l in stored.replace("}", "\n").split("\n") if "open" in l or query in l or "fragbit" in l)[:600])
+    expect("... an app's own link as its scheme alone", "open_url: apksim" in stored and "composeapp" not in stored and query not in stored and "fragbit" not in stored, "open lines: " + " | ".join(l for l in stored.replace("}", "\n").split("\n") if "open" in l or query in l or "fragbit" in l)[:600])
     expect("... a setting without its value, a tapped or awaited text by its length",
            '"set: appearance"' in stored and "dark" not in stored and "wait_for: text of 16 characters" in stored and "Italian vacation" not in stored and "Trip note" not in stored, stored[-600:])
     # The per-repository switch, off for the second repository.

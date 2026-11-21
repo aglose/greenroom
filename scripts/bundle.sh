@@ -83,14 +83,14 @@ if [[ -n "$CHECK" ]]; then
   # The workbench's path: the screen streamed to the app as H.264 and decoded, input over the control channel.
   "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
   # The agent interface, as an agent uses it.
+  CONNECT_DIR=; PLAIN_STATE=
+  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE"' EXIT   # the temporary folders go on failure too
   # (A state folder of its own: another copy of the app on this Mac must not be met halfway through.)
   PLAIN_STATE=$(mktemp -d /tmp/grplain.XXXXXX)
   GREENROOM_STATE="$PLAIN_STATE" "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk"
-  rm -rf "$PLAIN_STATE"
   # Connect Claude Code, against a stand-in claude (the real one is never run).
   CONNECT_DIR=$(mktemp -d /tmp/grconnect.XXXXXX)
   "$C/MacOS/Greenroom" --connect-check "$CONNECT_DIR" | tail -3
-  rm -rf "$CONNECT_DIR"
   # The agent tied to its worktree's session: two worktrees, a state folder of its own.
   "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk" --sessions
 fi

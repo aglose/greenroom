@@ -19,6 +19,9 @@ final class AgentRecording {
         init(sim: Simulator, file: URL, session: String) { self.sim = sim; self.file = file; self.session = session }
     }
 
+    /// A take with no activity for this long ends even with a call apparently in progress.
+    static var ceiling: TimeInterval = 600
+
     /// Seconds without an agent action after which a recording ends.
     var idleSeconds: TimeInterval = 60
     /// Told on the main thread when a recording started or ended (the Agent popover shows it).
@@ -98,19 +101,36 @@ final class AgentRecording {
         case "type":
             let n = (args["text"] as? String)?.count ?? 0
             return "type: typed \(n) characters"
-        case "open_url":
-            guard let raw = args["url"] as? String, let c = URLComponents(string: raw), let scheme = c.scheme else { return "open_url" }
-            return "open_url: \(scheme)://\(c.host ?? "")\(c.path)"
-        case "set": return "set: \((args["setting"] as? String) ?? "")"
+        case "open_url": return "open_url: " + linkShape(args["url"] as? String)
+        case "set":
+            let name = (args["setting"] as? String) ?? ""
+            return "set: " + (AgentTools.settings.keys.contains(name) ? name : "a setting")
         case "tap":
             if let t = chars("text") { return "tap: \(t)" }
             if args["ref"] != nil { return "tap: a node" }
             return "tap: at a point"
         case "wait_for": return "wait_for: \(chars("text") ?? "a text")"
         case "check": return "check: \((args["visible"] as? [String])?.count ?? 0) visible, \((args["absent"] as? [String])?.count ?? 0) absent"
-        case "swipe": return "swipe: \((args["direction"] as? String) ?? "by points")"
+        case "swipe":
+            let d = (args["direction"] as? String) ?? ""
+            return "swipe: " + (["up", "down", "left", "right"].contains(d) ? d : "by points")
         default: return tool
         }
+    }
+
+    /// A link as stored: only the scheme for anything but http(s) (an app's own link can carry anything), and for http(s)
+    /// the host and a path whose long or token-looking segments are replaced by an ellipsis. Never a query or fragment.
+    static func linkShape(_ raw: String?) -> String {
+        guard let raw, let c = URLComponents(string: raw), let scheme = c.scheme?.lowercased() else { return "a link" }
+        guard scheme == "http" || scheme == "https" else { return scheme }
+        func token(_ seg: Substring) -> Bool {
+            if seg.count > 24 { return true }
+            let hex = seg.count >= 16 && seg.allSatisfy { $0.isHexDigit || $0 == "-" }
+            let mixed = seg.count >= 12 && seg.contains { $0.isNumber } && seg.contains { $0.isLetter }
+            return hex || mixed
+        }
+        let path = c.path.split(separator: "/", omittingEmptySubsequences: true).map { token($0) ? "…" : String($0) }
+        return "\(scheme)://\(c.host ?? "")" + (path.isEmpty ? "" : "/" + path.joined(separator: "/"))
     }
 
     /// Ends the take of `sim` now, keeping its file (the person's own recording is starting, the workspace switch
@@ -137,7 +157,9 @@ final class AgentRecording {
         var changed = false
         for (id, t) in takes {
             if ScreenRecording.shared.recorder(for: t.sim) == nil { takes[id] = nil; changed = true; continue }   // the simulator ended
-            if t.inFlight == 0, Date().timeIntervalSince(t.last) >= idleSeconds {
+            let quiet = Date().timeIntervalSince(t.last)
+            // A call in progress counts as activity, but never for more than 10 minutes.
+            if (t.inFlight == 0 && quiet >= idleSeconds) || quiet >= AgentRecording.ceiling {
                 takes[id] = nil
                 changed = true
                 ScreenRecording.shared.stop(t.sim) { [weak self] _ in self?.onChange?() }

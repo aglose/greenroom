@@ -222,7 +222,7 @@ final class Recorder {
     }
 
     /// Whether a recorder is running for this simulator.
-    static func isRecording(_ sim: Simulator?) -> Bool { sim.map { ScreenRecording.shared.recorder(for: $0) != nil } ?? false }
+    static func isRecording(_ sim: Simulator?) -> Bool { sim.map { ScreenRecording.shared.recorder(for: $0) != nil && !AgentRecording.isAgentTake($0) } ?? false }   // an agent's take is not the person's recording: the item says "Record Screen" and a click starts theirs
 
     // MARK: One file
 
