@@ -3,6 +3,8 @@ import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var workbench: Workbench!
+    /// Device > Run Script's items (made before the workbench, so it asks for it when the menu opens).
+    private lazy var scriptsMenu = ScriptsMenu { [weak self] in self?.workbench }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Updates.shared.start()
@@ -33,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         extrasCheckIfAsked()
         devHooksCheckIfAsked()
         sessionsCheckIfAsked()
+        scriptsCheckIfAsked()
         buildsCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
@@ -475,6 +478,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DevHooksCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2])) { [self] in captureWindow(to: $0) }
     }
 
+    /// `Greenroom --scripts-check DIR APK`: see ScriptsCheck.
+    private func scriptsCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--scripts-check"), i + 2 < args.count else { return }
+        ScriptsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
     /// `Greenroom --sessions-check DIR APK`: see SessionsCheck.
     private func sessionsCheckIfAsked() {
         let args = CommandLine.arguments
@@ -660,6 +670,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(to(workbench: #selector(Workbench.showChanges(_:)), "Changes…", "d"))
         device.addItem(to(workbench: #selector(Workbench.showMatrix(_:)), "Matrix Wall…", "x", [.command, .option]))
         device.addItem(to(workbench: #selector(Workbench.closeMatrix(_:)), "Close Matrix Wall", ""))
+        device.addItem(.separator())
+        let scripts = NSMenuItem(title: "Run Script", action: nil, keyEquivalent: "")
+        scripts.submenu = NSMenu(title: "Run Script")
+        scripts.submenu?.delegate = scriptsMenu
+        device.addItem(scripts)
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.screenshot(_:)), "Save Screenshot", "s"))
         device.addItem(to(workbench: #selector(Workbench.restart(_:)), "Restart App", "R", [.command, .shift]))

@@ -100,8 +100,14 @@ if [[ -n "$CHECK" ]]; then
   # The workbench's path: the screen streamed to the app as H.264 and decoded, input over the control channel.
   "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
   # The agent interface, as an agent uses it.
-  CONNECT_DIR=; PLAIN_STATE=
-  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE"' EXIT   # the temporary folders go on failure too
+  CONNECT_DIR=; PLAIN_STATE=; SCRIPTS_DIR=
+  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE" "$SCRIPTS_DIR"' EXIT   # the temporary folders go on failure too
+  # Per-device app data, variables (in memory) and scripts with gr, against real simulators, in a state folder of its own.
+  SCRIPTS_DIR=$(mktemp -d /tmp/grscripts.XXXXXX)
+  scripts_out=$("$C/MacOS/Greenroom" --background --scripts-check "$SCRIPTS_DIR" "$C/Resources/engine-testapp.apk" | grep '^\[greenroom\] scripts:' || true)
+  echo "$scripts_out" | grep -E 'FAIL|done|failed' || true
+  grep -q 'scripts: done' <<< "$scripts_out" || { echo "error: the scripts check failed"; echo "$scripts_out"; exit 1; }
+  APKSIM_HOME="$SCRIPTS_DIR/scripts-check/engine-state/engine" "$C/Resources/engine/apksim" --stop-standbys >/dev/null 2>&1 || true
   # (A state folder of its own: another copy of the app on this Mac must not be met halfway through.)
   PLAIN_STATE=$(mktemp -d /tmp/grplain.XXXXXX)
   GREENROOM_STATE="$PLAIN_STATE" "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk"

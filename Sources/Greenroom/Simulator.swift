@@ -49,6 +49,9 @@ final class Simulator {
     private var netFeed: NetFeed?
     /// Whether other programs on this Mac are kept off this simulator's control channel.
     var isPrivate: Bool { token != nil }
+    /// The control channel's port and token, for a script the person runs against this simulator (Scripts).
+    var controlPort: Int? { port }
+    var controlToken: String? { token }
     /// How much of the log an agent has already been given.
     var logOffset: UInt64 = 0
     /// The launch options this simulator was started with (shown to agents).

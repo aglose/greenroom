@@ -73,7 +73,7 @@ that screen. `set` changes appearance, locale, font scale, rotation and more on 
   `launch` with the full path of an `apk` and the driving tools still work.
 - `build` and `changes` wait at most 200 s per call, then say they are still going: call again, which joins the same
   run.
-- Sign-ins are the person's: never ask for or type passwords.
+- Sign-ins are the person's: never ask for or type passwords. If the app needs one, call `scripts`: a sign-in script the person allowed can be run with `run_script` (it types their stored credentials, which you never see); otherwise ask the person to sign in.
 - While you drive a session's simulator its screen is recorded on this Mac, for the person to review.
 
 If the tools are missing or the server failed to start, Greenroom.app is not installed where the plugin looks

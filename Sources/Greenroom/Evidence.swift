@@ -666,12 +666,12 @@ final class Evidence: NSObject, NSMenuItemValidation {
 enum SlotClone {
     enum Outcome { case cloned(String), none, failed(String) }
 
-    static func freshName() -> String { "evg" + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8)) }
+    static func freshName(prefix: String = "evg") -> String { prefix + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8)) }
 
     /// Clones `<slot>-0` (and its `.device` folder) of every package that has one to a throwaway slot name.
-    static func make(slot: String, in root: URL) -> Outcome {
+    static func make(slot: String, in root: URL, prefix: String = "evg") -> Outcome {
         let fm = FileManager.default
-        let name = freshName()
+        let name = freshName(prefix: prefix)
         var cloned = false
         for pkg in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
             let source = pkg.appendingPathComponent(slot + "-0", isDirectory: true)
