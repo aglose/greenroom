@@ -47,6 +47,7 @@ DUMP=$!
       if (q == root) { print p; break } q = parent[q] } } }' "$WORK/ps.now" >> "$PIDS"; sleep 0.1; done ) & WATCH=$!
 cleanup() {
   kill "$WATCH" "$KEEP" 2>/dev/null || true
+  wait "$WATCH" "$KEEP" 2>/dev/null || true
   if kill -0 "$DUMP" 2>/dev/null; then
     sudo -n kill -INT "$DUMP" 2>/dev/null || true
     for _ in $(seq 50); do kill -0 "$DUMP" 2>/dev/null || break; sleep 0.1; done
@@ -66,6 +67,7 @@ echo "a captured line: $(grep -m1 'netcheck-canary:' "$CAP" || true)"
 grep -q 'proc netcheck-canary:' "$CAP" || { echo "error: the capture did not see the canary's packets, so it cannot see any"; head -5 "$CAP"; cat "$WORK/tcpdump.err"; exit 1; }
 grep 'proc mDNSResponder:' "$CAP" | grep -q 'eproc netcheck-canary:' || { echo "error: the canary's DNS lookup was not tagged with the canary, so the engine's would not be either"; grep -m3 mDNSResponder "$CAP" || true; exit 1; }
 echo "seen, DNS included"
+sleep 3   # the canary's connection closing, so its last packets land before the mark
 MARK=$(wc -l < "$CAP")
 
 echo "== smoke: the engine's first launch (and its startup-cache training, started in the background)"
@@ -87,14 +89,17 @@ for _ in $(seq 50); do kill -0 "$DUMP" 2>/dev/null || break; sleep 0.1; done
 sort -u "$PIDS" > "$PIDS.u"
 sent=$(tail -n +"$((MARK + 1))" "$CAP" | awk -v names="^($OURS)$" -v pidfile="$PIDS.u" '
   BEGIN { while ((getline p < pidfile) > 0) ours[p] = 1 }
+  /netcheck-canary:/ { next }   # the canary (a child of this script) is not the app
   { bad = 0; line = $0
     while (match(line, /(e?proc) [^:,)]+:[0-9]+/)) {
       split(substr(line, RSTART, RLENGTH), f, /[ :]/); line = substr(line, RSTART + RLENGTH)
       if (f[2] ~ names || (f[3] in ours)) bad = 1 }
     if (bad) print }')
 if [[ -n "$sent" ]]; then
-  echo "FAIL: packets sent outside this Mac by Greenroom or its engine:"
-  echo "$sent" | head -40
+  echo "FAIL: $(echo "$sent" | wc -l | tr -d ' ') packets sent outside this Mac by Greenroom or its engine, by process:"
+  echo "$sent" | grep -oE 'e?proc [^:,)]+' | sort | uniq -c
+  echo "the first of them:"
+  echo "$sent" | head -20
   exit 1
 fi
 echo "PASS: no packet from Greenroom or its engine left this Mac ($(sort -u "$PIDS" | wc -l | tr -d ' ') processes watched, $(($(wc -l < "$CAP") - MARK)) packets from other processes meanwhile)"
