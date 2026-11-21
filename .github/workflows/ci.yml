@@ -23,3 +23,5 @@ jobs:
         run: scripts/bundle.sh --check
       - name: Disk image
         run: scripts/dmg.sh
+      - name: No connections of our own (PRIVACY.md)
+        run: scripts/network-check.sh

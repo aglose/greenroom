@@ -46,3 +46,8 @@ removes all of it.
 Greenroom and its engine are open source. The app's only code that starts a process or touches the network is in
 `Sources/Greenroom/Engine.swift`, and you can watch the app's connections with any network monitor: with no APK
 running there are none.
+
+CI checks it on every change: `scripts/network-check.sh` captures every packet leaving the Mac, tagged with the
+process that sent it (or asked for the DNS lookup), while the app launches the engine, trains its startup cache,
+streams a simulator, serves an agent and shows every pane, and fails if one came from Greenroom or its engine. You
+can run it yourself (`sudo -v && scripts/network-check.sh`).

@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
+        PrivacyCheck.runIfAsked(self)   // scripts/network-check.sh
         PerfCheck.runIfAsked(self)   // `--snapshots-check`, SnapshotCheck.swift
     }
 
