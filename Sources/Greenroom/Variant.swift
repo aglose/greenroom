@@ -18,7 +18,7 @@ enum Variant {
     /// the bar sat on the toolbar's own buttons.)
     static func addBadge(to window: NSWindow) {
         guard isDebug, let frame = window.contentView?.superview else { return }
-        let line = NSView()
+        let line = PassThroughView()
         line.wantsLayer = true
         line.layer?.backgroundColor = debugColor.cgColor
         line.translatesAutoresizingMaskIntoConstraints = false
@@ -30,4 +30,9 @@ enum Variant {
             line.heightAnchor.constraint(equalToConstant: 3),
         ])
     }
+}
+
+/// Draws and takes no clicks: the window's top edge stays a place to drag the window by.
+private final class PassThroughView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

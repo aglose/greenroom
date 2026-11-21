@@ -48,6 +48,10 @@ if [[ "$VARIANT" == debug ]]; then
   $PB -c "Set :CFBundleIdentifier io.github.aglose.greenroom.debug" -c "Set :CFBundleName Greenroom Debug" \
       -c "Set :CFBundleDisplayName Greenroom Debug" -c "Add :GreenroomVariant string debug" \
       -c "Delete :SUFeedURL" -c "Delete :SUPublicEDKey" "$C/Info.plist"
+  # Opening an .apk or .apkrec by double-click stays the release's: the debug copy only offers itself.
+  i=0; while $PB -c "Print :CFBundleDocumentTypes:$i" "$C/Info.plist" >/dev/null 2>&1; do
+    $PB -c "Set :CFBundleDocumentTypes:$i:LSHandlerRank Alternate" "$C/Info.plist"; i=$((i+1))
+  done
   cp Resources/AppIcon-debug.icns "$C/Resources/AppIcon.icns"
 fi
 cp -Rc "$ENGINE" "$C/Resources/engine"
