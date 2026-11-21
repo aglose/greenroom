@@ -80,7 +80,7 @@ final class AgentRecording {
         stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let line: [String: Any] = ["time": stamp.string(from: Date()), "t": (Date().timeIntervalSince(t.started) * 1000).rounded() / 1000,
                                    "video": t.file.lastPathComponent, "tool": tool, "summary": shape, "failed": failed]
-        guard let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]) else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
         let steps = t.file.deletingLastPathComponent().appendingPathComponent("steps.jsonl")
         if !FileManager.default.fileExists(atPath: steps.path) { FileManager.default.createFile(atPath: steps.path, contents: nil, attributes: [.posixPermissions: 0o600]) }
         if let h = try? FileHandle(forWritingTo: steps) {
