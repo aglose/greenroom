@@ -196,6 +196,9 @@ cat > "$pack/build.sh" <<'BUILD'
 # $1: the application module (empty: found), $2: the variant.
 module="$1"; variant="$2"
 cd src
+# The same ceiling as unpack.sh's: a build that asks git (a version plugin, a commit hash) must not read the state of
+# a repository around src.
+GIT_CEILING_DIRECTORIES="$(cd .. && pwd -P)"; export GIT_CEILING_DIRECTORIES
 if [ -z "$module" ]; then
   found=""
   for f in $(find . -maxdepth 3 \( -name build.gradle -o -name build.gradle.kts \) -not -path '*/build/*' | sort); do
