@@ -66,8 +66,10 @@ extension SessionsController {
     /// Builds `session` with the recipe named (the workspace's default when nil).
     func build(_ session: Session, recipe: String? = nil) {
         guard let ws = workspace(of: session) else { return }
-        if let recipe { ws.defaultRecipeName = recipe }
         let name = recipe ?? ws.defaultRecipeName
+        // The remote recipe uploads source code: it runs only for a repository whose person said yes (RecipesUI.swift).
+        if ws.refusal(forRecipe: name) != nil { askRemoteConsent(for: ws) { [weak self] in self?.build(session, recipe: name) }; return }
+        if recipe != nil { ws.defaultRecipeName = name }
         buildQueue.start(session, workspace: ws, recipeName: name, store: store) { [weak self] why in
             self?.workbench?.toast.show(why, problem: true)
         }
@@ -153,10 +155,13 @@ extension SessionsController {
             for name in ws.recipeNames { sub.addItem(ClosureMenuItem(name) { [weak self] in self?.build(s, recipe: name) }) }
             sub.addItem(.separator())
             sub.addItem(ClosureMenuItem("Custom…") { [weak self] in self?.chooseCustomRecipe(for: s) })
+            sub.addItem(.separator())
+            for item in recipeMenuItems(for: s, in: ws) { sub.addItem(item) }
             let with = NSMenuItem(title: "Build with", action: nil, keyEquivalent: "")
             with.submenu = sub
             items.append(with)
         }
+        items.append(ClosureMenuItem("Add Pull Request…") { [weak self] in self?.pulls.askAndAdd() })
         if buildQueue.job(for: s) != nil {
             items.append(ClosureMenuItem("Show Build Log") { [weak self] in self?.showBuildLog(s, from: nil) })
         }

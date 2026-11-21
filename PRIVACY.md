@@ -51,6 +51,17 @@ of the apps you run and acts on them, on this Mac, through a connection only pro
 token in a file only you can read; web pages are refused). What the agent's own provider receives is between you
 and that agent; Greenroom sends it nothing by itself.
 
+## Build recipes
+
+If you add a git repository (Sessions) and build it, Greenroom runs a **recipe**: a program that makes an APK, told
+what to build through environment variables. The recipes that come with Greenroom are readable files in the app
+(`Resources/recipes`), and you can choose any program of your own. A recipe runs *your* tools with *your*
+credentials: `git` and Gradle for `local`, the GitHub CLI (`gh`) with your own sign-in for `ci`. Those tools talk to
+the network as themselves, when you press Build, add a pull request or choose a recipe, and only then. Greenroom
+makes no connection of its own for it, and shares your sign-ins with no one: it never sees them (`gh` keeps its own).
+Adding a pull request runs `gh` for that pull request's head commit and its CI artifact; the APK it fetches is
+opened on this Mac like any other. What a build leaves comes back to this Mac; no APK is uploaded.
+
 This file changes in the same commit as any change to what the app sends.
 
 ## Claude Code's sessions

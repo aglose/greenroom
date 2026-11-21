@@ -27,6 +27,8 @@ final class SessionsController {
     private var monitor: Any?
     /// The build queue (Builds.swift); its rows and buttons are BuildsUI.swift.
     private(set) lazy var buildQueue = Builds(sessions: self)
+    /// Pull requests without a worktree, the Review section (PullRequests.swift).
+    private(set) lazy var pulls = PullRows(sessions: self)
 
     /// Told on the main thread when the rows changed.
     var onChange: (() -> Void)?
@@ -399,6 +401,7 @@ final class SessionsController {
         out.append(PaletteItem(id: "session.add", title: "Add a repository to Sessions…", group: "Sessions", symbol: "plus.rectangle.on.folder",
                                keywords: "git worktree folder") { [weak self] in self?.chooseRepository() })
         out += buildPaletteItems()   // Build this session, Cancel build (BuildsUI.swift)
+        out += recipePaletteItems()  // Add pull request, Prepare remote builder, Build settings (RecipesUI.swift)
         return out
     }
 
@@ -418,6 +421,7 @@ final class SessionsController {
         if let built = s.builtAt { detail.append(Self.age(built)) }
         if s.ahead > 0 { detail.append("\(s.ahead) ahead") }
         if s.dirty { detail.append("edited") }
+        if workspace(of: s)?.defaultRecipeName == "ci", let behind = CIBehind.note(for: s, then: { [weak self] in self?.onChange?() }) { detail.append(behind) }
         let build = buildAccessories(for: s)
         let sub = NSTextField(labelWithString: build.detail ?? detail.joined(separator: " · "))
         sub.font = .systemFont(ofSize: 10)

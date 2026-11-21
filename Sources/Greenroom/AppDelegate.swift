@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildsCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
+        recipesCheckIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
@@ -477,6 +478,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--sessions-check"), i + 2 < args.count else { return }
         SessionsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
+    /// `Greenroom --recipes-check DIR APK`: see RecipesCheck.
+    private func recipesCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--recipes-check"), i + 2 < args.count else { return }
+        RecipesCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
     }
 
     /// `Greenroom --builds-check DIR APK`: see BuildsCheck.

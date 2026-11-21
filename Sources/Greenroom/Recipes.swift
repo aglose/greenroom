@@ -5,9 +5,8 @@ import Foundation
 // declared with the model in Sessions.swift so a workspace's settings round-trip.
 
 extension Recipe {
-    /// The recipes that ship in `Resources/recipes/`. W2b adds "ci" and W2c "remote" here (and their scripts to the
-    /// folder); nothing else changes for them: the runner, the queue and the UI take any name listed.
-    static let builtInNames = ["local"]
+    /// The recipes that ship in `Resources/recipes/`: the runner, the queue and the UI take any name listed.
+    static let builtInNames = ["local", "ci", "remote"]
 
     /// Where the bundled recipes are: the app's Resources, else (a `swift run` build) the source tree's.
     static var bundledFolder: URL {
@@ -38,8 +37,11 @@ extension Workspace {
     /// A recipe by name: the workspace's own (a custom one) first, then the built-in of that name.
     func recipe(named name: String) -> Recipe? { recipes[name] ?? Recipe.builtIn(name) }
 
-    /// Every recipe name offered, built-ins first.
-    var recipeNames: [String] { Recipe.builtInNames + recipes.keys.filter { !Recipe.builtInNames.contains($0) }.sorted() }
+    /// Every recipe name offered, built-ins first; "ci" only for a repository with a GitHub remote.
+    var recipeNames: [String] {
+        Recipe.builtInNames.filter { $0 != "ci" || recipes["ci"] != nil || GitHubRemote.has(root) }
+            + recipes.keys.filter { !Recipe.builtInNames.contains($0) }.sorted()
+    }
 
     /// The name of the recipe the Build button runs: the last one chosen for this workspace, else "local".
     var defaultRecipeName: String {
@@ -62,12 +64,14 @@ struct RecipeJob {
     var variant: String
     /// Where the recipe writes the APK.
     var out: URL
+    /// The workspace's recipe settings (`Workspace.recipeEnvironment`), beside the contract's variables.
+    var extra: [String: String] = [:]
 
     var environment: [String: String] {
-        [
+        extra.merging([
             "GREENROOM_WORKTREE": worktree.path, "GREENROOM_REPO": repo.path, "GREENROOM_REF": ref, "GREENROOM_SHA": sha,
             "GREENROOM_DIRTY": dirty ? "1" : "0", "GREENROOM_MODULE": module, "GREENROOM_VARIANT": variant, "GREENROOM_OUT": out.path,
-        ]
+        ]) { _, contract in contract }
     }
 }
 
@@ -96,7 +100,13 @@ enum ProcessGroup {
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+        // The app ignores SIGTERM (it quits through its own handler) and ignored signals survive exec: a recipe would
+        // never hear a cancel, and a shell cannot trap what it inherited as ignored. Default dispositions, nothing blocked.
+        var noSignals = sigset_t(), allSignals = sigset_t()
+        sigemptyset(&noSignals); sigfillset(&allSignals)
+        posix_spawnattr_setsigmask(&attr, &noSignals)
+        posix_spawnattr_setsigdefault(&attr, &allSignals)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
         posix_spawnattr_setpgroup(&attr, 0)   // a group of its own, led by the child
         let argv = ([exe] + args).map { strdup($0) } + [nil]
         let envp = env.map { strdup("\($0.key)=\($0.value)") } + [nil]

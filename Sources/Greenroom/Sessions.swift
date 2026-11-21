@@ -16,11 +16,14 @@ struct Workspace: Codable, Equatable {
     var recipes: [String: Recipe] = [:]
     /// What happens by itself: see Evidence (W3).
     var auto: Auto = .onBuild
+    /// The `ci` and `remote` recipes' settings (RecipeSettings.swift).
+    var ci = CISettings()
+    var remote = RemoteSettings()
 
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto }
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -30,6 +33,8 @@ struct Workspace: Codable, Equatable {
         baseRef = (try? c.decodeIfPresent(String.self, forKey: .baseRef)) ?? baseRef
         recipes = (try? c.decodeIfPresent([String: Recipe].self, forKey: .recipes)) ?? recipes
         auto = (try? c.decodeIfPresent(Auto.self, forKey: .auto)) ?? auto
+        ci = (try? c.decodeIfPresent(CISettings.self, forKey: .ci)) ?? ci
+        remote = (try? c.decodeIfPresent(RemoteSettings.self, forKey: .remote)) ?? remote
     }
 }
 
