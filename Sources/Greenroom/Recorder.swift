@@ -349,7 +349,11 @@ final class ScreenRecording {
     /// `evidence/<build key>/video/` for a simulator of a session with a build, else `recordings-video/` of the state folder.
     func folder(for sim: Simulator, in wb: Workbench) -> URL {
         let store = wb.sessions.store
-        if let key = wb.sessions.session(forSimulator: sim)?.build?.key {
+        // The build the simulator is running (a stored build's folder names it), else its session's newest build.
+        let builds = store.builds.standardizedFileURL.path + "/"
+        let apk = sim.apk.standardizedFileURL.path
+        let running = apk.hasPrefix(builds) ? apk.dropFirst(builds.count).split(separator: "/").first.map(String.init) : nil
+        if let key = running ?? wb.sessions.session(forSimulator: sim)?.build?.key {
             return store.root.appendingPathComponent("evidence/\(key)/video", isDirectory: true)
         }
         return store.root.appendingPathComponent("recordings-video", isDirectory: true)
