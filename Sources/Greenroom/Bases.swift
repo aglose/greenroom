@@ -33,6 +33,8 @@ struct BuildOffer: Equatable {
     /// Why CI could not give it (empty when it was not asked).
     var ciReason: String
     var options: [Option] = [.localInWorktree, .remote]
+    /// The commit is a pull request's head: anyone's code. Building it runs its build scripts on this Mac.
+    var fromPullRequest = false
 
     var message: String {
         let short = String(sha.prefix(7))
@@ -41,6 +43,7 @@ struct BuildOffer: Equatable {
         s += ": none is stored, "
         s += ciReason.isEmpty ? "CI was not asked" : "CI gave none (\(ciReason))"
         s += ", and no worktree is at that commit with a fresh APK. It can be built: check it out in a worktree and build it with the local recipe, or use the remote recipe. Greenroom does not start a build in a scratch worktree by itself."
+        if fromPullRequest { s += " Careful: this is a pull request's code, and building it with the local recipe runs that code's build scripts on this Mac." }
         return s
     }
 }
@@ -122,9 +125,9 @@ enum GH {
 
     struct Pull: Equatable { var number: Int; var sha: String; var ref: String; var title: String }
 
-    /// `gh pr view SELECTOR --json headRefOid,headRefName,title` in the repository `dir` is in.
-    static func pull(_ selector: String, number: Int, in dir: URL) async -> (Pull?, String) {
-        let r = await run(["pr", "view", selector, "--json", "headRefOid,headRefName,title"], in: dir)
+    /// `gh pr view N -R SLUG --json headRefOid,headRefName,title` in the repository `dir` is in (`slug` nil: gh's own guess).
+    static func pull(number: Int, slug: String?, in dir: URL) async -> (Pull?, String) {
+        let r = await run(["pr", "view", String(number)] + (slug.map { ["-R", $0] } ?? []) + ["--json", "headRefOid,headRefName,title"], in: dir)
         guard r.status == 0 else { return (nil, r.status == 127 ? r.err : "gh could not read pull request \(number): \(why(r))") }
         guard let obj = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any],
               let sha = obj["headRefOid"] as? String, !sha.isEmpty else { return (nil, "gh gave no commit for pull request \(number)") }
@@ -140,8 +143,9 @@ enum PullRequestRef {
         if t.isEmpty { return nil }
         let digits = t.hasPrefix("#") ? String(t.dropFirst()) : t
         if let n = Int(digits), n > 0 { return (n, nil) }
-        guard let url = URL(string: t), let host = url.host?.lowercased(), host == "github.com" || host.hasSuffix(".github.com") else { return nil }
-        let parts = url.pathComponents.filter { $0 != "/" }
+        // An address: its host, and the path alone (a #fragment or ?query is not part of it).
+        guard let c = URLComponents(string: t), let host = c.host?.lowercased(), host == "github.com" || host.hasSuffix(".github.com") else { return nil }
+        let parts = c.path.split(separator: "/").map(String.init)
         guard parts.count >= 4, parts[2] == "pull", let n = Int(parts[3]), n > 0 else { return nil }
         return (n, parts[0] + "/" + parts[1])
     }
@@ -159,12 +163,17 @@ enum Bases {
 
     /// The `ci` recipe for one commit, with no session and no queue: it only reads from GitHub. The APK is filed in
     /// the store as a CI build of that commit. `onLine` gets the recipe's log on the main thread.
-    static func fetchCI(sha: String, ref: String?, workspace: Workspace, store: SessionStore, onLine: ((String) -> Void)? = nil) async -> (Build?, String) {
+    static func fetchCI(sha: String, ref: String?, workspace: Workspace, store: SessionStore, slug: String? = nil, onLine: ((String) -> Void)? = nil) async -> (Build?, String) {
         guard let recipe = workspace.recipe(named: "ci") else { return (nil, "there is no ci recipe") }
         let scratch = store.root.appendingPathComponent("sessions/work/ci-\(String(sha.prefix(7)))-\(UUID().uuidString.prefix(6))", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
+        // Looking for what CI already built must never start a workflow: only an explicit Build on a row does.
+        var extra = workspace.recipeEnvironment
+        extra["GREENROOM_CI_DISPATCH"] = "0"
+        let known = await GitHubRemote.repoSlug(for: workspace.root)
+        if let s = slug ?? known { extra["GREENROOM_REPO_SLUG"] = s }
         let job = RecipeJob(worktree: workspace.root, repo: workspace.root, ref: ref ?? "", sha: sha, dirty: false, module: workspace.module ?? "",
-                            variant: workspace.variant, out: scratch.appendingPathComponent("app.apk"), extra: workspace.recipeEnvironment)
+                            variant: workspace.variant, out: scratch.appendingPathComponent("app.apk"), extra: extra)
         let run = RecipeRun(recipe: recipe, job: job)
         run.onLine = onLine
         track(run, true)
@@ -183,11 +192,11 @@ enum Bases {
     /// A commit's build: the stored one, else the `ci` recipe, else an existing worktree already at that commit with
     /// a fresh APK, else an offer to build it.
     static func resolve(sha: String, ref: String?, in workspace: Workspace, sessions: [Session], store: SessionStore,
-                        onLine: ((String) -> Void)? = nil) async -> BaseResolution {
+                        pullRequest: Bool = false, slug: String? = nil, onLine: ((String) -> Void)? = nil) async -> BaseResolution {
         if let b = store.build(forSha: sha) { return .build(b) }
         var ciReason = ""
         if workspace.recipes["ci"] != nil || GitHubRemote.has(workspace.root) {
-            let (build, why) = await fetchCI(sha: sha, ref: ref, workspace: workspace, store: store, onLine: onLine)
+            let (build, why) = await fetchCI(sha: sha, ref: ref, workspace: workspace, store: store, slug: slug, onLine: onLine)
             if let build { return .build(build) }
             ciReason = why.split(separator: "\n").last.map(String.init) ?? why
         } else {
@@ -199,7 +208,7 @@ enum Bases {
             let build = await Task.detached { store.record(apk: apk, source: .local, sha: head, ref: branch, dirty: false, date: outputs.date) }.value
             if let build { return .build(build) }
         }
-        return .offer(BuildOffer(sha: sha, ref: ref, ciReason: ciReason))
+        return .offer(BuildOffer(sha: sha, ref: ref, ciReason: ciReason, fromPullRequest: pullRequest))
     }
 
     /// `resolve(base:in:)` of the plan. `worktree` is the one the base branch's merge base is taken from (the
@@ -232,9 +241,10 @@ enum Bases {
             }
             return .failed("No branch or commit called \(name) in \(workspace.root.lastPathComponent). Fetch it (git fetch) or check the name.")
         case .pullRequest(let n):
-            let (pr, why) = await GH.pull(String(n), number: n, in: workspace.root)
+            let slug = await GitHubRemote.repoSlug(for: workspace.root)
+            let (pr, why) = await GH.pull(number: n, slug: slug, in: workspace.root)
             guard let pr else { return .failed(why) }
-            return await resolve(sha: pr.sha, ref: pr.ref.isEmpty ? nil : pr.ref, in: workspace, sessions: sessions, store: store, onLine: onLine)
+            return await resolve(sha: pr.sha, ref: pr.ref.isEmpty ? nil : pr.ref, in: workspace, sessions: sessions, store: store, pullRequest: true, slug: slug, onLine: onLine)
         }
     }
 }

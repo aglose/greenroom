@@ -9,13 +9,20 @@
 #   GREENROOM_REMOTE_SANDBOX  an existing sandbox's id: resumed for each build and stopped (not deleted) after it,
 #                             so Gradle's caches stay and the next build is incremental.
 #   GREENROOM_REMOTE_TEMPLATE a snapshot to create a sandbox from when there is no sandbox id. The new id is
-#                             printed: put it in the sandbox setting to keep it.
+#                             saved by Greenroom into the sandbox setting, so the next build reuses it.
+#   GREENROOM_REMOTE_WAIT     seconds the build may take before the script gives up (3600).
 # "Prepare remote builder" in Greenroom shows how to make the template (a JDK, the Android SDK).
 #
 # What is uploaded: `git archive HEAD` (the committed tree: files marked export-ignore in .gitattributes are left
 # out), `git diff HEAD --binary` (every uncommitted change to tracked files, deletions too) and the untracked files
 # that .gitignore does not ignore. Ignored files (build output, local.properties, secrets in ignored files) stay.
-# The sandbox is stopped when the script ends, whether it built, failed or was cancelled.
+# Untracked files whose names look like secrets (*.jks, *.keystore, *.p12, .env*, keystore.properties,
+# local.properties, google-services.json, *.pem, id_rsa*) are NOT uploaded, and the log says which were left out;
+# nested repositories and symlinks that leave the tree are skipped too. The names of what is uploaded are printed.
+# The sandbox is stopped when the script ends, whether it built, failed or was cancelled (a SIGTERM runs the same
+# cleanup). Its id and the temporary folder are written to remote-state beside GREENROOM_OUT as soon as they exist;
+# if the script is killed without cleanup, the next run (or the next launch of Greenroom) stops that sandbox.
+# The source stays in the stopped sandbox until you delete it.
 set -eu
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -46,11 +53,34 @@ poll="${GREENROOM_REMOTE_POLL:-5}"
 [ -n "$sandbox$template" ] || die "no sandbox is set. Put a sandbox id (or a template snapshot to create one from) in the workspace's settings; Prepare remote builder in Greenroom shows how to make one."
 git rev-parse --verify HEAD >/dev/null 2>&1 || die "this worktree has no commit yet: the remote recipe uploads HEAD and your changes on top of it"
 
+case "$module" in *[!A-Za-z0-9_:./-]*) die "the module '$module' has characters a remote command may not carry. Use letters, digits and _ : . / - in the workspace's module setting." ;; esac
+case "$variant" in ''|*[!A-Za-z0-9_:./-]*) die "the variant '$variant' has characters a remote command may not carry. Use letters, digits and _ : . / - in the workspace's variant setting." ;; esac
+
 home=/home/user
 wd="$home/greenroom"
+state="$(dirname "$out")/remote-state"
+
+# A run that was killed without cleanup left its sandbox running and its temporary folder behind: they are in the
+# state file. Stop that sandbox and remove the folder first.
+if [ -f "$state" ]; then
+  old_sid="$(sed -n 's/^sandbox=//p' "$state" | head -n 1)"
+  old_tmp="$(sed -n 's/^tmp=//p' "$state" | head -n 1)"
+  case "$old_tmp" in */greenroom-remote.*) rm -rf "$old_tmp" ;; esac
+  if [ -n "$old_sid" ]; then
+    echo "stopping sandbox $old_sid, which an earlier run left running"
+    if boat_stop "$old_sid" >/dev/null 2>&1; then rm -f "$state"; else echo "warning: could not stop sandbox $old_sid. Stop it yourself (boat stop $old_sid): it may still be running and billing."; fi
+  else
+    rm -f "$state"
+  fi
+fi
+
 tmp="$(mktemp -d -t greenroom-remote)"
 sid=""
 stopped=0
+stop_ok=1
+mkdir -p "$(dirname "$out")"
+record_state() { { echo "root=${GREENROOM_REPO:-}"; echo "tmp=$tmp"; echo "sandbox=$sid"; } > "$state.part" && mv "$state.part" "$state"; }
+record_state
 
 # The sandbox is stopped on every way out. The stop runs in a session of its own: a cancel signals this whole
 # process group and kills it two seconds later, and a stop that is still talking to boat must survive that.
@@ -65,9 +95,16 @@ stop_sandbox() {
   else
     boat_stop "$sid" >/dev/null 2>&1 || rc=$?
   fi
-  [ "$rc" = 0 ] || echo "warning: could not stop sandbox $sid. Stop it yourself (boat stop $sid): it may still be running and billing."
+  if [ "$rc" != 0 ]; then
+    stop_ok=0
+    echo "warning: could not stop sandbox $sid. Stop it yourself (boat stop $sid): it may still be running and billing."
+  fi
 }
-cleanup() { stop_sandbox; rm -rf "$tmp"; }
+cleanup() {
+  stop_sandbox
+  rm -rf "$tmp"
+  if [ "$stop_ok" = 1 ]; then rm -f "$state" "$state.part"; else { echo "root=${GREENROOM_REPO:-}"; echo "sandbox=$sid"; } > "$state"; fi
+}
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -75,6 +112,7 @@ trap 'exit 143' TERM
 # 1. The sandbox: resumed, or made from the template.
 if [ -n "$sandbox" ]; then
   sid="$sandbox"
+  record_state
   echo "resuming sandbox $sid"
   boat_start "$sid" || die "boat could not resume the sandbox $sid. Is boat signed in (boat login, or BOAT_API_KEY), and is the id in the workspace's settings right?"
 else
@@ -82,7 +120,9 @@ else
   new="$(boat_new "$template")" || die "boat could not create a sandbox from the template $template. Is boat signed in (boat login, or BOAT_API_KEY), and is the template right?"
   [ -n "$new" ] || die "boat did not say which sandbox it created"
   sid="$new"
-  echo "remote sandbox: $sid  (put this id in the workspace's remote sandbox setting to reuse it, so Gradle's caches stay)"
+  record_state
+  echo "greenroom: sandbox-created $sid"
+  echo "remote sandbox: $sid (Greenroom keeps this id in the workspace's settings, so the next build reuses it and Gradle's caches stay)"
 fi
 
 # 2. The tree: one archive with the committed files, the uncommitted diff, the untracked files and the scripts.
@@ -90,9 +130,40 @@ echo "packing HEAD, the uncommitted changes and the untracked files"
 pack="$tmp/pack"; mkdir -p "$pack"
 export COPYFILE_DISABLE=1        # no AppleDouble files in the archives
 git archive --format=tar HEAD > "$pack/src.tar"
-git diff HEAD --binary > "$pack/changes.patch"
-git ls-files -o --exclude-standard -z > "$tmp/untracked.list"
-if [ -s "$tmp/untracked.list" ]; then tar --null -T "$tmp/untracked.list" -cf "$pack/untracked.tar"; fi
+git diff HEAD --binary --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/ > "$pack/changes.patch"
+
+# Untracked files, one by one: git lists a nested repository as "dir/" and tar would take everything inside it,
+# ignored files and its .git included, so only entries git named as files are uploaded. Secrets are left out.
+top="$(pwd -P)"
+: > "$tmp/untracked.list"
+sent=0; sent_names=""; left=""; skipped=""
+while IFS= read -r -d '' f; do
+  case "$f" in
+    */) skipped="$skipped $f"; continue ;;
+  esac
+  lower="$(printf '%s' "${f##*/}" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    *.jks|*.keystore|*.p12|.env|.env.*|.env*|keystore.properties|local.properties|google-services.json|*.pem|id_rsa*) left="$left $f"; continue ;;
+  esac
+  if [ -L "$f" ]; then
+    target="$(perl -MCwd=realpath -e 'my $r = realpath($ARGV[0]); print $r if defined $r' "$f" 2>/dev/null || true)"
+    case "$target" in "$top"/*) ;; *) skipped="$skipped $f(symlink out of the tree)"; continue ;; esac
+  elif [ ! -f "$f" ]; then
+    skipped="$skipped $f"; continue
+  fi
+  printf '%s\0' "$f" >> "$tmp/untracked.list"
+  sent=$((sent + 1))
+  if [ "$sent" -le 40 ]; then sent_names="$sent_names $f"; fi
+done < <(git ls-files -o --exclude-standard -z)
+if [ "$sent" -gt 0 ]; then
+  tar --null -T "$tmp/untracked.list" -cf "$pack/untracked.tar"
+  more=""; [ "$sent" -le 40 ] || more=" and $((sent - 40)) more"
+  echo "uploading $sent untracked file(s):${sent_names}${more}"
+else
+  echo "no untracked files to upload"
+fi
+[ -z "$left" ] || echo "left out, their names look like secrets (never uploaded):$left"
+[ -z "$skipped" ] || echo "skipped, not plain files of this tree (a nested repository is its own repository):$skipped"
 
 cat > "$pack/run.sh" <<'RUN'
 #!/bin/sh
@@ -178,11 +249,14 @@ echo "build started in sandbox $sid"
 
 # 4. Follow the log until the exit status appears.
 k=1; status=""; bad=0
+limit="${GREENROOM_REMOTE_WAIT:-3600}"
+began=$SECONDS
 while :; do
+  [ $((SECONDS - began)) -lt "$limit" ] || die "the remote build did not finish within $limit seconds, so it was given up on (GREENROOM_REMOTE_WAIT). The sandbox $sid is stopped, and the build with it."
   sleep "$poll"
   if ! resp="$(boat_exec "$sid" "$wd" "sh ./poll.sh $k")"; then
     bad=$((bad + 1))
-    [ "$bad" -lt 6 ] || die "lost contact with the sandbox $sid while the build ran: boat exec kept failing"
+    [ "$bad" -lt 6 ] || die "lost contact with the sandbox $sid while the build ran: boat exec kept failing, so it may have stopped or been deleted"
     continue
   fi
   bad=0

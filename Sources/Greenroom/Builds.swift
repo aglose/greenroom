@@ -31,6 +31,8 @@ final class BuildJob {
     fileprivate var logFile: URL
     /// The workspace's recipe settings, as the recipe's environment (RecipeSettings.swift).
     fileprivate var extra: [String: String]
+    /// A sandbox the remote recipe made from a template (it says so in a line of its log).
+    fileprivate(set) var createdSandbox: String?
 
     init(session: Session, workspace: Workspace, recipeName: String, recipe: Recipe, store: SessionStore) {
         self.session = session.worktree.path
@@ -140,7 +142,9 @@ final class Builds {
             let sha = state?.head ?? hint?.head ?? ""
             let ref = state?.branch ?? hint?.branch ?? ""
             let dirty = state?.dirty ?? hint?.dirty ?? false
-            let rj = RecipeJob(worktree: wt, repo: job.workspace, ref: ref, sha: sha, dirty: dirty, module: job.module, variant: job.variant, out: job.out, extra: job.extra)
+            var extra = job.extra
+            if let slug = await GitHubRemote.repoSlug(for: wt) { extra["GREENROOM_REPO_SLUG"] = slug }
+            let rj = RecipeJob(worktree: wt, repo: job.workspace, ref: ref, sha: sha, dirty: dirty, module: job.module, variant: job.variant, out: job.out, extra: extra)
             let run = RecipeRun(recipe: job.recipe, job: rj)
             job.run = run
             if job.cancelRequested {
@@ -150,6 +154,7 @@ final class Builds {
             run.onLine = { [weak self, weak job] line in
                 guard let self, let job else { return }
                 job.append(line)
+                if line.hasPrefix("greenroom: sandbox-created ") { job.createdSandbox = String(line.dropFirst(27)).trimmingCharacters(in: .whitespaces) }
                 self.onLine?(job, line)
             }
             run.start { [weak self] outcome in
@@ -161,6 +166,8 @@ final class Builds {
     private func finish(_ job: BuildJob, outcome: RecipeOutcome, store: SessionStore, sha: String, ref: String, dirty: Bool) {
         let work = job.logFile.deletingLastPathComponent()
         let log = job.run?.logText ?? (job.lines.joined(separator: "\n") + "\n")
+        // The remote recipe made a sandbox from a template: keep its id in the workspace's settings, so the next build resumes it.
+        if let made = job.createdSandbox { sessions?.noteCreatedSandbox(made, workspaceRoot: job.workspace.path) }
         let release = { [self] in
             running[job.workspace.path] = nil
             onChange?()

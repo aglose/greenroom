@@ -125,50 +125,77 @@ enum GitHubRemote {
     }
 
     static func has(_ root: URL) -> Bool { !slugs(of: root).isEmpty }
+
+    /// `owner/repo` the recipes are told (GREENROOM_REPO_SLUG): the GitHub remote the worktree's upstream uses, else
+    /// `origin`, else the first GitHub remote there is. gh is then told with -R, never left to guess.
+    static func repoSlug(for worktree: URL) async -> String? {
+        async let upstreamOut = Git.run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], in: worktree)
+        async let remotesOut = Git.run(["config", "--get-regexp", "^remote\\..*\\.(push)?url$"], in: worktree)
+        let upstream = (await upstreamOut)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var byRemote: [(name: String, slug: String)] = []
+        for line in (await remotesOut ?? "").split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count == 2, parts[0].hasPrefix("remote."), let slug = slug(of: parts[1]) else { continue }
+            var name = String(parts[0].dropFirst(7))
+            for suffix in [".pushurl", ".url"] where name.hasSuffix(suffix) { name = String(name.dropLast(suffix.count)); break }
+            byRemote.append((name, slug))
+        }
+        // The longest remote name that starts the upstream's name ("origin/main", or "my/fork/main" for a remote "my/fork").
+        if let up = byRemote.filter({ upstream.hasPrefix($0.name + "/") }).max(by: { $0.name.count < $1.name.count }) { return up.slug }
+        return byRemote.first { $0.name == "origin" }?.slug ?? byRemote.first?.slug
+    }
     static func forget(_ root: URL) { lock.lock(); cache[root.path] = nil; lock.unlock() }
 }
 
 /// "CI has a1b2c3d, 2 commits behind": what the `ci` recipe would build when it is older than the worktree.
 enum CIBehind {
     /// The row's words, or nil when CI would build what the worktree is. `ciSha` is the commit the worktree's
-    /// upstream is at (the newest one GitHub can have).
-    static func describe(ciSha: String, ahead: Int, dirty: Bool) -> String? {
+    /// upstream is at (the newest one GitHub can have). "CI has" only when a CI run of it is known (`known`: the
+    /// store holds a CI build of it); otherwise it is only what is pushed.
+    static func describe(ciSha: String, ahead: Int, dirty: Bool, known: Bool = true) -> String? {
         let short = String(ciSha.prefix(7))
-        if ahead > 0 { return "CI has \(short), \(ahead) commit\(ahead == 1 ? "" : "s") behind" }
-        if dirty { return "CI has \(short), without your edits" }
+        let head = known ? "CI has \(short)" : "pushed: \(short)"
+        if ahead > 0 { return head + ", \(ahead) commit\(ahead == 1 ? "" : "s") behind" }
+        if dirty { return head + ", without your edits" }
         return nil
     }
 
     private static let lock = NSLock()
-    private static var shas: [String: String] = [:]      // worktree path + head -> upstream tip ("" for none)
+    /// worktree path + head + ahead -> the upstream's commit and when it was read ("" for none).
+    private static var shas: [String: (sha: String, at: Date)] = [:]
     private static var asking = Set<String>()
+    static var maxAge: TimeInterval = 20
 
     private static func learned(_ key: String, _ sha: String) {
         lock.lock(); defer { lock.unlock() }
-        shas[key] = sha
+        shas[key] = (sha, Date())
         asking.remove(key)
     }
 
-    /// The words for a session's row, from what is known now; the upstream's commit is asked of git in the
-    /// background the first time and `then` runs on the main thread once it is known.
-    static func note(for s: Session, then: @escaping () -> Void) -> String? {
+    /// The words for a session's row, from what is known now. The upstream's commit moves when a fetch lands, so it
+    /// is asked of git again in the background once it is `maxAge` old (the old answer stands meanwhile) and `then`
+    /// runs on the main thread when it is known.
+    static func note(for s: Session, store: SessionStore? = nil, then: @escaping () -> Void) -> String? {
         guard s.ahead > 0 || s.dirty else { return nil }
-        let key = s.worktree.path + "@" + s.head
+        let key = s.worktree.path + "@" + s.head + "+" + String(s.ahead)
         lock.lock()
         let known = shas[key]
         let busy = asking.contains(key)
-        if known == nil && !busy { asking.insert(key) }
+        let stale = known.map { Date().timeIntervalSince($0.at) > maxAge } ?? true
+        if stale && !busy { asking.insert(key) }
         lock.unlock()
-        if let known { return known.isEmpty ? nil : describe(ciSha: known, ahead: s.ahead, dirty: s.dirty) }
-        if !busy {
+        if stale && !busy {
             let wt = s.worktree
             Task {
                 let out = await Git.run(["rev-parse", "--verify", "--quiet", "@{upstream}"], in: wt)
                 let sha = out?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let changed = sha != known?.sha
                 learned(key, sha)
-                await MainActor.run { then() }
+                if changed { await MainActor.run { then() } }
             }
         }
-        return nil
+        guard let k = known, !k.sha.isEmpty else { return nil }
+        let isKnown = (store ?? SessionStore.shared).build(forSha: k.sha)?.source == .ci
+        return describe(ciSha: k.sha, ahead: s.ahead, dirty: s.dirty, known: isKnown)
     }
 }

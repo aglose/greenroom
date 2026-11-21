@@ -8,16 +8,17 @@ enum RemoteConsent {
     /// The words the person answers. They say it in these words on purpose (docs/SESSIONS-PLAN.md, "Privacy").
     static func text(repo: String) -> (message: String, detail: String) {
         ("Upload \(repo)'s source code to your boat.dev account?",
-         "The remote recipe uploads this repository's source code to your own boat.dev account, and builds it there. It sends the committed files, your uncommitted changes and the untracked files that .gitignore does not ignore, with the boat command-line tool and your own sign-in. Greenroom sends nothing itself, and the built APK comes back to this Mac: no APK is ever uploaded.\n\nThe sandbox is stopped when the build ends. Your answer is kept for this repository only; you can take it back from the Build menu.")
+         "The remote recipe uploads this repository's source code to your own boat.dev account, and builds it there, with the boat command-line tool and your own sign-in. It sends the committed files, your uncommitted changes, and the untracked files that .gitignore does not ignore, except those named like secrets (*.jks, *.keystore, *.p12, .env*, keystore.properties, local.properties, google-services.json, *.pem, id_rsa*), which stay here and are listed in the build log. Nested repositories are not sent.\n\nBe careful: a secret in an untracked file with an ordinary name is uploaded.\n\nGreenroom sends nothing itself, and the built APK comes back to this Mac: no APK is ever uploaded. The sandbox is stopped when a build ends normally or is cancelled, and at the next launch if the app was killed; the source stays in the stopped sandbox until you delete it on boat.dev. Your answer is kept for this repository only; you can take it back from the Build menu.")
     }
 
+    /// The first button is the default: "Don't Upload".
     static func makeAlert(repo: String) -> NSAlert {
         let t = text(repo: repo)
         let alert = NSAlert()
         alert.messageText = t.message
         alert.informativeText = t.detail
-        alert.addButton(withTitle: "Upload for \(repo)")
         alert.addButton(withTitle: "Don't Upload")
+        alert.addButton(withTitle: "Upload for \(repo)")
         return alert
     }
 }
@@ -95,7 +96,7 @@ extension SessionsController {
         let alert = RemoteConsent.makeAlert(repo: repo)
         alert.beginSheetModal(for: window) { [weak self] r in
             guard let self else { return }
-            let yes = r == .alertFirstButtonReturn
+            let yes = r == .alertSecondButtonReturn
             self.setRemoteConsent(yes, forRoot: ws.root.path)
             if yes { then() }
         }

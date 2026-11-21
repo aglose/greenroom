@@ -122,12 +122,13 @@ enum ProcessGroup {
 
     /// Reads the child's output until it has exited and its pipe is drained, calling `onData`. The pipe being closed
     /// (a recipe that closes stdout and goes on) does not end the wait; the child's exit does. After the exit a
-    /// grace of a second for a pipe a grandchild still holds. At `deadline` the whole group gets SIGKILL.
+    /// grace of a second for a pipe a grandchild still holds. At `deadline` the whole group gets SIGTERM, so a recipe's trap can clean up (a remote sandbox to stop), and SIGKILL `grace` seconds later (at once with 0).
     /// `reaped` runs the moment the child is reaped, so a later kill of its pid can be skipped.
-    static func drain(_ c: Child, deadline: Date, onData: (Data) -> Void, reaped: () -> Void) -> Drained {
+    static func drain(_ c: Child, deadline: Date, grace: TimeInterval = 0, onData: (Data) -> Void, reaped: () -> Void) -> Drained {
         var status: Int32 = 0
         var exited = false, eof = false, timedOut = false
         var exitedAt: Date?
+        var killedAt: Date?
         var buf = [UInt8](repeating: 0, count: 8192)
         while true {
             if !eof {
@@ -143,8 +144,12 @@ enum ProcessGroup {
             }
             if !exited, waitpid(c.pid, &status, WNOHANG) == c.pid { exited = true; exitedAt = Date(); reaped() }
             if exited && (eof || Date().timeIntervalSince(exitedAt!) > 1) { break }
-            if !timedOut, Date() > deadline { timedOut = true; killpg(c.pid, SIGKILL) }
-            if timedOut, Date() > deadline.addingTimeInterval(5), !exited { break }   // unkillable: give up waiting
+            if !timedOut, Date() > deadline {
+                timedOut = true
+                if grace > 0 { killpg(c.pid, SIGTERM) } else { killpg(c.pid, SIGKILL); killedAt = Date() }
+            }
+            if timedOut, killedAt == nil, Date() > deadline.addingTimeInterval(grace) { killpg(c.pid, SIGKILL); killedAt = Date() }
+            if let k = killedAt, Date() > k.addingTimeInterval(5), !exited { break }   // unkillable: give up waiting
         }
         close(c.fd)
         if exited { killpg(c.pid, SIGKILL) }   // whatever is left of the group
@@ -298,23 +303,29 @@ final class RecipeRun {
         }
     }
 
-    /// Ends the recipe and everything it started in its group (SIGTERM, then SIGKILL after two seconds unless it has
+    /// Ends the recipe and everything it started in its group (SIGTERM, then SIGKILL after ten seconds, time for a remote recipe to stop its sandbox, unless it has
     /// been reaped by then: its pid may be someone else's by then).
     func cancel() {
         lock.lock(); cancelled = true; let p = pid; lock.unlock()
         guard p > 0 else { return }
         killpg(p, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self else { return }
             self.lock.lock(); let gone = self.reaped; self.lock.unlock()
             if !gone { killpg(p, SIGKILL) }
         }
     }
 
-    /// At once and without waiting, for the app quitting: SIGKILL to the group.
-    func killNow() {
+    /// For the app quitting.
+    /// SIGTERM first, so the recipe's own cleanup runs (a remote recipe stops its sandbox); the group gets up to
+    /// `grace` seconds to end, then SIGKILL. Blocks for that long at most.
+    func killNow(grace: TimeInterval = 10) {
         lock.lock(); cancelled = true; let p = pid; let gone = reaped; lock.unlock()
-        if p > 0 && !gone { killpg(p, SIGKILL) }
+        guard p > 0 && !gone else { return }
+        killpg(p, SIGTERM)
+        let end = Date().addingTimeInterval(grace)
+        while Date() < end, killpg(p, 0) == 0 { usleep(50_000) }
+        if killpg(p, 0) == 0 { killpg(p, SIGKILL) }
     }
 
     private func add(_ new: [String]) {
@@ -345,7 +356,7 @@ final class RecipeRun {
 
         var splitter = LineSplitter()
         let started = Date()
-        let r = ProcessGroup.drain(child, deadline: started.addingTimeInterval(timeout),
+        let r = ProcessGroup.drain(child, deadline: started.addingTimeInterval(timeout), grace: 10,
                                    onData: { add(splitter.feed($0)) },
                                    reaped: { lock.lock(); reaped = true; lock.unlock() })
         if let last = splitter.finish() { add([last]) }

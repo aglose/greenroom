@@ -96,6 +96,9 @@ enum RecipesCheck {
             #!/bin/bash
             S="${CHECK_GH:?}"
             echo "gh $*" >> "$S/calls.log"
+            a=(); skip=0
+            for x in "$@"; do if [ $skip = 1 ]; then skip=0; elif [ "$x" = -R ]; then skip=1; else a+=("$x"); fi; done
+            set -- "${a[@]}"
             case "$1" in
               auth) [ -e "$S/noauth" ] && { echo "You are not logged into any GitHub hosts. Run gh auth login to authenticate." >&2; exit 1; }; exit 0 ;;
               run)
@@ -110,6 +113,7 @@ enum RecipesCheck {
                     fi
                     f="$S/runs-$sha.tsv"; [ -f "$f" ] || f="$S/runs.tsv"; [ -f "$f" ] && cat "$f"; exit 0 ;;
                   watch)
+                    [ -f "$S/watch.fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
                     sleep 1
                     c="success"; [ -f "$S/watch.final" ] && c="$(cat "$S/watch.final")"
                     awk -F'\t' -v id="$3" -v c="$c" 'BEGIN{OFS="\t"} $1==id{$2="completed";$3=c} {print}' "$S/runs.tsv" > "$S/runs.tmp" && mv "$S/runs.tmp" "$S/runs.tsv"
@@ -123,8 +127,17 @@ enum RecipesCheck {
                     for f in $files; do case "$f" in *.apk) cp "${CHECK_GH_APK:?}" "$dir/$f" ;; *) echo x > "$dir/$f" ;; esac; done ;;
                 esac ;;
               api)
-                id="$(printf '%s' "$2" | sed -E 's|.*/runs/([0-9]+)/artifacts.*|\1|')"
-                [ -f "$S/artifacts-$id.txt" ] && cat "$S/artifacts-$id.txt"; exit 0 ;;
+                path=""; for x in "$@"; do case "$x" in repos/*) path="$x" ;; esac; done
+                case "$path" in
+                  */git/ref/heads/*) [ -f "$S/refsha" ] && { cat "$S/refsha"; exit 0; }; exit 1 ;;
+                  */artifacts*)
+                    id="$(printf '%s' "$path" | sed -E 's|.*/runs/([0-9]+)/artifacts.*|\1|')"
+                    [ -f "$S/artifacts-$id.txt" ] || exit 0
+                    while IFS= read -r n; do
+                      e=false; [ -f "$S/expired.txt" ] && grep -qx "$n" "$S/expired.txt" && e=true
+                      printf '%s\t%s\n' "$n" "$e"
+                    done < "$S/artifacts-$id.txt"; exit 0 ;;
+                esac ;;
               workflow) echo 2 > "$S/dispatched" ;;
               pr)
                 n="${3##*/}"; n="$(printf '%s' "$n" | tr -d '#')"
@@ -255,11 +268,13 @@ enum RecipesCheck {
                    && GitHubRemote.slug(of: "ssh://git@github.com/example/app.git") == "example/app" && GitHubRemote.slug(of: "https://gitlab.com/example/app.git") == nil
                    && GitHubRemote.slug(of: "/tmp/origin.git") == nil, "GitHub remotes are recognised in https, ssh and scp form, and others are not")
             expect(PullRequestRef.parse("42")?.number == 42 && PullRequestRef.parse("#7")?.number == 7
-                   && PullRequestRef.parse("https://github.com/o/r/pull/9")?.slug == "o/r" && PullRequestRef.parse("https://github.com/o/r/issues/9") == nil && PullRequestRef.parse("x") == nil,
+                   && PullRequestRef.parse("https://github.com/o/r/pull/9")?.slug == "o/r" && PullRequestRef.parse("https://github.com/o/r/issues/9") == nil && PullRequestRef.parse("x") == nil
+                   && PullRequestRef.parse("https://github.com/o/r/pull/9#issuecomment-5")?.number == 9 && PullRequestRef.parse("https://github.com/o/r/pull/9/files?w=1")?.slug == "o/r",
                    "a pull request is a number, #number or an address")
             expect(CIBehind.describe(ciSha: mainSha, ahead: 2, dirty: false) == "CI has \(originShort), 2 commits behind"
                    && CIBehind.describe(ciSha: mainSha, ahead: 1, dirty: true) == "CI has \(originShort), 1 commit behind"
-                   && CIBehind.describe(ciSha: mainSha, ahead: 0, dirty: true) == "CI has \(originShort), without your edits" && CIBehind.describe(ciSha: mainSha, ahead: 0, dirty: false) == nil,
+                   && CIBehind.describe(ciSha: mainSha, ahead: 0, dirty: true) == "CI has \(originShort), without your edits" && CIBehind.describe(ciSha: mainSha, ahead: 0, dirty: false) == nil
+                   && CIBehind.describe(ciSha: mainSha, ahead: 2, dirty: false, known: false) == "pushed: \(originShort), 2 commits behind",
                    "the row's CI note: commits behind, edits not in it, nothing when CI has what the worktree is")
 
             // ===== 1. The recipe menu offers ci only with a GitHub remote ========================================
@@ -281,7 +296,7 @@ enum RecipesCheck {
             var b1: Build?
             if case .built(let x)? = j1?.state { b1 = x }
             let list1 = ghCalls()
-            expect(b1?.key == ciKey && b1?.source == .ci && b1?.sha == mainSha && b1?.dirty == false && list1.contains { $0.hasPrefix("gh run list --commit \(mainSha)") } && list1.contains { $0.hasPrefix("gh run download 101 -n app-debug") },
+            expect(b1?.key == ciKey && b1?.source == .ci && b1?.sha == mainSha && b1?.dirty == false && list1.contains { $0.hasPrefix("gh run list -R example/app --commit \(mainSha)") } && list1.contains { $0.hasPrefix("gh run download -R example/app 101 -n app-debug") },
                    "a finished run: gh run list, gh run download -n app-debug, and the APK is a CI Build of that commit (\(failure(j1)))")
             _ = await wait("b's build", 20) { row("b")?.build?.key == ciKey }
             expect(row("b")?.build?.key == ciKey, "the session's newest build is the CI one")
@@ -289,17 +304,24 @@ enum RecipesCheck {
             // ===== 3. an in-progress run is waited for ===========================================================
             ghReset(runs: ["102\tin_progress\t\tCI"], artifacts: ["102": ["app-debug"]])
             let j2 = await build(row("b"), "ci")
-            expect(builtKey(j2) == ciKey && ghCalls().contains { $0.hasPrefix("gh run watch 102") } && (j2?.lines.contains { $0.contains("waiting for CI run 102") } ?? false),
+            expect(builtKey(j2) == ciKey && ghCalls().contains { $0.hasPrefix("gh run watch -R example/app 102") } && (j2?.lines.contains { $0.contains("waiting for CI run 102") } ?? false),
                    "an in-progress run: gh run watch, then its artifact (\(failure(j2)))")
 
             // ===== 4. no run + a workflow: dispatched, the run waited for ========================================
             ghReset(artifacts: ["9001": ["app-debug"]])
             write(ghState.appendingPathComponent("runs-after-dispatch.tsv"), "9001\tcompleted\tsuccess\tCI\n")
+            write(ghState.appendingPathComponent("refsha"), (row("b")?.head ?? "") + "\n")
             setWS { $0.ci.workflow = "ci.yml" }
             let j3 = await build(row("b"), "ci")
             let c3 = ghCalls()
-            expect(builtKey(j3) == ciKey && c3.contains("gh workflow run ci.yml --ref feat-b") && c3.filter { $0.hasPrefix("gh run list") }.count >= 3 && c3.contains { $0.hasPrefix("gh run download 9001") },
-                   "no run and a workflow set: gh workflow run ci.yml --ref feat-b, then the run that appeared (\(failure(j3)); \(c3.filter { $0.hasPrefix("gh run list") }.count) lists)")
+            expect(builtKey(j3) == ciKey && c3.contains("gh workflow run -R example/app ci.yml --ref feat-b") && c3.filter { $0.hasPrefix("gh run list") }.count >= 3 && c3.contains { $0.hasPrefix("gh run download -R example/app 9001") },
+                   "no run and a workflow set: gh workflow run ci.yml --ref feat-b, after checking the branch on GitHub is at the commit, then the run that appeared (\(failure(j3)); \(c3.filter { $0.hasPrefix("gh run list") }.count) lists)")
+            // The branch on GitHub is somewhere else: nothing is started, and the plain "not pushed" message.
+            ghReset()
+            write(ghState.appendingPathComponent("refsha"), String(repeating: "1", count: 40) + "\n")
+            let j3b = await build(row("b"), "ci")
+            expect(failure(j3b).contains("CI can only build pushed commits: push, or use the local recipe") && !ghCalls().contains { $0.contains("workflow run") },
+                   "a workflow is started only when the branch on GitHub is at the commit (\(failure(j3b)))")
             // And with no workflow: a plain message.
             setWS { $0.ci.workflow = "" }
             ghReset()
@@ -320,12 +342,12 @@ enum RecipesCheck {
             let mark7 = ghCalls().count
             let j7 = await build(row("b"), "ci")
             let calls7 = Array(ghCalls().dropFirst(mark7))
-            expect(builtKey(j7) == ciKey && calls7.contains { $0.hasPrefix("gh run download 104 -n debug-apk") } && !calls7.contains { $0.hasPrefix("gh run download 104 -n release-apk") },
+            expect(builtKey(j7) == ciKey && calls7.contains { $0.hasPrefix("gh run download -R example/app 104 -n debug-apk") } && !calls7.contains { $0.hasPrefix("gh run download -R example/app 104 -n release-apk") },
                    "with the CI artifact setting only that artifact is downloaded (\(failure(j7)))")
             setWS { $0.ci.artifact = ""; $0.ci.apk = "app-release*.apk" }
             let mark8 = ghCalls().count
             let j8 = await build(row("b"), "ci")
-            expect(builtKey(j8) == ciKey && ghCalls().dropFirst(mark8).contains { $0.hasPrefix("gh run download 104 -n release-apk") }, "the APK pattern setting picks the artifact whose APK matches (\(failure(j8)))")
+            expect(builtKey(j8) == ciKey && ghCalls().dropFirst(mark8).contains { $0.hasPrefix("gh run download -R example/app 104 -n release-apk") }, "the APK pattern setting picks the artifact whose APK matches (\(failure(j8)))")
             setWS { $0.ci.apk = "" }
             ghReset(runs: ["105\tcompleted\tsuccess\tCI"], artifacts: ["105": ["app-debug"]])
             write(ghState.appendingPathComponent("noauth"), "")
@@ -336,6 +358,24 @@ enum RecipesCheck {
             expect(failure(j10).contains("needs the GitHub CLI") && row("b")?.build == keep, "gh missing: a plain message (\(failure(j10)))")
             LoginEnvironment.override = standIns
             try? fm.removeItem(at: ghState.appendingPathComponent("noauth"))
+            // gh run watch failing at once is shown, not looped on; a run waiting for approval says so; both are bounded.
+            ghReset(runs: ["107\tin_progress\t\tCI"], artifacts: ["107": ["app-debug"]])
+            write(ghState.appendingPathComponent("watch.fail"), "")
+            let jw = await build(row("b"), "ci")
+            expect(failure(jw).contains("gh run watch could not follow CI run 107") && failure(jw).contains("502") && row("b")?.build == keep, "gh run watch failing at once: its error is shown, no loop (\(failure(jw)))")
+            ghReset(runs: ["108\twaiting\t\tCI"])
+            setenv("GREENROOM_CI_WAIT", "3", 1)
+            let jq = await build(row("b"), "ci")
+            unsetenv("GREENROOM_CI_WAIT")
+            expect(failure(jq).contains("waiting for approval") && row("b")?.build == keep, "a run waiting for approval says so, and the wait has a limit (\(failure(jq)))")
+            ghReset(runs: ["109\tcompleted\tsuccess\tCI"], artifacts: ["109": ["app-debug"]])
+            write(ghState.appendingPathComponent("expired.txt"), "app-debug\n")
+            let je = await build(row("b"), "ci")
+            setWS { $0.ci.artifact = "app-debug" }
+            let je2 = await build(row("b"), "ci")
+            setWS { $0.ci.artifact = "" }
+            expect(failure(je).contains("artifact app-debug of run 109 expired: re-run the workflow") && failure(je2).contains("artifact app-debug of run 109 expired: re-run the workflow")
+                   && ghCalls().contains { $0.contains("api --paginate repos/example/app/actions/runs/109/artifacts") }, "an expired artifact has its own message (with or without the setting), and the artifacts are paginated (\(failure(je)))")
 
             // ===== 6. An unpushed commit, and the row's note =====================================================
             ghReset(runs: ["106\tcompleted\tsuccess\tCI"], artifacts: ["106": ["app-debug"]])
@@ -354,7 +394,7 @@ enum RecipesCheck {
             ws().defaultRecipeName = "ci"
             var note: String?
             if let s = row("a") {
-                _ = await wait("the row's CI note", 15) { note = CIBehind.note(for: s) {}; return note != nil }
+                _ = await wait("the row's CI note", 15) { note = CIBehind.note(for: s, store: store) {}; return note != nil }
             }
             expect(note == "CI has \(originShort), 1 commit behind", "the row says what CI has: \(note ?? "nothing")")
             ws().defaultRecipeName = "local"
@@ -368,13 +408,13 @@ enum RecipesCheck {
             setenv("CHECK_GH_APK", apk.path, 1)     // the real APK: this one is opened in a simulator
             let pulls = sessions.pulls
             let (bad, badWhy) = await pulls.add("https://github.com/other/thing/pull/43", to: ws())
-            expect(bad == nil && badWhy.contains("other/thing"), "a pull request address of another repository is refused (\(badWhy))")
+            expect(bad == nil && badWhy.contains("other/thing") && badWhy.contains("none of repo"), "a pull request address of another repository is refused (\(badWhy))")
             let (pr, prWhy) = await pulls.add("42", to: ws())
             expect(pr?.title == "Add things" && pr?.headSha == prSha && prWhy.isEmpty, "gh pr view 42 gives the head and the title (\(prWhy))")
             _ = await wait("the pull request's build", 60) { pulls.rows().first?.state == .idle && pulls.rows().first?.build != nil }
             let prRow = pulls.rows().first
             expect(prRow?.pull.number == 42 && prRow?.build?.sha == prSha && prRow?.build?.source == .ci && sessions.pullRows().count == 1
-                   && ghCalls().contains("gh pr view 42 --json headRefOid,headRefName,title") && ghCalls().contains { $0.hasPrefix("gh run list --commit \(prSha)") },
+                   && ghCalls().contains("gh pr view 42 -R example/app --json headRefOid,headRefName,title") && ghCalls().contains { $0.hasPrefix("gh run list -R example/app --commit \(prSha)") } && prRow?.pull.slug == "example/app" && prRow?.pull.id == "example/app#42",
                    "the row appears in Review and its build is fetched by the ci recipe, no worktree involved")
             guard let pull = prRow?.pull else { say("FAIL no pull request row"); failures += 1; finish() }
             expect(PullStore(file: store.root.appendingPathComponent("sessions/pulls.json")).load().count == 1, "the pull request is kept in sessions/pulls.json")
@@ -384,11 +424,15 @@ enum RecipesCheck {
             expect(DevHooks.value("--data-slots", in: prSim.options) == prSlot && prSlot != a0.slot && prSlot != row("b")?.slot && sessions.session(forSimulator: prSim) == nil && pulls.owns(prSim),
                    "it opened in a simulator with a data slot of its own (\(prSlot), the sessions' are \(a0.slot) and \(row("b")?.slot ?? "?"))")
             try? fm.removeItem(at: ghState.appendingPathComponent("runs.tsv"))   // the stand-in answers any commit with it
+            setWS { $0.ci.workflow = "ci.yml" }
             let (pr2, pr2Why) = await pulls.add("https://github.com/example/app/pull/43", to: ws())
             _ = await wait("the second pull request to settle", 60) { if case .offer = pulls.state(of: pr2 ?? pull) { return true }; return false }
             var pr2Msg = ""
             if let pr2, case .offer(let m) = pulls.state(of: pr2) { pr2Msg = m }
             expect(pr2 != nil && pr2Why.isEmpty && pr2Msg.contains("no CI run for"), "an address works too, and a pull request CI has not built says so on its row (\(pr2Msg); add said \(pr2Why); state \(pr2.map { "\(pulls.state(of: $0))" } ?? "no pull request"); calls \(ghCalls().suffix(4)))")
+            setWS { $0.ci.workflow = "" }
+            expect(pr2Msg.contains("not started here") && pr2Msg.contains("pull request's code") && !ghCalls().contains { $0.contains("workflow run") },
+                   "a pull request row never starts a workflow, even with one set, and its offer warns that building it runs its code here (\(pr2Msg))")
             if let pr2 { pulls.remove(pr2) }
             pulls.remove(pull)
             _ = await wait("the simulator to end", 30) { !prSim.isAlive }
@@ -424,7 +468,7 @@ enum RecipesCheck {
             let r6 = await Bases.resolve(base: .pullRequest(44), in: wsNow, sessions: known, store: store)
             var r6Key: String?
             if case .build(let b) = r6 { r6Key = b.key }
-            expect(r6Key == ciKey && ghCalls().contains("gh pr view 44 --json headRefOid,headRefName,title"), "a pull request number resolves through gh pr view, then to its commit's stored build")
+            expect(r6Key == ciKey && ghCalls().contains("gh pr view 44 -R example/app --json headRefOid,headRefName,title"), "a pull request number resolves through gh pr view, then to its commit's stored build")
             // A commit nobody has built: CI says no (unpushed), the worktree's APK is older than it: an offer, nothing started.
             let sessionsBefore = Set(known.map(\.worktree.path))
             let r7 = await Bases.resolve(base: .ref("feat-a"), in: wsNow, sessions: known, store: store)
@@ -447,7 +491,10 @@ enum RecipesCheck {
 
             // ===== 9. The remote recipe ==========================================================================
             let consentText = RemoteConsent.makeAlert(repo: "repo").informativeText
-            expect(consentText.contains("uploads this repository's source code to your own boat.dev account"), "the first-use sheet says it uploads this repository's source code to the person's own boat.dev account")
+            let consentAlert = RemoteConsent.makeAlert(repo: "repo")
+            expect(consentText.contains("uploads this repository's source code to your own boat.dev account") && consentText.contains("secret in an untracked file") && consentText.contains(".env*")
+                   && consentText.contains("stays in the stopped sandbox") && consentAlert.buttons.first?.title == "Don't Upload",
+                   "the first-use sheet says it uploads this repository's source code to the person's own boat.dev account, warns about secrets in untracked files, says where the source stays, and defaults to Don't Upload")
             expect(RemoteBuilder.script.contains("boat new") && RemoteBuilder.script.contains("sdkmanager") && RemoteBuilder.makeAlert().informativeText.contains("runs nothing"), "Prepare remote builder shows its steps and script, and says it runs nothing")
             let pb = NSPasteboard(name: NSPasteboard.Name("greenroom-recipes-check-" + UUID().uuidString))
             RemoteBuilder.copy(to: pb)
@@ -460,6 +507,13 @@ enum RecipesCheck {
             try? fm.removeItem(at: w.appendingPathComponent("old.txt"))
             write(w.appendingPathComponent("notes/new.txt"), "untracked\n")
             write(w.appendingPathComponent("ignored.log"), "secret\n")
+            for secret in [".env", "keystore.properties", "upload.jks", "id_rsa_deploy", "local.properties"] { write(w.appendingPathComponent(secret), "top secret\n") }
+            let nested = w.appendingPathComponent("nested", isDirectory: true)
+            write(nested.appendingPathComponent("inside.txt"), "a nested repository's file\n")
+            write(nested.appendingPathComponent("ignored-in-nested.key"), "private\n")
+            _ = git(["init", "-q", "-b", "main"], in: nested); _ = git(["add", "inside.txt"], in: nested); _ = git(["commit", "-q", "-m", "n"], in: nested)
+            try? fm.createSymbolicLink(atPath: w.appendingPathComponent("link-out").path, withDestinationPath: "/etc/hosts")
+            try? fm.createSymbolicLink(atPath: w.appendingPathComponent("link-in").path, withDestinationPath: "README.md")
             write(w.appendingPathComponent("build/junk.bin"), "junk\n")
             sessions.refresh()
             _ = await wait("b to be edited", 20) { row("b")?.dirty == true }
@@ -490,8 +544,15 @@ enum RecipesCheck {
             let src = boatState.appendingPathComponent("box/sbx-1/home/user/greenroom/src", isDirectory: true)
             func has(_ p: String) -> Bool { fm.fileExists(atPath: src.appendingPathComponent(p).path) }
             let readme = (try? String(contentsOf: src.appendingPathComponent("README.md"), encoding: .utf8)) ?? ""
-            expect(has("gradlew") && has("app/build.gradle.kts") && has(".gitignore") && readme == "edited after the commit\n" && !has("old.txt") && has("notes/new.txt") && !has("ignored.log") && !has("build/junk.bin"),
+            expect(has("gradlew") && has("app/build.gradle.kts") && has(".gitignore") && readme == "edited after the commit\n" && !has("old.txt") && has("notes/new.txt") && !has("ignored.log") && !has("build/junk.bin")
+                   && !has(".env") && !has("keystore.properties") && !has("upload.jks") && !has("id_rsa_deploy") && !has("local.properties")
+                   && !has("nested") && !has("link-out") && has("link-in"),
                    "the upload held HEAD's files, the uncommitted edit and deletion and the untracked file, and not the ignored ones (README \(readme.debugDescription), old.txt \(has("old.txt")), ignored.log \(has("ignored.log")))")
+            let upLog = (rj1?.lines ?? []).joined(separator: "\n")
+            expect(upLog.contains("uploading") && upLog.contains("untracked file(s):") && upLog.contains("notes/new.txt")
+                   && upLog.contains("left out, their names look like secrets") && upLog.contains(".env") && upLog.contains("upload.jks") && upLog.contains("local.properties")
+                   && upLog.contains("skipped") && upLog.contains("nested/") && upLog.contains("link-out(symlink out of the tree)"),
+                   "the log names the untracked files uploaded, the secret-looking ones left out, and the nested repository and outside symlink skipped")
             func at(_ text: String) -> Date? { arrivals.first { $0.0 == text }?.1 }
             if let t1 = at("step one"), let t2 = at("step two") {
                 expect(t2.timeIntervalSince(t1) > 0.6, "the log streamed while it ran: step one and step two arrived \(String(format: "%.1f", t2.timeIntervalSince(t1))) s apart")
@@ -525,8 +586,9 @@ enum RecipesCheck {
             let rj4 = await build(row("b"), "remote", 120)
             expect(builtKey(rj4) == remoteKey && boatCalls().first == "boat new --snapshot tmpl-1" && boatCalls().last == "boat stop sbx-from-tmpl-1" && (rj4?.lines.contains { $0.contains("remote sandbox: sbx-from-tmpl-1") } ?? false),
                    "from a template: boat new --snapshot, the new id printed for the person to keep, the sandbox stopped (\(failure(rj4)))")
+            expect(ws().remote.sandbox == "sbx-from-tmpl-1", "the sandbox made from the template is saved in the workspace's settings (\(ws().remote.sandbox))")
             boatReset()
-            setWS { $0.remote.template = "" }
+            setWS { $0.remote.sandbox = ""; $0.remote.template = "" }
             let rj5 = await build(row("b"), "remote")
             expect(failure(rj5).contains("no sandbox is set") && boatCalls().isEmpty, "no sandbox and no template: a plain message, boat not run (\(failure(rj5)))")
             setWS { $0.remote.sandbox = "sbx-bad" }
@@ -536,6 +598,94 @@ enum RecipesCheck {
             boatReset()
             let rj7 = await build(row("b"), "remote")
             expect(failure(rj7).contains("needs the boat CLI") && boatCalls().isEmpty, "boat missing: a plain message (\(failure(rj7)))")
+            LoginEnvironment.override = standIns
+            setWS { $0.remote.sandbox = "sbx-1"; $0.remote.template = "" }
+
+            // Module and variant are checked before they reach a remote command.
+            boatReset()
+            setWS { $0.module = "app;touch pwned" }
+            let rj8 = await build(row("b"), "remote")
+            expect(failure(rj8).contains("may not carry") && boatCalls().isEmpty, "a module with shell characters is refused before any boat call (\(failure(rj8)))")
+            setWS { $0.module = nil; $0.variant = "debug && echo" }
+            let rj9 = await build(row("b"), "remote")
+            expect(failure(rj9).contains("may not carry") && boatCalls().isEmpty, "so is a variant (\(failure(rj9)))")
+            setWS { $0.variant = "debug" }
+
+            // Polling has a limit, and a sandbox that went away is noticed; both stop it.
+            boatReset(); setenv("CHECK_GRADLE", "sleep", 1)
+            setenv("GREENROOM_REMOTE_WAIT", "4", 1)
+            let rj10 = await build(row("b"), "remote", 120)
+            unsetenv("GREENROOM_REMOTE_WAIT")
+            expect(failure(rj10).contains("did not finish within 4 seconds") && boatCalls().last == "boat stop sbx-1", "a remote build that never finishes is given up on at the limit, and the sandbox is stopped (\(failure(rj10)))")
+            boatReset(); setenv("CHECK_GRADLE", "sleep", 1)
+            let rj11 = q.start(row("b")!, workspace: ws(), recipeName: "remote", store: store)
+            _ = await wait("the remote build to run", 90) { rj11?.lines.contains("sleeping") == true }
+            try? "stopped\n".write(to: boatState.appendingPathComponent("box/sbx-1/state"), atomically: true, encoding: .utf8)   // the sandbox goes away
+            _ = await wait("the build to notice", 60) { rj11?.isActive == false }
+            expect(failure(rj11).contains("lost contact with the sandbox sbx-1") && boatCalls().last == "boat stop sbx-1", "a sandbox that went away is noticed and the run fails (\(failure(rj11)))")
+
+            // The 30-minute limit (here 8 s) and the app quitting send SIGTERM first: the sandbox is stopped, even by a slow stop.
+            boatReset(); setenv("CHECK_GRADLE", "sleep", 1); setenv("CHECK_BOAT_STOP_DELAY", "1", 1)
+            let limited = RecipeRun(recipe: Recipe.builtIn("remote")!, job: RecipeJob(worktree: worktree("b"), repo: repo, ref: "feat-b", sha: "x", dirty: true, module: "", variant: "debug",
+                                                                                    out: base.appendingPathComponent("limited-out/app.apk"), extra: ["GREENROOM_REMOTE_CONSENT": "1", "GREENROOM_REMOTE_SANDBOX": "sbx-1"]))
+            limited.timeout = 8
+            let limitedAt = Date()
+            let limitedOutcome: RecipeOutcome = await withCheckedContinuation { c in limited.start { c.resume(returning: $0) } }
+            var limitedWhy = ""
+            if case .failed(let x) = limitedOutcome { limitedWhy = x }
+            expect(limitedWhy.contains("longer than") && (try? String(contentsOf: boatState.appendingPathComponent("box/sbx-1/state"), encoding: .utf8)) == "stopped\n" && boatCalls().last == "boat stop sbx-1" && Date().timeIntervalSince(limitedAt) < 40,
+                   "the time limit sends SIGTERM first: the remote recipe stopped its sandbox before it ended (\(limitedWhy))")
+            boatReset(); setenv("CHECK_GRADLE", "sleep", 1); setenv("CHECK_BOAT_STOP_DELAY", "1", 1)
+            let rj12 = q.start(row("b")!, workspace: ws(), recipeName: "remote", store: store)
+            _ = await wait("the remote build to run", 90) { rj12?.lines.contains("sleeping") == true }
+            q.terminateAll()   // what applicationWillTerminate calls: returns once the recipe has cleaned up
+            expect((try? String(contentsOf: boatState.appendingPathComponent("box/sbx-1/state"), encoding: .utf8)) == "stopped\n" && boatCalls().last == "boat stop sbx-1",
+                   "quitting the app sends SIGTERM first and waits: the sandbox is stopped when terminateAll returns")
+            _ = await wait("the quit build to settle", 20) { rj12?.isActive == false }
+
+            // A run killed without cleanup leaves its sandbox and folder in remote-state: the launch sweep, and the next run, deal with it.
+            func stateFile() -> URL { store.root.appendingPathComponent("sessions/work/\(row("b")!.slot)/remote-state") }
+            @MainActor func leaveOne() async -> RemoteLeftovers.Record? {
+                boatReset(); setenv("CHECK_GRADLE", "sleep", 1)
+                let j = q.start(row("b")!, workspace: ws(), recipeName: "remote", store: store)
+                _ = await wait("the remote build to run", 90) { j?.lines.contains("sleeping") == true }
+                let rec = (try? String(contentsOf: stateFile(), encoding: .utf8)).map { RemoteLeftovers.parse($0) }
+                if let pid = j?.run?.pid { killpg(pid, SIGKILL) }       // no trap runs
+                _ = await wait("the killed run to end", 30) { j?.isActive == false }
+                return rec
+            }
+            let left = await leaveOne()
+            let running = (try? String(contentsOf: boatState.appendingPathComponent("box/sbx-1/state"), encoding: .utf8)) == "running\n"
+            expect(left?.sandbox == "sbx-1" && left?.tmp.contains("greenroom-remote.") == true && !(left?.root ?? "").isEmpty && fm.fileExists(atPath: stateFile().path) && running
+                   && fm.fileExists(atPath: left?.tmp ?? "/nonexistent"), "a killed run leaves its sandbox running and its folder, and remote-state names both (\(left.map { "\($0)" } ?? "none"))")
+            let callsBefore = boatCalls().count
+            setWS { $0.remote.consent = false }
+            _ = await RemoteLeftovers.sweep(workspaces: sessions.workspaces, store: store)
+            expect(boatCalls().count == callsBefore && fm.fileExists(atPath: stateFile().path), "the launch sweep does nothing, and runs no boat, for a workspace that has not allowed the remote recipe")
+            setWS { $0.remote.consent = true }
+            let said = await RemoteLeftovers.sweep(workspaces: sessions.workspaces, store: store)
+            expect(boatCalls().last == "boat stop sbx-1" && !fm.fileExists(atPath: stateFile().path) && !fm.fileExists(atPath: left?.tmp ?? "") && said.count == 2
+                   && (try? String(contentsOf: boatState.appendingPathComponent("box/sbx-1/state"), encoding: .utf8)) == "stopped\n", "with the yes, the launch sweep stops the sandbox and removes the folder and the state file (\(said))")
+            let left2 = await leaveOne()
+            unsetenv("CHECK_GRADLE")
+            let rj13 = await build(row("b"), "remote", 120)
+            expect(left2 != nil && builtKey(rj13) == remoteKey && (rj13?.lines.contains { $0.contains("sbx-1, which an earlier run left running") } ?? false) && !fm.fileExists(atPath: stateFile().path),
+                   "the next run stops what the killed one left, then builds (\(failure(rj13)))")
+
+            // The row's CI note follows the upstream's commit when a fetch moves it.
+            CIBehind.maxAge = 0.5
+            var n1: String?
+            let bRow = row("b")!
+            _ = await wait("the first note", 15) { n1 = CIBehind.note(for: bRow, store: store) {}; return n1 != nil }
+            let aHead = gitOut(["rev-parse", "feat-a"], in: repo)
+            _ = git(["update-ref", "refs/remotes/origin/main", aHead], in: repo)
+            var n2: String?
+            _ = await wait("the moved upstream to show", 15) { n2 = CIBehind.note(for: bRow, store: store) {}; return n2 != nil && n2 != n1 }
+            expect(n1 == "CI has \(originShort), without your edits" && n2 == "pushed: \(String(aHead.prefix(7))), without your edits",
+                   "the note follows the upstream after a fetch, and says only \"pushed\" for a commit with no known CI build (\(n1 ?? "none") then \(n2 ?? "none"))")
+            _ = git(["update-ref", "refs/remotes/origin/main", mainSha], in: repo)
+            CIBehind.maxAge = 20
+
             LoginEnvironment.override = nil
             setWS { $0.remote.consent = nil }
             finish()

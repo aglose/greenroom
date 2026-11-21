@@ -61,9 +61,15 @@ the network as themselves, when you press Build, add a pull request or choose a 
 makes no connection of its own for it, and shares your sign-ins with no one: it never sees them (`gh` keeps its own).
 The **remote** recipe is the one that sends something away: it uploads this repository's source code (the committed
 files, your uncommitted changes and the untracked files `.gitignore` does not ignore) to your own boat.dev account,
-with the `boat` tool and your own sign-in, and stops the sandbox when the build ends. Greenroom says so in a sheet
-before the first run and needs your yes for each repository; no run happens without it. The APK comes back; none is
-uploaded.
+with the `boat` tool and your own sign-in. Untracked files named like secrets (`*.jks`, `*.keystore`, `*.p12`,
+`.env*`, `keystore.properties`, `local.properties`, `google-services.json`, `*.pem`, `id_rsa*`) and nested
+repositories are not sent and the build log says which; a secret in an untracked file with an ordinary name is. The
+sandbox is stopped when a build ends normally or is cancelled, and at the next launch if the app was killed; the
+source stays in the stopped sandbox until you delete it on boat.dev. Greenroom says all this in a sheet before the
+first run and needs your yes for each repository; no run happens without it. The APK comes back; none is uploaded.
+
+The **ci** recipe starts a GitHub Actions workflow (`gh workflow run`) only when you press Build on a session with a
+workflow set in its settings, never when Greenroom looks for a base or a pull request's build.
 
 Adding a pull request runs `gh` for that pull request's head commit and its CI artifact; the APK it fetches is
 opened on this Mac like any other. What a build leaves comes back to this Mac; no APK is uploaded.

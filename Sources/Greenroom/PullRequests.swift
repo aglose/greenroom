@@ -8,6 +8,8 @@ import CryptoKit
 struct PullRequest: Codable, Equatable {
     /// The repository's main checkout (a workspace's root).
     var workspace: String
+    /// `owner/repo` on GitHub: with the number, what the pull request is (its row's id and its data slot).
+    var slug: String
     var number: Int
     var title: String
     var headSha: String
@@ -16,18 +18,18 @@ struct PullRequest: Codable, Equatable {
     var buildKey: String?
     var added: Date
 
-    var id: String { workspace + "#" + String(number) }
+    var id: String { (slug.isEmpty ? workspace : slug.lowercased()) + "#" + String(number) }
 
-    init(workspace: String, number: Int, title: String, headSha: String, headRef: String, buildKey: String? = nil, added: Date = Date()) {
-        self.workspace = workspace; self.number = number; self.title = title; self.headSha = headSha; self.headRef = headRef
+    init(workspace: String, slug: String = "", number: Int, title: String, headSha: String, headRef: String, buildKey: String? = nil, added: Date = Date()) {
+        self.workspace = workspace; self.slug = slug; self.number = number; self.title = title; self.headSha = headSha; self.headRef = headRef
         self.buildKey = buildKey; self.added = added
     }
 
-    private enum Keys: String, CodingKey { case workspace, number, title, headSha, headRef, buildKey, added }
+    private enum Keys: String, CodingKey { case workspace, slug, number, title, headSha, headRef, buildKey, added }
     /// Tolerant: a missing optional field is its default; a record with no workspace or number is not one.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
-        self.init(workspace: try c.decode(String.self, forKey: .workspace), number: try c.decode(Int.self, forKey: .number),
+        self.init(workspace: try c.decode(String.self, forKey: .workspace), slug: (try? c.decodeIfPresent(String.self, forKey: .slug)) ?? "", number: try c.decode(Int.self, forKey: .number),
                   title: (try? c.decodeIfPresent(String.self, forKey: .title)) ?? "", headSha: (try? c.decodeIfPresent(String.self, forKey: .headSha)) ?? "",
                   headRef: (try? c.decodeIfPresent(String.self, forKey: .headRef)) ?? "", buildKey: try? c.decodeIfPresent(String.self, forKey: .buildKey),
                   added: (try? c.decodeIfPresent(Date.self, forKey: .added)) ?? Date(timeIntervalSince1970: 0))
@@ -101,7 +103,7 @@ final class PullRows {
 
     /// The data slot a pull request's app keeps its data in: its own, not any session's.
     func slot(of p: PullRequest) -> String {
-        SessionStore.slot(for: store.root.appendingPathComponent("sessions/pulls/\(Self.hash(p.workspace))-\(p.number)", isDirectory: true))
+        SessionStore.slot(for: store.root.appendingPathComponent("sessions/pulls/\(Self.hash(p.id))", isDirectory: true))
     }
     private static func hash(_ s: String) -> String {
         SHA256.hash(data: Data(s.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
@@ -129,13 +131,22 @@ final class PullRows {
     @MainActor @discardableResult
     func add(_ input: String, to workspace: Workspace) async -> (PullRequest?, String) {
         guard let ref = PullRequestRef.parse(input) else { return (nil, "\"\(input)\" is not a pull request number or address") }
-        if let slug = ref.slug, !GitHubRemote.slugs(of: workspace.root).contains(where: { $0.caseInsensitiveCompare(slug) == .orderedSame }) {
-            return (nil, "That pull request is in \(slug), which is not a remote of \(workspace.root.lastPathComponent)")
+        let repoName = workspace.root.lastPathComponent
+        var slug: String
+        if let named = ref.slug {
+            // An address names its repository: it must be one of this workspace's remotes.
+            guard let own = GitHubRemote.slugs(of: workspace.root).first(where: { $0.caseInsensitiveCompare(named) == .orderedSame }) else {
+                return (nil, "That pull request is in \(named), which is none of \(repoName)'s remotes")
+            }
+            slug = own
+        } else {
+            guard let own = await GitHubRemote.repoSlug(for: workspace.root) else { return (nil, "\(repoName) has no GitHub remote, so it has no pull requests to add") }
+            slug = own
         }
-        let (info, why) = await GH.pull(input.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: ""), number: ref.number, in: workspace.root)
+        let (info, why) = await GH.pull(number: ref.number, slug: slug, in: workspace.root)
         guard let info else { return (nil, why) }
         _ = all   // loaded
-        var pull = PullRequest(workspace: workspace.root.path, number: ref.number, title: info.title, headSha: info.sha, headRef: info.ref)
+        var pull = PullRequest(workspace: workspace.root.path, slug: slug, number: ref.number, title: info.title, headSha: info.sha, headRef: info.ref)
         if let i = items.firstIndex(where: { $0.id == pull.id }) {
             if items[i].headSha == pull.headSha { pull.buildKey = items[i].buildKey }
             items[i] = pull
@@ -157,7 +168,7 @@ final class PullRows {
         change()
         let store = self.store, known = sessions?.sessions ?? []
         Task { @MainActor in
-            let result = await Bases.resolve(sha: p.headSha, ref: p.headRef, in: ws, sessions: known, store: store) { [weak self] line in
+            let result = await Bases.resolve(sha: p.headSha, ref: p.headRef, in: ws, sessions: known, store: store, pullRequest: true, slug: p.slug.isEmpty ? nil : p.slug) { [weak self] line in
                 guard let self, case .fetching = self.states[p.id] ?? .idle, !line.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                 self.states[p.id] = .fetching(line)
                 self.change()
@@ -187,7 +198,7 @@ final class PullRows {
     func refresh(_ p: PullRequest) {
         guard let ws = sessions?.workspaces.first(where: { $0.root.path == p.workspace }) else { return }
         Task { @MainActor in
-            let (info, why) = await GH.pull(String(p.number), number: p.number, in: ws.root)
+            let (info, why) = await GH.pull(number: p.number, slug: p.slug.isEmpty ? nil : p.slug, in: ws.root)
             guard let info else { states[p.id] = .failed(why); change(); return }
             if let i = items.firstIndex(where: { $0.id == p.id }) {
                 if items[i].headSha != info.sha { items[i].buildKey = nil }

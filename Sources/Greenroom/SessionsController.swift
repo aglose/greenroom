@@ -421,7 +421,7 @@ final class SessionsController {
         if let built = s.builtAt { detail.append(Self.age(built)) }
         if s.ahead > 0 { detail.append("\(s.ahead) ahead") }
         if s.dirty { detail.append("edited") }
-        if workspace(of: s)?.defaultRecipeName == "ci", let behind = CIBehind.note(for: s, then: { [weak self] in self?.onChange?() }) { detail.append(behind) }
+        if workspace(of: s)?.defaultRecipeName == "ci", let behind = CIBehind.note(for: s, store: store, then: { [weak self] in self?.onChange?() }) { detail.append(behind) }
         let build = buildAccessories(for: s)
         let sub = NSTextField(labelWithString: build.detail ?? detail.joined(separator: " · "))
         sub.font = .systemFont(ofSize: 10)
