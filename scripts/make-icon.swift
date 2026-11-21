@@ -2,10 +2,20 @@
 // `swift scripts/make-icon.swift` from the repository root.
 // A phone on stage in a beam of light, connected from the wings to a terminal. WebKit draws the SVG, because
 // NSImage's SVG support leaves out the blur filters the beam and the glow need.
+// `--debug`: the debug build's icon, the same on an orange stage, written to Resources/AppIcon-debug.icns
+// (scripts/bundle.sh --variant debug).
 import AppKit
 import WebKit
 
-let svg = try String(contentsOfFile: "Resources/AppIcon.svg", encoding: .utf8)
+let debug = CommandLine.arguments.contains("--debug")
+let name = debug ? "AppIcon-debug" : "AppIcon"
+var svg = try String(contentsOfFile: "Resources/AppIcon.svg", encoding: .utf8)
+if debug {
+    // The backdrop, the stage floor and its boards, from green to orange.
+    for (green, orange) in [("#0e2c21", "#c8601a"), ("#030f09", "#5c2a08"), ("#0b1d16", "#4a2206"), ("#132b21", "#6e3510")] {
+        svg = svg.replacingOccurrences(of: green, with: orange)
+    }
+}
 
 @MainActor final class Renderer: NSObject, WKNavigationDelegate {
     let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 1024, height: 1024))
@@ -49,21 +59,23 @@ let svg = try String(contentsOfFile: "Resources/AppIcon.svg", encoding: .utf8)
     let renderer = Renderer()
     await renderer.load()
 
-    let out = URL(fileURLWithPath: "build/AppIcon.iconset")
+    let out = URL(fileURLWithPath: "build/\(name).iconset")
     try? FileManager.default.removeItem(at: out)
     try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
     for (points, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)] {
-        let name = "icon_\(points)x\(points)\(scale == 2 ? "@2x" : "").png"
-        try await renderer.png(points * scale).write(to: out.appendingPathComponent(name))
+        let file = "icon_\(points)x\(points)\(scale == 2 ? "@2x" : "").png"
+        try await renderer.png(points * scale).write(to: out.appendingPathComponent(file))
     }
     let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-    p.arguments = ["-c", "icns", out.path, "-o", "Resources/AppIcon.icns"]
+    p.arguments = ["-c", "icns", out.path, "-o", "Resources/\(name).icns"]
     try p.run(); p.waitUntilExit()
-    print(p.terminationStatus == 0 ? "wrote Resources/AppIcon.icns" : "iconutil failed")
+    print(p.terminationStatus == 0 ? "wrote Resources/\(name).icns" : "iconutil failed")
 
     // The Claude Code plugin's icon (plugin.json "icon"), for the plugin directory.
-    try await renderer.png(512).write(to: URL(fileURLWithPath: "plugin/icon.png"))
-    print("wrote plugin/icon.png")
+    if !debug {
+        try await renderer.png(512).write(to: URL(fileURLWithPath: "plugin/icon.png"))
+        print("wrote plugin/icon.png")
+    }
 }
 
 let app = NSApplication.shared

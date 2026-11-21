@@ -7,8 +7,9 @@ import SwiftUI
 // person's own `claude` program does, as it would if they typed the command.
 
 enum ClaudeConnect {
-    /// The name the server is registered under.
-    static let serverName = "greenroom"
+    /// The name the server is registered under: the debug copy has its own (`greenroom-debug`), so connecting it never
+    /// replaces the release's entry.
+    static let serverName = Variant.isDebug ? "greenroom-debug" : "greenroom"
 
     // MARK: The claude mcp command line (the one place)
     //
@@ -226,8 +227,8 @@ enum ClaudeConnect {
         }
         switch status() {
         case .connected: return .connected(lines(r.output, 1))
-        case .otherCopy(let path): return .failed("claude mcp add said it worked, but Claude Code's greenroom entry runs \(path), not this copy.")
-        case .notConnected: return .failed("claude mcp add said it worked, but claude mcp get finds no greenroom server.")
+        case .otherCopy(let path): return .failed("claude mcp add said it worked, but Claude Code's \(serverName) entry runs \(path), not this copy.")
+        case .notConnected: return .failed("claude mcp add said it worked, but claude mcp get finds no \(serverName) server.")
         case .missing: return .missing
         case .unknown(let why): return .failed("claude mcp add said it worked, but the entry could not be checked: \(why)")
         }
@@ -240,7 +241,7 @@ enum ClaudeConnect {
         let off = disconnect()
         switch off {
         case .disconnected: break
-        case .notConnected: return .failed("claude mcp remove said there is no greenroom server, so there was nothing to replace and nothing was added. Choose Connect Claude Code.")
+        case .notConnected: return .failed("claude mcp remove said there is no \(serverName) server, so there was nothing to replace and nothing was added. Choose Connect Claude Code.")
         case .missing: return .missing
         case .failed(let why): return .failed("Reconnect stopped at the remove step, and nothing was added. " + why)
         default: return off

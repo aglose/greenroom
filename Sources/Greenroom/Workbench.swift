@@ -123,12 +123,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         super.init()
-        window.title = "Greenroom"
+        window.title = Variant.name
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 900, height: 560)
         window.toolbarStyle = .unified
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        Variant.addBadge(to: window)
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = Design.stage
 

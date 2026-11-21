@@ -53,7 +53,7 @@ final class Engine {
             state = URL(fileURLWithPath: CommandLine.arguments[i + 1], isDirectory: true).resolvingSymlinksInPath()
                 .appendingPathComponent(flag.dropFirst(2).replacingOccurrences(of: "-check", with: "") + "-check/engine-state", isDirectory: true)
         } else {
-            state = support.appendingPathComponent("Greenroom", isDirectory: true)
+            state = support.appendingPathComponent(Variant.stateFolder, isDirectory: true)   // "Greenroom Debug" for the debug copy
         }
     }
 
