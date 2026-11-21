@@ -47,7 +47,8 @@ version of it and adds the workbench.
 - **Agents** drive the same simulators over the Model Context Protocol: the screen as compact text with stable
   references, every action answered with what changed, checks and waits in one call
   ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.md)). The toolbar's Agent button shows what an agent did and
-  can pause it.
+  can pause it. For Claude Code there is a plugin, with the tools and a skill that verifies a change with them:
+  `/plugin marketplace add aglose/greenroom`, then `/plugin install greenroom@greenroom`.
 
 Still to come: the timeline and network inspector inside the window, replay and bisect from the app, differences in network calls and frame timings.
 

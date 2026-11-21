@@ -1,0 +1,14 @@
+{
+  "name": "greenroom",
+  "description": "Launch, drive and verify Android apps in Greenroom's simulators on this Mac: build a worktree's change, see which screens differ from the base, tap through them and check the result.",
+  "author": { "name": "Greenroom" },
+  "homepage": "https://github.com/aglose/greenroom",
+  "repository": "https://github.com/aglose/greenroom",
+  "keywords": ["android", "apk", "simulator", "mcp", "verification"],
+  "mcpServers": {
+    "greenroom": {
+      "command": "/bin/sh",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/greenroom-mcp.sh"]
+    }
+  }
+}

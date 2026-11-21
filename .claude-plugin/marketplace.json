@@ -1,0 +1,14 @@
+{
+  "name": "greenroom",
+  "owner": { "name": "Greenroom", "url": "https://github.com/aglose/greenroom" },
+  "description": "Greenroom's plugin for Claude Code: its simulators as tools, and how to verify a change with them.",
+  "plugins": [
+    {
+      "name": "greenroom",
+      "source": "./plugin",
+      "description": "Launch, drive and verify Android apps in Greenroom's simulators on this Mac. Needs Greenroom.app (macOS, Apple silicon).",
+      "category": "development",
+      "homepage": "https://github.com/aglose/greenroom"
+    }
+  ]
+}
