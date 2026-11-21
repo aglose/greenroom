@@ -594,6 +594,45 @@ enum ClaudeUI {
         return v
     }
 
+    /// Set when the person closes the prompt below; it is not shown again.
+    static let titlesPromptHiddenKey = "claudeTitlesPromptHidden"
+
+    /// Whether the sidebar offers to show Claude Code's titles: the switch is off, the person has not closed the
+    /// offer, and Claude Code is on this Mac. Only `~/.claude`'s existence is looked at, never a file in it, so the
+    /// switch stays the one thing that lets Greenroom read them. Never in a check (it sets its own switch).
+    static var offersTitles: Bool {
+        let claude = ClaudeSessions.shared
+        guard claude.enabledOverride == nil, !claude.enabled, !UserDefaults.standard.bool(forKey: titlesPromptHiddenKey) else { return false }
+        let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
+        return FileManager.default.fileExists(atPath: home.path)
+    }
+
+    /// "Show Claude Code's session titles": clicking the row turns the switch on; the cross closes the offer.
+    static func titlesPromptCell(onHide: @escaping () -> Void) -> NSView {
+        let icon = NSImageView(image: NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = .controlAccentColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        let name = NSTextField(labelWithString: "Show Claude Code's session titles")
+        name.font = .systemFont(ofSize: 12)
+        name.lineBreakMode = .byTruncatingTail
+        let sub = NSTextField(labelWithString: "Name rows by their session, not their branch")
+        sub.font = .systemFont(ofSize: 10)
+        sub.textColor = .secondaryLabelColor
+        sub.lineBreakMode = .byTruncatingTail
+        let text = NSStackView(views: [name, sub])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 0
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let close = ClosureButton(symbol: "xmark", tip: "Don't offer this again (it stays in Settings)", handler: onHide)
+        close.contentTintColor = .tertiaryLabelColor
+        let stack = NSStackView(views: [icon, text, close])
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 6)
+        stack.toolTip = "Reads Claude Code's session files on this Mac, only to name rows. The same as \"Show my Claude Code sessions\" in Settings."
+        return stack
+    }
+
     /// "3 Claude sessions in a repository you have not added", and the folder under it.
     static func offerCell(_ offer: ClaudeOffer) -> NSView {
         let icon = NSImageView(image: NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil) ?? NSImage())
