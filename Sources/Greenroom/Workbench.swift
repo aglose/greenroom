@@ -114,6 +114,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         case simulator(Simulator)
         case recent(URL)
         case claudeOffer(ClaudeOffer)
+        case claudeTitles
     }
 
     private static let hint = ""
@@ -313,7 +314,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if showingDiagnostics { diagnosticsPane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
         rows = []
-        for group in sessions.groups() {
+        let groups = sessions.groups()
+        if !groups.isEmpty && ClaudeUI.offersTitles { rows.append(.claudeTitles) }   // rows read as branches until it is on
+        for group in groups {
             rows.append(.header(group.header))
             rows += group.sessions.map { .session($0) }
         }
@@ -1060,7 +1063,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session, .claudeOffer, .pull: return true
+        case .simulator, .session, .claudeOffer, .claudeTitles, .pull: return true
         default: return false
         }
     }
@@ -1095,6 +1098,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             return sessions.cell(for: session)
         case .claudeOffer(let offer):
             return ClaudeUI.offerCell(offer)
+        case .claudeTitles:
+            return ClaudeUI.titlesPromptCell { [weak self] in
+                UserDefaults.standard.set(true, forKey: ClaudeUI.titlesPromptHiddenKey)
+                self?.reload()
+            }
         case .pull(let pull):
             return sessions.pullCell(pull)
         case .simulator(let sim):
@@ -1142,6 +1150,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
         if case .claudeOffer(let offer) = rows[row] { sessions.addRepositories([offer.repository]) }
+        if case .claudeTitles = rows[row] { ClaudeSessions.shared.enabled = true; reload() }   // the titles arrive with the read
         if case .pull(let pull) = rows[row] { sessions.openPull(pull) }
     }
 
