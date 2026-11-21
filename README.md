@@ -14,7 +14,12 @@ version of it and adds the workbench.
 - Toolbar: Back, Home, Rotate, light/dark, the device (phone, foldable, tablet, desktop, TV, switched while the app
   runs), Screenshot, Restart, Close.
 - **Side by Side** (⌘\\) shows every running simulator at once, sized so a phone and a tablet get about the same
-  area. Device > Open Beside As starts the same APK again as another device.
+  area. Device > Open Beside As starts the same APK again as another device. Drag a device by its body to move it
+  (it snaps to the stage's edges and the other devices), by the grip at its corner to resize it (its shape kept, never
+  too small to use), or close it from the button at its other corner; VoiceOver has the same as actions. Moved
+  devices keep their places, also across launches, until Tidy Up (⌥⌘\\) tiles them again.
+- **Memory**: once the simulators and Greenroom together take 2 GB (or a fifth of the Mac's memory if that is less),
+  the stage's top left says how much.
 - **Mirror Input** (⇧⌘M) sends each touch, key and toolbar command to every simulator, at the same place on each
   screen whatever its size.
 

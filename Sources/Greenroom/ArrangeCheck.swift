@@ -59,6 +59,13 @@ extension AppDelegate {
                 guard views.count == 3 else { NSApp.terminate(nil); return }
                 let (a, b, c) = (views[0], views[1], views[2])
 
+                // A click on a device's caption only chooses it; a drag from the screen's corner is a touch, not a resize.
+                drag(a, from: body(a), by: .zero)
+                check(!grid.isArranged && a.frame == views[0].frame, "a click on the caption leaves the stage tiled")
+                let long0 = b.pictureLongSide
+                drag(b, from: CGPoint(x: b.pictureFrame.maxX - 3, y: b.pictureFrame.maxY - 3), by: CGSize(width: -40, height: -40))
+                check(!grid.isArranged && b.pictureLongSide == long0, "a drag from the screen's corner stays the app's")
+
                 // Move: the picture follows the pointer; the rest stay where their pictures were.
                 let bPicture = b.convert(b.pictureFrame, to: grid)
                 let before = a.frame

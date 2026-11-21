@@ -676,7 +676,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             add("shot", "Save screenshot", "Device", "camera", "⌘S", keywords: "capture picture") { [weak self] in self?.screenshot(nil) }
             add("restart", "Restart the app", "App", "arrow.clockwise", "⇧⌘R") { [weak self] in self?.restart(nil) }
             add("close", "Close this simulator", "App", "xmark.circle", "⇧⌘W", keywords: "quit stop") { [weak self] in self?.closeSelected(nil) }
-            if grid.isArranged {
+            if grid.canTidy {
                 add("tidy", "Tidy up the simulators", "Device", "square.grid.2x2", keywords: "arrange layout tile reset size") { [weak self] in self?.tidyUp(nil) }
             }
             setting("dark", "Dark appearance", "moon", "appearance dark", keywords: "night theme")

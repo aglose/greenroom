@@ -62,9 +62,15 @@ final class SimulatorView: NSView {
     /// the button at its top left closes it. The grid does the moving and sizing; the view reports the gesture.
     var arrangeable = false { didSet { if arrangeable != oldValue { updateTracking(); updateChips() } } }
     weak var arranger: SimulatorGrid?
-    private let closeChip = NSButton()
+    private let closeChip = CornerButton()
     private let gripChip = ChipImage()
     private var gripRect = CGRect.zero
+    /// The device as it takes clicks while arranged: its body, chips and caption, not the padding around them, so a
+    /// device overlapping another does not take the clicks meant for the one underneath.
+    private var bodyRect = CGRect.zero
+    /// A press on the body or grip: it becomes a move or a resize only once the pointer has travelled a few points,
+    /// so a click (to choose the device) leaves the stage as it is.
+    private var pressed: (event: NSEvent, at: CGPoint, resizing: Bool)?
     /// Whether the pointer is over this device and no device in front of it (set by the grid, which knows the order).
     var hovering = false { didSet { if hovering != oldValue { updateChips() } } }
     private enum Arranging { case move, resize }
@@ -435,11 +441,12 @@ final class SimulatorView: NSView {
         CATransaction.commit()
         caption.frame = CGRect(x: 8, y: rimRect.maxY + 12, width: bounds.width - 16, height: 18)
         caption.isHidden = !hasDevice
-        // The chips sit on the body's corners, where the rounded rim passes 45 degrees.
-        let corner = rimLayer.cornerRadius * 0.29
-        closeChip.frame = CGRect(x: rimRect.minX + corner - Self.chip / 2, y: rimRect.minY + corner - Self.chip / 2, width: Self.chip, height: Self.chip)
-        gripChip.frame = CGRect(x: rimRect.maxX - corner - Self.chip / 2, y: rimRect.maxY - corner - Self.chip / 2, width: Self.chip, height: Self.chip)
+        // The chips sit just outside the body's corners; neither takes a click on the screen itself.
+        closeChip.frame = CGRect(x: rimRect.minX + 3 - Self.chip / 2, y: rimRect.minY + 3 - Self.chip / 2, width: Self.chip, height: Self.chip)
+        gripChip.frame = CGRect(x: rimRect.maxX - 3 - Self.chip / 2, y: rimRect.maxY - 3 - Self.chip / 2, width: Self.chip, height: Self.chip)
         gripRect = gripChip.frame.insetBy(dx: -6, dy: -6)
+        closeChip.blocked = r
+        bodyRect = rimRect.union(closeChip.frame).union(gripRect).union(caption.frame)
         updateOutline()
     }
 
@@ -519,7 +526,7 @@ final class SimulatorView: NSView {
     private func cursor(at p: CGPoint) -> NSCursor {
         guard arrangeable, !inspecting, simulator != nil else { return .arrow }
         if arranging == .move { return .closedHand }
-        if arranging == .resize || gripRect.contains(p) {
+        if arranging == .resize || onGrip(p) {
             if #available(macOS 15, *) { return .frameResize(position: .bottomRight, directions: .all) }
             return .crosshair
         }
@@ -595,16 +602,23 @@ final class SimulatorView: NSView {
         }
     }
 
+    /// The resize grip's area, less the screen: a touch on the screen's corner stays a touch.
+    private func onGrip(_ p: CGPoint) -> Bool { gripRect.contains(p) && !pictureRect.contains(p) }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard arrangeable, arranger?.isArranged == true, let superview else { return super.hitTest(point) }
+        return bodyRect.contains(convert(point, from: superview)) ? super.hitTest(point) : nil
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         onSelect?(self)
         if inspecting { point(event); return }
         let p = convert(event.locationInWindow, from: nil)
         if arrangeable { arranger?.raise(self) }
-        if arrangeable, let arranger, gripRect.contains(p) || !pictureRect.contains(p) {
-            arranging = gripRect.contains(p) ? .resize : .move
-            cursor(at: p).set()
-            arranger.beginArranging(self, at: event, resizing: arranging == .resize)
+        if arrangeable, onGrip(p) || !pictureRect.contains(p) {
+            pressed = (event, p, onGrip(p))
+            if pressed!.resizing { cursor(at: p).set() }
             return
         }
         guard pictureRect.contains(p) else { return }
@@ -613,11 +627,20 @@ final class SimulatorView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if let press = pressed, arranging == nil {
+            let p = convert(event.locationInWindow, from: nil)
+            guard hypot(p.x - press.at.x, p.y - press.at.y) >= 3 else { return }
+            arranging = press.resizing ? .resize : .move
+            cursor(at: p).set()
+            arranger?.beginArranging(self, at: press.event, resizing: press.resizing)
+        }
         if arranging != nil { arranger?.continueArranging(self, at: event); return }
         if touching { touch("move", event) }
     }
 
     override func mouseUp(with event: NSEvent) {
+        if pressed != nil, arranging == nil { pressed = nil; return }   // a click on the body: chosen, nothing moved
+        pressed = nil
         if arranging != nil {
             arranging = nil
             arranger?.endArranging(self)
@@ -662,6 +685,12 @@ final class SimulatorView: NSView {
     @objc func paste(_ sender: Any?) {
         if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty { emit(.text(text)) }
     }
+}
+
+/// The close button: never takes a click on the device's screen (`blocked`), which it slightly overlaps.
+final class CornerButton: NSButton {
+    var blocked = CGRect.zero
+    override func hitTest(_ point: NSPoint) -> NSView? { blocked.contains(point) ? nil : super.hitTest(point) }
 }
 
 /// An image that lets clicks through to the view under it (the resize grip: the device's view handles the drag).

@@ -23,6 +23,7 @@ final class MemoryMeter {
         let ids = Set(alive.map(ObjectIdentifier.init))
         pids = pids.filter { ids.contains($0.key) }
         fromStats = fromStats.filter { ids.contains($0.key) }
+        asking = asking.filter { ids.contains($0) }   // a reply that never came (its connection closed) does not block a later one
         if alive.isEmpty {
             timer?.invalidate()
             timer = nil

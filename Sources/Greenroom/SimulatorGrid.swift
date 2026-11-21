@@ -37,6 +37,8 @@ final class SimulatorGrid: NSView {
     private var gesture: (view: SimulatorView, start: CGPoint, from: Placement, resizing: Bool)?
     /// Whether the devices were put where they are by hand (Tidy Up undoes it).
     var isArranged: Bool { !placements.isEmpty }
+    /// Whether Tidy Up would change anything on screen now.
+    var canTidy: Bool { isArranged && arrangeable }
 
     func view(for sim: Simulator) -> SimulatorView? { views.first { $0.simulator === sim } }
 
@@ -126,7 +128,7 @@ final class SimulatorGrid: NSView {
         memoryLabel.sizeToFit()
         memoryLabel.frame.origin = CGPoint(x: 16, y: 0)
         guard !views.isEmpty else { return }
-        let target = arrangeable && isArranged ? arrangedFrames() : tiledFrames()
+        let target = canTidy && !bounds.isEmpty ? arrangedFrames() : tiledFrames()
         let animate = animateNext && window != nil && !Design.reduceMotion && gesture == nil
         animateNext = false
         let fresh = arriving
@@ -296,7 +298,7 @@ final class SimulatorGrid: NSView {
             p.longSide = clampedLongSide(v, max(byW, byH), within: room)
         } else {
             let size = v.cell(longSide: p.longSide).size
-            p.origin = snapped(clampedOrigin(CGPoint(x: g.from.origin.x + dx, y: g.from.origin.y + dy), size: size), size: size, moving: v)
+            p.origin = clampedOrigin(snapped(clampedOrigin(CGPoint(x: g.from.origin.x + dx, y: g.from.origin.y + dy), size: size), size: size, moving: v), size: size)
         }
         placements[ObjectIdentifier(sim)] = p
         needsLayout = true
