@@ -3,6 +3,7 @@
 #   scripts/bundle.sh [--identity NAME|-] [--engine DIR --testapp APK] [--version X.Y.Z] [--check]
 # --identity   a codesign identity; "-" (default) signs ad hoc, for running on this Mac only
 # --engine     an unpacked apksim release to bundle instead of the one engine.lock names (with --testapp)
+# GREENROOM_BUILD  the build number (CFBundleVersion, which Sparkle compares); the commit count by default
 # --check      afterwards, run the bundled training app headless through the app and verify the signatures
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -27,8 +28,13 @@ cd "$ROOT"
 swift build -c release --arch arm64
 APP="$ROOT/build/Greenroom.app"; C="$APP/Contents"
 rm -rf "$APP"; mkdir -p "$C/MacOS" "$C/Resources"
-cp "$(swift build -c release --arch arm64 --show-bin-path)/Greenroom" "$C/MacOS/Greenroom"
-sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$(git rev-list --count HEAD 2>/dev/null || echo 1)/" \
+BIN_PATH=$(swift build -c release --arch arm64 --show-bin-path)
+cp "$BIN_PATH/Greenroom" "$C/MacOS/Greenroom"
+# Sparkle (in-app updates). Its XPC services are only for sandboxed apps; without them it installs through Autoupdate.
+mkdir -p "$C/Frameworks"
+ditto "$BIN_PATH/Sparkle.framework" "$C/Frameworks/Sparkle.framework"
+rm -rf "$C/Frameworks/Sparkle.framework/Versions/B/XPCServices" "$C/Frameworks/Sparkle.framework/XPCServices"
+sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/${GREENROOM_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}/" \
     -e "s/@ENGINE@/$ENGINE_VERSION/" Resources/Info.plist > "$C/Info.plist"
 [[ -f Resources/AppIcon.icns ]] && cp Resources/AppIcon.icns "$C/Resources/"
 cp -Rc "$ENGINE" "$C/Resources/engine"
@@ -57,7 +63,14 @@ while IFS= read -r f; do
   else "${SIGN[@]}" "$f" 2>/dev/null; fi
   n=$((n+1))
 done < <(find "$C/Resources/engine" -type f \( -perm +111 -o -name '*.dylib' -o -name '*.jnilib' \))
-"${SIGN[@]}" "$APP" 2>/dev/null
+# Sparkle's nested programs, then the framework (its own order, per Sparkle's documentation).
+SP="$C/Frameworks/Sparkle.framework"
+for f in "$SP/Versions/B/Autoupdate" "$SP/Versions/B/Updater.app" "$SP"; do "${SIGN[@]}" "$f" 2>/dev/null; n=$((n+1)); done
+# The app itself: no entitlements with a real identity. Ad hoc, library validation off (greenroom.dev.entitlements):
+# an ad hoc signature has no team, so validation would refuse the app's own Sparkle.framework. (No comments inside
+# an entitlements file: AMFI's parser refuses them.) Errors show: a failure here stops the script.
+if [[ "$IDENTITY" == - ]]; then "${SIGN[@]}" --entitlements Resources/greenroom.dev.entitlements "$APP"
+else "${SIGN[@]}" "$APP"; fi
 echo "signed $n binaries and the app as: $IDENTITY"
 echo "$APP ($(du -sh "$APP" | cut -f1)), engine $ENGINE_VERSION"
 

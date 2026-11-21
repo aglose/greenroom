@@ -16,6 +16,10 @@
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>GreenroomEngineVersion</key><string>@ENGINE@</string>
+  <!-- Sparkle (Updates.swift): the list of versions from the newest published release; no system profile ever. -->
+  <key>SUFeedURL</key><string>https://github.com/aglose/greenroom/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>GSU9x1bVpMXS7mcDMn2jsDlAuytYNrW2WXwcwcoxGso=</string>
+  <key>SUEnableSystemProfiling</key><false/>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

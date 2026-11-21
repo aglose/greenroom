@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var workbench: Workbench!
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        Updates.shared.start()
         buildMenus()
         workbench = Workbench()
         workbench.window.makeKeyAndOrderFront(nil)
@@ -558,6 +559,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let app = NSMenu()
         app.addItem(withTitle: "About Greenroom", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        if Updates.shared.available {
+            let check = app.addItem(withTitle: "Check for Updates…", action: #selector(Updates.checkForUpdates(_:)), keyEquivalent: "")
+            check.target = Updates.shared
+        }
+        app.addItem(.separator())
+        app.addItem(item("Settings…", #selector(showSettings(_:)), ","))
         app.addItem(.separator())
         app.addItem(withTitle: "Hide Greenroom", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let others = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -628,6 +635,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let name = sender.representedObject as? String else { return }
         _ = workbench.perform(NSSelectorFromString(name), with: sender)
     }
+
+    @objc private func showSettings(_ sender: Any?) { SettingsWindow.shared.show() }
 
     private func item(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
