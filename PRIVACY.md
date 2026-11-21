@@ -13,9 +13,10 @@ recordings, logs, or the network traffic it makes.
 One thing, and only after you say yes: **an update check.** On its second launch Greenroom asks whether to check for
 updates automatically; until you agree (or choose Greenroom > Check for Updates…) it sends nothing. A check is one
 HTTPS request to GitHub for the list of Greenroom versions (`appcast.xml` on the project's releases page). It carries
-no identifier and no description of your Mac (Sparkle's system profile is off and cannot be turned on), so GitHub sees
-what any download would: your IP address and that Greenroom asked. An update it downloads is installed only if it is
-signed with the project's update key and by the same developer as the copy you have. Settings > Updates turns the
+no identifier and no description of your Mac (Sparkle's system profile is off and cannot be turned on); its user agent
+names Greenroom's and Sparkle's versions. GitHub (which redirects it to its download host) sees what any download
+would: your IP address, and which Greenroom version asked. An update it downloads is installed only if it is
+signed with the project's update key, or by the same developer as the copy you have (Sparkle accepts either). Settings > Updates turns the
 checks off.
 
 There is no analytics and no crash reporting in this version, and the engine's one download (a test app it trains its

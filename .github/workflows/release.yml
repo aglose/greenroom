@@ -23,8 +23,10 @@ jobs:
         env:
           P12: ${{ secrets.DEVELOPER_ID_P12 }}
           P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          SPARKLE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           [[ -n "$P12" ]] || { echo "::error::the DEVELOPER_ID_P12 secret is not set (docs/RELEASING.md)"; exit 1; }
+          [[ -n "$SPARKLE_KEY" ]] || { echo "::error::the SPARKLE_ED_PRIVATE_KEY secret is not set (docs/RELEASING.md)"; exit 1; }
           KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"; PASS=$(uuidgen)
           echo "$P12" | base64 --decode > "$RUNNER_TEMP/id.p12"
           security create-keychain -p "$PASS" "$KEYCHAIN"

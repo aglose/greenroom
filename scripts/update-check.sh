@@ -13,6 +13,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 IDENTITY=${1:?usage: scripts/update-check.sh IDENTITY [OLD NEW]}
 OLD=${2:-0.0.1}; NEW=${3:-0.0.2}
 SPARKLE="$ROOT/.build/artifacts/sparkle/Sparkle/bin"
+# The test copy has Greenroom's bundle id and state folder: beside a running Greenroom it would take over its agent
+# endpoint and preferences.
+pgrep -x Greenroom >/dev/null && { echo "error: quit Greenroom first" >&2; exit 2; }
 W=$(mktemp -d "${TMPDIR:-/tmp}/greenroom-update.XXXXXX")
 mkdir -p "$W/installed" "$W/feed"
 SERVER=; APP_PID=
@@ -24,7 +27,7 @@ restore() {
   [[ -n "$APP_PID" ]] && kill "$APP_PID" 2>/dev/null
   [[ -n "$SERVER" ]] && kill "$SERVER" 2>/dev/null
   pkill -f "$W/installed/Greenroom.app/Contents/MacOS/Greenroom" 2>/dev/null && sleep 2   # a relaunched copy writes on quit
-  defaults delete "$DOMAIN" 2>/dev/null
+  defaults delete "$DOMAIN" 2>/dev/null || true
   [[ -f "$W/prefs.plist" ]] && defaults import "$DOMAIN" "$W/prefs.plist"
   rm -rf "$W"   # two builds and a disk image: ~1 GB
   true
