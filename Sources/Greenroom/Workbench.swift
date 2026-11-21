@@ -313,7 +313,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         testsPane.follow(selected)
         if showingDiagnostics { diagnosticsPane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
-        rows = []
+        // Built aside and swapped in at once: groups() can run the run loop (Git.available waits for xcode-select), and
+        // the table laying out there would read rows it was never told about.
+        var rows: [Row] = []
         let groups = sessions.groups()
         if !groups.isEmpty && ClaudeUI.offersTitles { rows.append(.claudeTitles) }   // rows read as branches until it is on
         for group in groups {
@@ -336,6 +338,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             rows.append(.header("Recent"))
             rows += recents.map { .recent($0) }
         }
+        self.rows = rows
         table.reloadData()
         if let s = selected, let i = rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }

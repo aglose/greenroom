@@ -258,5 +258,9 @@ private func onCrash(_ sig: Int32) {
         }
         close(fd)
     }
-    raise(sig)   // the handler was reset: the default action ends the process, and macOS writes its own report
+    // Back to the default action, then raised again: it ends the process and macOS writes its own report. Reset here,
+    // not by SA_RESETHAND alone: macOS ignores that flag for SIGILL and SIGTRAP (a Swift trap's signal), and this
+    // handler would run again and again on the same trap, the app spinning with no window.
+    signal(sig, SIG_DFL)
+    raise(sig)
 }
