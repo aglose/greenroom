@@ -8,7 +8,18 @@ final class AgentTools {
 
     weak var workbench: Workbench?
     /// One line per call, for the person watching (main thread).
-    var onActivity: ((_ tool: String, _ summary: String, _ failed: Bool) -> Void)?
+    var onActivity: ((_ tool: String, _ summary: String, _ failed: Bool, _ session: Session?) -> Void)?
+
+    /// Who is calling: the shim's working folder and its parent process (the agent), as it said, and the session
+    /// the folder is a worktree of (nil: none, or a folder outside every added repository). Hints, not rights.
+    struct Connection {
+        var cwd: URL?
+        var parent: Int32?
+        var session: Session?
+    }
+
+    /// The session each simulator an agent opened was opened for (also when it runs with `fresh` data).
+    private var owners: [ObjectIdentifier: String] = [:]
     /// The person at the Mac paused the agent: actions are refused until it is lifted.
     var paused = false
 
@@ -47,13 +58,14 @@ final class AgentTools {
     static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare"]
 
     static let tools: [(name: String, description: String, schema: [String: Any])] = [
-        ("launch", "Start an APK in Greenroom. Answers with the screen's nodes.", schema([
-            "apk": ["type": "string", "description": "path of the .apk"],
+        ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
+            + "with its own app data. Answers with the screen's nodes.", schema([
+            "apk": ["type": "string", "description": "path of the .apk (omit in a worktree of a repository added to Greenroom)"],
             "device": ["type": "string", "enum": devices],
             "appearance": ["type": "string", "enum": ["light", "dark"]],
             "locale": str, "font_scale": ["type": "number"],
-            "fresh": ["type": "boolean", "description": "empty the app's data first"],
-        ], required: ["apk"], sim: false)),
+            "fresh": ["type": "boolean", "description": "empty the app's data first (and do not use the worktree's data)"],
+        ], sim: false)),
         ("simulators", "List running simulators and recently opened APKs.", schema(sim: false)),
         ("close", "Stop a simulator.", schema()),
         ("tap", "Tap a node by ref (e3), by its text, or at x,y. Answers with what changed.", schema(["ref": str, "text": str, "x": int, "y": int])),
@@ -93,7 +105,7 @@ final class AgentTools {
     // MARK: Calling
 
     /// Runs a tool. Never on the main thread. Answers with MCP content blocks.
-    func call(_ name: String, _ args: [String: Any]) throws -> [[String: Any]] {
+    func call(_ name: String, _ args: [String: Any], connection: Connection = Connection()) throws -> [[String: Any]] {
         Reports.shared.count(.agentTool)
         guard AgentTools.tools.contains(where: { $0.name == name }) else { throw Failure(message: "unknown tool \(name)") }
         if paused, !AgentTools.readOnly.contains(name) {
@@ -102,7 +114,7 @@ final class AgentTools {
         do {
             let content: [[String: Any]]
             switch name {
-            case "launch": content = text(try launch(args))
+            case "launch": content = text(try launch(args, connection))
             case "simulators": content = text(simulators())
             case "close": content = text(try close(args))
             case "tap": content = text(try tap(args))
@@ -121,16 +133,16 @@ final class AgentTools {
             default: throw Failure(message: "unknown tool \(name)")
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
-            report(name, first, failed: false)
+            report(name, first, failed: false, connection)
             return content
         } catch let f as Failure {
-            report(name, f.message, failed: true)
+            report(name, f.message, failed: true, connection)
             throw f
         }
     }
 
-    private func report(_ tool: String, _ summary: String, failed: Bool) {
-        DispatchQueue.main.async { self.onActivity?(tool, summary, failed) }
+    private func report(_ tool: String, _ summary: String, failed: Bool, _ connection: Connection) {
+        DispatchQueue.main.async { self.onActivity?(tool, summary, failed, connection.session) }
     }
 
     private func text(_ s: String) -> [[String: Any]] { [["type": "text", "text": s]] }
@@ -220,12 +232,7 @@ final class AgentTools {
 
     // MARK: Tools
 
-    private func launch(_ args: [String: Any]) throws -> String {
-        guard let path = args["apk"] as? String else { throw Failure(message: "apk is required") }
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        guard url.pathExtension.lowercased() == "apk", FileManager.default.isReadableFile(atPath: url.path) else {
-            throw Failure(message: "\(path) is not a readable .apk file")
-        }
+    private func launch(_ args: [String: Any], _ connection: Connection) throws -> String {
         var options: [String] = []
         if let d = args["device"] as? String {
             guard AgentTools.devices.contains(d) else { throw Failure(message: "device is one of \(AgentTools.devices.joined(separator: ", "))") }
@@ -234,25 +241,72 @@ final class AgentTools {
         if let a = args["appearance"] as? String, ["light", "dark"].contains(a) { options += ["--appearance", a] }
         if let l = args["locale"] as? String, l.range(of: AgentTools.settings["locale"]!, options: .regularExpression) != nil { options += ["--locale", l] }
         if let f = args["font_scale"] as? Double, f >= 0.5, f <= 3 { options += ["--font-scale", String(f)] }
-        if args["fresh"] as? Bool == true { options.append("--fresh") }
+        let fresh = args["fresh"] as? Bool == true
+        if fresh { options.append("--fresh") }
 
-        let opened: Simulator? = DispatchQueue.main.sync { self.workbench?.open(url, remember: true, options: options, fromAgent: true) }
-        guard let sim = opened else { throw Failure(message: "Greenroom could not start \(url.lastPathComponent)") }
+        // The session this connection is tied to, as it is now (its build may be newer than when it was tied).
+        let session: Session? = connection.session.flatMap { s in DispatchQueue.main.sync { self.workbench?.sessions.session(atWorktree: s.worktree) } }
+        let name: String
+        let opened: Simulator?
+        var note = ""
+        if let path = args["apk"] as? String {
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            guard url.pathExtension.lowercased() == "apk", FileManager.default.isReadableFile(atPath: url.path) else {
+                throw Failure(message: "\(path) is not a readable .apk file")
+            }
+            name = url.lastPathComponent
+            var opts = options
+            if let session, !fresh {
+                // The session's own data, as a click on its row has: one simulator on a slot, so its old one gives way.
+                opts = ["--data-slots", session.slot] + options
+                DispatchQueue.main.sync {
+                    if let old = self.workbench?.sessions.simulator(for: session) { Engine.shared.close(old); note = " (replaced the session's running simulator)" }
+                }
+            }
+            opened = DispatchQueue.main.sync { self.workbench?.open(url, remember: true, options: opts, fromAgent: true) }
+        } else {
+            guard let session else {
+                throw Failure(message: "this folder is not a worktree of a repository added to Greenroom: pass apk")
+            }
+            let label = session.branch ?? session.shortHead
+            let result: (Simulator?, String?) = DispatchQueue.main.sync {
+                guard let sessions = self.workbench?.sessions else { return (nil, "Greenroom's window is not ready") }
+                if let alive = sessions.simulator(for: session) { sessions.activate(session); return (alive, "selected") }
+                guard let apk = sessions.apk(for: session) else { return (nil, "no build yet for \(label)") }
+                return (sessions.start(session, options: options, fromAgent: true), apk.lastPathComponent)
+            }
+            if let why = result.1, result.0 == nil { throw Failure(message: why) }
+            guard let sim = result.0 else { throw Failure(message: "Greenroom could not start the simulator for \(label)") }
+            opened = sim
+            name = result.1 == "selected" ? "the session's running simulator" : (result.1 ?? "build")
+            if result.1 == "selected" { note = " (already running; device and other options not applied)" }
+        }
+        guard let sim = opened else { throw Failure(message: "Greenroom could not start \(name)") }
+        if let session { owners[ObjectIdentifier(sim)] = session.worktree.path }
         let deadline = Date().addingTimeInterval(150)
         while Date() < deadline {
             let state = DispatchQueue.main.sync { sim.state }
             if state == .running { break }
-            if case .ended(let code) = state { throw Failure(message: "\(url.lastPathComponent) ended while starting (exit \(code)):\n" + tail(sim, 12)) }
+            if case .ended(let code) = state { throw Failure(message: "\(name) ended while starting (exit \(code)):\n" + tail(sim, 12)) }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        guard DispatchQueue.main.sync(execute: { sim.state }) == .running else { throw Failure(message: "\(url.lastPathComponent) did not start within 150 s") }
+        guard DispatchQueue.main.sync(execute: { sim.state }) == .running else { throw Failure(message: "\(name) did not start within 150 s") }
         let settled = sim.sendSync("settle 20000 300", timeout: 30)
         sim.tree.update(nodes(sim))
         sim.logOffset = 0
         let size = DispatchQueue.main.sync { sim.deviceSize }
-        var head = "\(id(sim)) launched \(url.lastPathComponent) \(Int(size.width))x\(Int(size.height)) | \(activity(sim))"
+        var head = "\(id(sim)) launched \(name)\(session.map { " for \($0.branch ?? $0.shortHead)" } ?? "") \(Int(size.width))x\(Int(size.height)) | \(activity(sim))\(note)"
         if !settled.hasPrefix("settled") { head += " (still animating)" }
         return ([head] + sim.tree.nodes.filter { !$0.label.isEmpty || $0.click }.map(\.line)).joined(separator: "\n")
+    }
+
+    /// The session a simulator belongs to: the one an agent opened it for, else the one whose data slot it runs.
+    private func sessionOf(_ sim: Simulator) -> Session? {
+        DispatchQueue.main.sync {
+            guard let sessions = workbench?.sessions else { return nil }
+            if let path = owners[ObjectIdentifier(sim)], let s = sessions.sessions.first(where: { $0.worktree.path == path }) { return s }
+            return sessions.session(forSimulator: sim)
+        }
     }
 
     private func simulators() -> String {
@@ -266,7 +320,8 @@ final class AgentTools {
             case .running: what = "running \(Int(size.width))x\(Int(size.height)) | \(activity(s))"
             case .ended(let code): what = "ended (exit \(code))"
             }
-            return "\(id(s)) \(s.apk.path) \(what)" + (s.options.isEmpty ? "" : " [\(s.options.joined(separator: " "))]")
+            let owner = sessionOf(s).map { " (session \($0.branch ?? $0.shortHead))" } ?? ""
+            return "\(id(s)) \(s.apk.path)\(owner) \(what)" + (s.options.isEmpty ? "" : " [\(s.options.joined(separator: " "))]")
         }
         if lines.isEmpty { lines.append("no simulators") }
         let recent = Recents.all.prefix(8).map(\.path)

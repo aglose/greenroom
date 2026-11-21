@@ -77,6 +77,14 @@ enum Git {
         return common.deletingLastPathComponent()
     }
 
+    /// `git rev-parse --show-toplevel`: the root of the worktree `folder` is in, symlinks resolved, or nil when it
+    /// is in no working tree.
+    static func toplevel(of folder: URL) async -> URL? {
+        guard let out = await run(["rev-parse", "--path-format=absolute", "--show-toplevel"], in: folder) else { return nil }
+        let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath()
+    }
+
     static func commonDir(of root: URL) -> URL { root.appendingPathComponent(".git", isDirectory: true) }
 
     static func parseWorktrees(_ porcelain: String) -> [Worktree] {

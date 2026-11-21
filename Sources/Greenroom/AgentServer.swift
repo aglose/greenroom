@@ -108,11 +108,60 @@ final class AgentServer {
             respond(connection, 200, json: ["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "parse error"]])
             return
         }
+        // Hints from a local program that already holds the token: they select a row and grant nothing.
+        let hint = AgentServer.hint(headers)
         work.async { [weak self] in
             guard let self else { return }
-            if let answer = self.dispatch(message) { self.respond(connection, 200, json: answer) }
+            let who = message["method"] as? String == "tools/call" ? self.connect(hint) : self.note(hint)
+            if let answer = self.dispatch(message, connection: who) { self.respond(connection, 200, json: answer) }
             else { self.respond(connection, 202, "") }   // a notification: nothing to answer
         }
+    }
+
+    /// What the shim said about itself: its working folder and its parent's process id. Both optional (an older
+    /// shim sends neither), and a folder that is not an absolute path to a folder is dropped.
+    static func hint(_ headers: [String: String]) -> (cwd: URL?, parent: Int32?) {
+        var cwd: URL?
+        if let raw = headers["x-greenroom-cwd"]?.removingPercentEncoding, raw.hasPrefix("/"), !raw.contains("\0") {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: raw, isDirectory: &isDir), isDir.boolValue { cwd = URL(fileURLWithPath: raw, isDirectory: true) }
+        }
+        let parent = headers["x-greenroom-parent"].flatMap { Int32($0) }.flatMap { $0 > 0 ? $0 : nil }
+        return (cwd, parent)
+    }
+
+    /// One shim: found again by its parent process (the agent) and its folder, so several agents in different
+    /// worktrees stay apart. `session` is the worktree the folder is in, if it is in one of an added repository.
+    private var known: [String: AgentTools.Connection] = [:]
+    private let knownLock = NSLock()
+
+    /// Every connection seen since the app started (the agent's parent process id is kept for W1 to join with
+    /// Claude Code's own session files).
+    var connections: [AgentTools.Connection] { knownLock.lock(); defer { knownLock.unlock() }; return Array(known.values) }
+
+    private func note(_ hint: (cwd: URL?, parent: Int32?)) -> AgentTools.Connection {
+        var c = AgentTools.Connection(cwd: hint.cwd, parent: hint.parent)
+        let key = "\(hint.parent.map(String.init) ?? "-")|\(hint.cwd?.path ?? "-")"
+        knownLock.lock(); defer { knownLock.unlock() }
+        if let old = known[key] { c.session = old.session }
+        known[key] = c
+        return c
+    }
+
+    /// The connection of a request, tied to the session of its folder. On the tool queue, never the main thread.
+    private func connect(_ hint: (cwd: URL?, parent: Int32?)) -> AgentTools.Connection {
+        var c = note(hint)
+        c.session = nil
+        if let cwd = hint.cwd {
+            let done = DispatchSemaphore(value: 0)
+            var top: URL?
+            Task.detached { top = await Git.toplevel(of: cwd); done.signal() }
+            done.wait()
+            if let top { c.session = DispatchQueue.main.sync { tools.workbench?.sessions.session(atWorktree: top) } }
+        }
+        let key = "\(hint.parent.map(String.init) ?? "-")|\(hint.cwd?.path ?? "-")"
+        knownLock.lock(); known[key] = c; knownLock.unlock()
+        return c
     }
 
     private static func same(_ a: String, _ b: String) -> Bool {
@@ -142,7 +191,7 @@ final class AgentServer {
     // MARK: The protocol
 
     /// One JSON-RPC message in, its answer out (nil for a notification).
-    func dispatch(_ m: [String: Any]) -> [String: Any]? {
+    func dispatch(_ m: [String: Any], connection: AgentTools.Connection = AgentTools.Connection()) -> [String: Any]? {
         guard let method = m["method"] as? String, let id = m["id"], !(id is NSNull) else { return nil }
         func result(_ r: [String: Any]) -> [String: Any] { ["jsonrpc": "2.0", "id": id, "result": r] }
         func failure(_ code: Int, _ message: String, _ data: Any? = nil) -> [String: Any] {
@@ -179,7 +228,7 @@ final class AgentServer {
             if let a = params["arguments"], !(a is [String: Any]), !(a is NSNull) { return failure(-32602, "arguments must be an object") }
             guard AgentTools.tools.contains(where: { $0.name == name }) else { return failure(-32602, "unknown tool \(name)") }
             do {
-                let content = try tools.call(name, params["arguments"] as? [String: Any] ?? [:])
+                let content = try tools.call(name, params["arguments"] as? [String: Any] ?? [:], connection: connection)
                 return result(["resultType": "complete", "content": content])
             } catch let f as AgentTools.Failure {
                 return result(["resultType": "complete", "isError": true, "content": [["type": "text", "text": f.message]]])
@@ -235,6 +284,13 @@ enum AgentShim {
         request.timeoutInterval = 300
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(e.token)", forHTTPHeaderField: "Authorization")
+        // Where the agent works and who started this shim: the app ties the connection to a worktree's session.
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "/-_.~")
+        if let cwd = FileManager.default.currentDirectoryPath.addingPercentEncoding(withAllowedCharacters: allowed) {
+            request.setValue(cwd, forHTTPHeaderField: "X-Greenroom-Cwd")
+        }
+        request.setValue(String(getppid()), forHTTPHeaderField: "X-Greenroom-Parent")
         let done = DispatchSemaphore(value: 0)
         var out: (Int, Data)?
         let config = URLSessionConfiguration.ephemeral

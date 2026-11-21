@@ -36,7 +36,7 @@ The answers are built to be cheap to read:
 
 | Tool | |
 | --- | --- |
-| `launch` | start an APK: `apk`, and optionally `device`, `appearance`, `locale`, `font_scale`, `fresh` |
+| `launch` | start an APK: `apk` (left out inside a worktree of a repository added to Greenroom: see below), and optionally `device`, `appearance`, `locale`, `font_scale`, `fresh` |
 | `simulators`, `close` | what is running; stop one |
 | `tap` | by `ref`, by `text`, or at `x`,`y` |
 | `type` | `text`, into the field named by `ref` or `tap_text`; `enter` |
@@ -51,6 +51,35 @@ beside the first, so the same build can be driven on a phone and a tablet at onc
 To check a change against the build before it: `launch` both APKs, do the same steps on each, and `compare`.
 `s1 vs s2: SAME | same content, identical pixels` means the change did nothing visible on that screen; otherwise
 the lines say exactly what moved, appeared or went.
+
+## Worktrees and sessions
+
+When the person has added a git repository to Greenroom (Sessions), each of its worktrees is a session, with its
+own simulator and its own app data. The shim (`Greenroom --mcp`) tells the app where it was started, with every
+request it forwards:
+
+| Header | Value |
+| --- | --- |
+| `X-Greenroom-Cwd` | the shim's working folder, percent-encoded |
+| `X-Greenroom-Parent` | the process id of the program that started the shim (the agent) |
+
+The app ties the connection to the session whose worktree contains that folder (`git rev-parse --show-toplevel`,
+symlinks resolved; a subfolder counts, and a folder in no added worktree ties to none). It keeps the folder and the
+parent process id per connection, so several agents in different worktrees stay apart, and the Agent popover shows
+one activity feed per session (and one for calls tied to none), each entry saying which session it came from.
+Older shims send neither header and everything works as before.
+
+- `launch` **without `apk`** starts the connection's session's simulator from its newest build, with the session's
+  data and as a click on its row does; if that simulator is already running it is selected (device and other
+  options are not applied to a running one). Without a session it answers `this folder is not a worktree of a
+  repository added to Greenroom: pass apk`; with a session that has no build, `no build yet for <branch>`.
+- `launch` **with `apk`** inside a session also uses the session's data, unless `fresh` is true. It replaces the
+  session's running simulator, if any: one simulator per data slot.
+- `simulators` lists each simulator with its session's branch: `(session feat-login)`.
+
+The headers are hints from a local program that already holds the token. They select a row and grant nothing: no
+tool can reach a file or an app it could not before, and the folder is never read, only compared with the added
+worktrees.
 
 ## What an agent cannot do
 

@@ -40,7 +40,12 @@ final class Engine {
             root = (Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent("engine")
         }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        state = support.appendingPathComponent("Greenroom", isDirectory: true)
+        // GREENROOM_STATE: another state folder, for checks that must not touch (or meet) the person's own.
+        if let other = ProcessInfo.processInfo.environment["GREENROOM_STATE"], other.hasPrefix("/") {
+            state = URL(fileURLWithPath: other, isDirectory: true)
+        } else {
+            state = support.appendingPathComponent("Greenroom", isDirectory: true)
+        }
     }
 
     var launcher: URL { root.appendingPathComponent("apksim") }
