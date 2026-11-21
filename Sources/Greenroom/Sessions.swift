@@ -19,11 +19,13 @@ struct Workspace: Codable, Equatable {
     /// The `ci` and `remote` recipes' settings (RecipeSettings.swift).
     var ci = CISettings()
     var remote = RemoteSettings()
+    /// Evidence walks use a copy of each session's signed-in data (off by default: a walk is fresh).
+    var walkWithData = false
 
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote }
+    private enum Keys: String, CodingKey { XX a606ba2 (Evidence: walks are fresh unless the workspace opts in to its signed-in data, run at background priority and wait for builds and for the person; per-caller cancel, forgotten worktrees, newest build wins, shared maps, unfinished walks, pruning by owner, a check on a state folder of its own)
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -35,6 +37,7 @@ struct Workspace: Codable, Equatable {
         auto = (try? c.decodeIfPresent(Auto.self, forKey: .auto)) ?? auto
         ci = (try? c.decodeIfPresent(CISettings.self, forKey: .ci)) ?? ci
         remote = (try? c.decodeIfPresent(RemoteSettings.self, forKey: .remote)) ?? remote
+        walkWithData = (try? c.decodeIfPresent(Bool.self, forKey: .walkWithData)) ?? walkWithData
     }
 }
 

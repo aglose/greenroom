@@ -125,6 +125,8 @@ final class CrawlRun {
         var keepData = false
         /// Options for the engine's launches, after `--` (`--data-slots NAME`).
         var engineOptions: [String] = []
+        /// Run at background quality of service (Evidence's walks; the Screen Map sheet's own runs are not).
+        var background = false
     }
     enum Event {
         /// Depth `depth` has `exploring` screens; `known` found so far.
@@ -158,6 +160,7 @@ final class CrawlRun {
         let tail = settings.engineOptions + (settings.offline ? ["--network-profile", "offline"] : [])
         if !tail.isEmpty { a += ["--"] + tail }
         process.arguments = a
+        if settings.background { process.qualityOfService = .background }
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let meta: [String: Any] = ["apk": apk.path, "depth": settings.depth, "seconds": settings.seconds,
                                    "appearances": settings.appearances, "offline": settings.offline, "start": settings.start ?? ""]
@@ -246,15 +249,17 @@ final class CrawlRun {
         onFinish?(.failed(last ?? "The walk ended with status \(code) and no map."))
     }
 
-    /// Stops the walk and the simulators it started (only processes that descend from it).
+    /// Stops the walk and the simulators it started (only processes that descend from it). The crawler is told first,
+    /// so it can end its own simulators; the tree is read before that (children of a dead crawler belong to no one),
+    /// and what is left after 4 s is killed. Off the calling thread (reading the tree runs `pgrep`) unless `wait`.
     func cancel(wait: Bool = false) {
         guard isRunning, process.isRunning else { return }
         cancelled = true
         let pid = process.processIdentifier
-        let tree = SnapshotRun.descendants(of: pid)
-        for p in tree.reversed() { kill(p, SIGTERM) }
-        kill(pid, SIGTERM)
         let stop = { [process] in
+            let tree = SnapshotRun.descendants(of: pid)
+            kill(pid, SIGTERM)
+            for p in tree.reversed() { kill(p, SIGTERM) }
             let deadline = Date().addingTimeInterval(4)
             while process.isRunning, Date() < deadline { usleep(50_000) }
             for p in tree where kill(p, 0) == 0 { kill(p, SIGKILL) }

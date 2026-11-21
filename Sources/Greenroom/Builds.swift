@@ -80,6 +80,8 @@ final class Builds {
     init(sessions: SessionsController) { self.sessions = sessions }
 
     func job(for session: Session) -> BuildJob? { jobs[session.worktree.path] }
+    /// Whether a recipe of this workspace is running now (Evidence holds its walks back meanwhile).
+    func isBuilding(workspace: String) -> Bool { running[workspace] != nil }
     func isBuilding(_ worktree: String) -> Bool { jobs[worktree]?.isActive ?? false }
 
     // MARK: Start and cancel

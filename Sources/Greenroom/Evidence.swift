@@ -23,7 +23,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     enum Status: Equatable {
         case queued
         case walking(depth: Int, known: Int)
-        case done(screens: Int, crashes: Int)
+        case done(screens: Int, crashes: Int, unfinished: Bool)
         case failed(String)
         case stopped
     }
@@ -31,6 +31,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
     /// What the row of one session shows about its newest build.
     struct Entry: Equatable {
         var key: String
+        /// The build's own date: a build that arrives older than the newest one seen for the session is ignored.
+        var date: Date
         var status: Status
         /// How the walk was made ("on a copy of this session's data", "fresh: ...").
         var note: String?
@@ -62,7 +64,15 @@ final class Evidence: NSObject, NSMenuItemValidation {
     /// What a walk does not reach, said in the row's detail.
     static let limits = "The walk taps through the app a level or two deep within a time budget. It does not reach screens behind typed input, a signed-in server state it has no data for, or a gesture it does not try."
 
-    var store: SessionStore = .shared
+    var store: SessionStore = .shared {
+        didSet {
+            guard oldValue.root != store.root else { return }
+            // Another store (a check's own): nothing queued or shown belongs to it.
+            queue.removeAll()
+            entries = [:]
+            if let job = current { job.forgotten = true; cancel(job) }
+        }
+    }
     /// The engine's per-package data folders (`cache/data/<package>/<slot>-N`).
     var dataRoot: URL = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
     var budget = Budget()
@@ -91,7 +101,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     private var quitObserver: NSObjectProtocol?
 
     private final class Job {
-        enum Kind { case walk(slot: String), changes(base: Build) }
+        enum Kind { case walk(slot: String?), changes(base: Build) }
         let owner: String
         let build: Build
         let kind: Kind
@@ -101,8 +111,22 @@ final class Evidence: NSObject, NSMenuItemValidation {
         /// Why it was cancelled: a person's Stop (the row says stopped) or a newer build (its own entry takes over).
         var stopped = false
         var note: String?
-        var completions: [(Result<ChangesResult, Failure>) -> Void] = []
-        init(owner: String, build: Build, kind: Kind) { self.owner = owner; self.build = build; self.kind = kind }
+        /// "Walk again": not satisfied by a map that is there.
+        var force = false
+        /// The session or repository went: the walk's folder goes with it.
+        var forgotten = false
+        struct Waiter {
+            let id = UUID()
+            let completion: (Result<ChangesResult, Failure>) -> Void
+            let progress: ((CrawlRun.Event) -> Void)?
+        }
+        var waiters: [Waiter] = []
+        /// Where it is made and where it ends up, fixed when the job is made (the store may change meanwhile).
+        let part: URL
+        let final: URL
+        init(owner: String, build: Build, kind: Kind, part: URL, final: URL) {
+            self.owner = owner; self.build = build; self.kind = kind; self.part = part; self.final = final
+        }
         var isChanges: Bool { if case .changes = kind { return true } else { return false } }
     }
 
@@ -133,15 +157,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     func entry(of worktree: String) -> Entry? { entries[worktree] }
 
-    /// A build of the session was filed (a rebuild landed, or a session with a build was started): walk it when the
-    /// workspace's `auto` asks to. `onTurnEnd` is treated as `onBuild` until the Claude link can tell a turn's end.
-    func buildArrived(worktree: String, build: Build, auto: Auto) {
-        request(worktree: worktree, build: build, force: false, walk: auto != .off)
+    /// A build of the session was filed (a rebuild landed, a recipe built one, or a session with a build was
+    /// started): walk it when the workspace's `auto` asks to. `onTurnEnd` is treated as `onBuild` until the Claude
+    /// link can tell a turn's end. `withData`: the workspace's "walk with my signed-in data" (off by default).
+    func buildArrived(worktree: String, build: Build, auto: Auto, withData: Bool = false) {
+        request(worktree: worktree, build: build, force: false, walk: auto != .off, withData: withData)
     }
 
     /// "Walk again": walks the build now whatever the setting, and whatever is cached.
-    func walkAgain(worktree: String, build: Build) {
-        request(worktree: worktree, build: build, force: true, walk: true)
+    func walkAgain(worktree: String, build: Build, withData: Bool = false) {
+        request(worktree: worktree, build: build, force: true, walk: true, withData: withData)
     }
 
     /// "Stop walking": the session's running or queued walk ends and the row says so.
@@ -156,11 +181,29 @@ final class Evidence: NSObject, NSMenuItemValidation {
         if was, var e = entries[worktree] { e.status = .stopped; entries[worktree] = e; onChange?() }
     }
 
+    /// A worktree is gone (or its repository was removed): its queued and running walks stop, its row goes, and the
+    /// folder of a walk that was running goes with it. Its finished evidence goes with its builds, when the store
+    /// prunes them.
+    func forget(worktree: String) {
+        queue.removeAll { $0.owner == worktree }
+        if let job = current, job.owner == worktree { job.forgotten = true; cancel(job) }
+        if entries[worktree] != nil { entries[worktree] = nil; onChange?() }
+    }
+
     func isWalking(_ worktree: String) -> Bool {
         switch entries[worktree]?.status { case .queued?, .walking?: return true; default: return false }
     }
 
-    private func request(worktree: String, build: Build, force: Bool, walk: Bool) {
+    private func walkJob(owner: String, build: Build, slot: String?) -> Job {
+        let dir = evidenceFolder.appendingPathComponent(build.key, isDirectory: true)
+        return Job(owner: owner, build: build, kind: .walk(slot: slot), part: dir.appendingPathComponent("map.part", isDirectory: true),
+                   final: dir.appendingPathComponent("map", isDirectory: true))
+    }
+
+    private func request(worktree: String, build: Build, force: Bool, walk: Bool, withData: Bool) {
+        // Two builds of one session can arrive in either order (they are filed on a concurrent queue): the newest
+        // one, by its own date, is the one that counts.
+        if !force, let e = entries[worktree], e.date > build.date { return }
         if !force, let e = entries[worktree], e.key == build.key {
             switch e.status {
             case .queued, .walking, .done: return
@@ -170,7 +213,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         let map = mapFolder(for: build.key)
         if !force, hasCrawl(map), let data = ScreenMapData.read(map) {
             drop(worktree)
-            entries[worktree] = Entry(key: build.key, status: .done(screens: data.screens.count, crashes: data.crashes.count), note: nil)
+            entries[worktree] = Entry(key: build.key, date: build.date, status: Self.done(data), note: nil)
             onChange?()
             return
         }
@@ -182,11 +225,18 @@ final class Evidence: NSObject, NSMenuItemValidation {
         }
         drop(worktree)
         if force { try? fm.removeItem(at: map) }
-        let slot = controller?.sessions.first { $0.worktree.path == worktree }?.slot ?? SessionStore.slot(for: URL(fileURLWithPath: worktree))
-        entries[worktree] = Entry(key: build.key, status: .queued, note: nil)
-        queue.append(Job(owner: worktree, build: build, kind: .walk(slot: slot)))
+        // The data of this session is used only when the workspace asked for it.
+        let slot = withData ? (controller?.sessions.first { $0.worktree.path == worktree }?.slot ?? SessionStore.slot(for: URL(fileURLWithPath: worktree))) : nil
+        entries[worktree] = Entry(key: build.key, date: build.date, status: .queued, note: nil)
+        let job = walkJob(owner: worktree, build: build, slot: slot)
+        job.force = force
+        queue.append(job)
         onChange?()
         pump()
+    }
+
+    static func done(_ data: ScreenMapData) -> Status {
+        .done(screens: data.screens.count, crashes: data.crashes.count, unfinished: !data.incomplete.isEmpty)
     }
 
     /// Removes the owner's queued jobs and cancels its running one (a newer build has come).
@@ -198,8 +248,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
     // MARK: Comparisons
 
     /// Walks `head` against `base` (`crawl.py HEAD --base BASE`, the same budgets) and tells the result, on the main
-    /// thread. Cached by the pair: a finished one answers at once. The run joins the one walk at a time. No data
-    /// slot is used: the crawler cannot keep data across two builds, so both are walked fresh.
+    /// thread. Cached by the pair: a finished one answers at once. The run joins the one walk at a time, and
+    /// callers asking for the same pair share it: a token's cancel removes only its own caller, and the run ends
+    /// when none is left. No data slot is used: the crawler cannot keep data across two builds.
     @discardableResult
     func changes(head: Build, base: Build, progress: ((CrawlRun.Event) -> Void)? = nil,
                  completion: @escaping (Result<ChangesResult, Failure>) -> Void) -> Token {
@@ -210,30 +261,26 @@ final class Evidence: NSObject, NSMenuItemValidation {
             DispatchQueue.main.async { completion(.success(ChangesResult(folder: folder, map: data, summary: Self.summary(of: folder)))) }
             return token
         }
-        var done = false
-        let once: (Result<ChangesResult, Failure>) -> Void = { r in if !done { done = true; completion(r) } }
         let job: Job
-        if let running = current, running.owner == owner { job = running }
+        if let running = current, running.owner == owner, !running.cancelled { job = running }
         else if let queued = queue.first(where: { $0.owner == owner }) { job = queued }
         else {
-            job = Job(owner: owner, build: head, kind: .changes(base: base))
+            job = Job(owner: owner, build: head, kind: .changes(base: base),
+                      part: changesFolder.appendingPathComponent("\(head.key)-\(base.key).part", isDirectory: true), final: folder)
             queue.append(job)
         }
-        job.completions.append(once)
-        progressHandlers[owner, default: []].append(progress)
+        let waiter = Job.Waiter(completion: completion, progress: progress)
+        job.waiters.append(waiter)
         token.cancelAction = { [weak self, weak job] in
-            guard let self, let job, !done else { return }
-            once(.failure(Failure(message: "cancelled")))
+            guard let self, let job, let i = job.waiters.firstIndex(where: { $0.id == waiter.id }) else { return }
+            job.waiters.remove(at: i).completion(.failure(Failure(message: "cancelled")))
             // The run goes only when nobody is left waiting for it.
-            job.completions.removeAll()
-            self.progressHandlers[owner] = nil
+            guard job.waiters.isEmpty else { return }
             if self.current === job { self.cancel(job) } else { self.queue.removeAll { $0 === job } }
         }
         pump()
         return token
     }
-
-    private var progressHandlers: [String: [((CrawlRun.Event) -> Void)?]] = [:]
 
     static func summary(of folder: URL) -> ChangesSummary {
         var s = ChangesSummary()
@@ -255,16 +302,25 @@ final class Evidence: NSObject, NSMenuItemValidation {
     // MARK: The queue
 
     private func pump() {
-        guard current == nil, let next = queue.first else { return }
-        if shouldPause?(next.owner) == true {
-            guard retry == nil else { return }
-            retry = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in self?.retry = nil; self?.pump() }
+        guard current == nil else { return }
+        while let next = queue.first {
+            // The same build in two sessions: the first walk made the map the second one wants.
+            if !next.isChanges, !next.force, hasCrawl(next.final), let data = ScreenMapData.read(next.final) {
+                queue.removeFirst()
+                if var e = entries[next.owner], e.key == next.build.key { e.status = Self.done(data); entries[next.owner] = e; onChange?() }
+                continue
+            }
+            if shouldPause?(next.owner) == true {
+                guard retry == nil else { return }
+                retry = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in self?.retry = nil; self?.pump() }
+                return
+            }
+            queue.removeFirst()
+            current = next
+            started += 1
+            begin(next)
             return
         }
-        queue.removeFirst()
-        current = next
-        started += 1
-        begin(next)
     }
 
     private func begin(_ job: Job) {
@@ -272,19 +328,14 @@ final class Evidence: NSObject, NSMenuItemValidation {
             finish(job, .failed("Walking needs Python 3, and this Mac has none. Install the command line tools (xcode-select --install in Terminal)."))
             return
         }
-        let out: URL
+        let out = job.part
         var s = CrawlRun.Settings()
         s.depth = budget.depth
         s.seconds = budget.seconds
         s.jobs = budget.jobs
         s.appearances = ["light"]
-        switch job.kind {
-        case .walk:
-            out = evidenceFolder.appendingPathComponent(job.build.key, isDirectory: true).appendingPathComponent("map.part", isDirectory: true)
-        case .changes(let base):
-            out = changesFolder.appendingPathComponent("\(job.build.key)-\(base.key).part", isDirectory: true)
-            s.base = base.apk
-        }
+        s.background = true   // evidence walks yield to everything the person is doing
+        if case .changes(let base) = job.kind { s.base = base.apk }
         // The clone, and the rest of the set-up, off the main thread (a copy fallback of a big slot takes a while).
         let root = dataRoot
         var slotName: String?
@@ -305,7 +356,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     settings.keepData = true
                     settings.jobs = 1   // the crawler walks a kept slot with one simulator
                     settings.engineOptions = ["--data-slots", name]
-                    note = "walked on a copy of this session's data, with one simulator; the session's own data is untouched"
+                    note = "walked signed in, on a copy of this session's data with one simulator; the session's own data is untouched"
                 case .none:
                     clone = fresh
                     settings.engineOptions = ["--data-slots", fresh]
@@ -318,6 +369,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             } else {
                 clone = fresh
                 settings.engineOptions = ["--data-slots", fresh]
+                if !job.isChanges { note = "walked fresh, with no sign-in (\"Walk with my signed-in data\" is off for this repository)" }
             }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -334,14 +386,13 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     case .cancelled: self?.finish(job, .cancelled)
                     }
                 }
-                if job.cancelled { self.finish(job, .cancelled); return }
                 run.start()
             }
         }
     }
 
     private func event(_ e: CrawlRun.Event, _ job: Job) {
-        if case .changes = job.kind { progressHandlers[job.owner]?.forEach { $0?(e) }; return }
+        if job.isChanges { job.waiters.forEach { $0.progress?(e) }; return }
         guard var entry = entries[job.owner], entry.key == job.build.key else { return }
         switch e {
         case .level(let depth, _, let known): entry.status = .walking(depth: depth, known: known)
@@ -370,24 +421,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case .cancelled: NSLog("Greenroom: the walk of \(job.build.key) was cancelled\(job.stopped ? " (stopped)" : "")")
         }
         if let name = job.clone { let root = dataRoot; DispatchQueue.global(qos: .utility).async { SlotClone.remove(name, in: root) } }
-        let part: URL
-        let final: URL
-        switch job.kind {
-        case .walk:
-            let dir = evidenceFolder.appendingPathComponent(job.build.key, isDirectory: true)
-            part = dir.appendingPathComponent("map.part", isDirectory: true)
-            final = dir.appendingPathComponent("map", isDirectory: true)
-        case .changes(let base):
-            part = changesFolder.appendingPathComponent("\(job.build.key)-\(base.key).part", isDirectory: true)
-            final = changesFolder(head: job.build.key, base: base.key)
-        }
+        let part = job.part, final = job.final
         var result: Result<ChangesResult, Failure> = .failure(Failure(message: "cancelled"))
         var status: Status?
         switch end {
+        case .finished where job.forgotten || job.cancelled:
+            try? fm.removeItem(at: part)
         case .finished:
             try? fm.removeItem(at: final)
             if (try? fm.moveItem(at: part, to: final)) != nil, let data = ScreenMapData.read(final) {
-                status = .done(screens: data.screens.count, crashes: data.crashes.count)
+                status = Self.done(data)
                 result = .success(ChangesResult(folder: final, map: data, summary: Self.summary(of: final)))
             } else {
                 status = .failed("The walk finished but its map could not be read.")
@@ -401,16 +444,17 @@ final class Evidence: NSObject, NSMenuItemValidation {
             try? fm.removeItem(at: part)
             status = job.stopped ? .stopped : nil
         }
+        if job.forgotten, !job.isChanges { try? fm.removeItem(at: final.deletingLastPathComponent()); status = nil }
         if !job.isChanges, let status, var e = entries[job.owner], e.key == job.build.key {
             e.status = status
             e.note = job.note
             entries[job.owner] = e
         }
-        for c in job.completions { c(result) }
-        job.completions.removeAll()
-        progressHandlers[job.owner] = nil
+        let waiters = job.waiters
+        job.waiters.removeAll()
+        for w in waiters { w.completion(result) }
         onChange?()
-        pruneToCap()
+        pruneToCap(force: true)
         pump()
     }
 
@@ -425,6 +469,27 @@ final class Evidence: NSObject, NSMenuItemValidation {
         }
     }
 
+    // MARK: Pausing
+
+    /// When the person last used one of the app's own simulators (a click, a key or a scroll on a device view).
+    private(set) var lastInput = Date.distantPast
+    private var inputMonitor: Any?
+
+    /// Starts listening for the person's input to a device (for `interacting`). Once.
+    func watchInput() {
+        guard inputMonitor == nil else { return }
+        inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) { [weak self] event in
+            var v = event.window?.contentView?.hitTest(event.locationInWindow)
+            if event.type == .keyDown { v = event.window?.firstResponder as? NSView }
+            while let view = v { if view is SimulatorView { self?.lastInput = Date(); break }; v = view.superview }
+            return event
+        }
+    }
+
+    /// True while the person used a simulator in the last 30 s: a walk does not start then, and starts by itself
+    /// once they stop (the queue looks again every 5 s).
+    var interacting: Bool { Date().timeIntervalSince(lastInput) < 30 }
+
     // MARK: Size cap
 
     /// The size cap of `evidence/` and `changes/` together, in bytes: Settings' "evidenceCapGB" (default 5).
@@ -433,49 +498,78 @@ final class Evidence: NSObject, NSMenuItemValidation {
         return Int64(max(0.001, gb) * 1_073_741_824)
     }
 
-    /// Removes the oldest evidence folders until what is kept fits the cap; never the one being written.
-    func pruneToCap(cap: Int64 = Evidence.capBytes) {
-        let busy = current.map { job -> String in
-            switch job.kind {
-            case .walk: return evidenceFolder.appendingPathComponent(job.build.key).path
-            case .changes(let base): return changesFolder.appendingPathComponent("\(job.build.key)-\(base.key).part").path
-            }
-        }
+    private var lastPrune = Date.distantPast
+    private var pruning = false
+
+    /// Removes the oldest evidence folders until what is kept fits the cap. Never the folder of an owner that is
+    /// queued or running: that is decided when the victims are chosen, not when the call was made. A call that is
+    /// not `force`d (the sidebar's refresh) runs at most every 3 minutes; a walk's end forces one. The folders are
+    /// listed once, for size and newest file together.
+    func pruneToCap(cap: Int64 = Evidence.capBytes, force: Bool = false) {
+        guard !pruning, force || Date().timeIntervalSince(lastPrune) > 180 else { return }
+        pruning = true
+        lastPrune = Date()
         let roots = [evidenceFolder, changesFolder]
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let fm = FileManager.default
             var items: [(url: URL, size: Int64, date: Date)] = []
             for root in roots {
-                for d in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] where d.path != busy {
-                    items.append((d, Self.size(of: d), Self.newest(in: d)))
+                for d in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+                    let (size, date) = Self.measure(d)
+                    items.append((d, size, date))
                 }
             }
-            var total = items.reduce(0) { $0 + $1.size }
-            for item in items.sorted(by: { $0.date < $1.date }) where total > cap {
-                try? fm.removeItem(at: item.url)
-                total -= item.size
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let busy = self.busyFolders()
+                var total = items.reduce(0) { $0 + $1.size }
+                var victims: [URL] = []
+                for item in items.sorted(by: { $0.date < $1.date }) where total > cap && !busy.contains(item.url.path) {
+                    victims.append(item.url)
+                    total -= item.size
+                }
+                for v in victims { try? fm.removeItem(at: v) }
+                self.pruning = false
+                if !victims.isEmpty { self.clearRowsOfRemoved(victims) }
             }
         }
     }
 
-    static func size(of folder: URL) -> Int64 {
-        var n: Int64 = 0
-        guard let walk = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]) else { return 0 }
-        for case let f as URL in walk {
-            let v = try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey])
-            if v?.isRegularFile == true { n += Int64(v?.totalFileAllocatedSize ?? 0) }
+    /// The top-level folders of what is queued or running now: their evidence is not to be pruned.
+    private func busyFolders() -> Set<String> {
+        var out = Set<String>()
+        for job in queue + (current.map { [$0] } ?? []) {
+            switch job.kind {
+            case .walk: out.insert(evidenceFolder.appendingPathComponent(job.build.key).path)
+            case .changes(let base):
+                out.insert(changesFolder.appendingPathComponent("\(job.build.key)-\(base.key)").path)
+                out.insert(job.part.path)
+            }
         }
-        return n
+        return out
     }
 
-    /// When the folder was last written to: its newest file's time (a folder's own time moves only for its direct entries).
-    static func newest(in folder: URL) -> Date {
-        var best = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-        guard let walk = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.contentModificationDateKey]) else { return best }
-        for case let f as URL in walk {
-            if let d = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate, d > best { best = d }
+    /// A pruned map no longer counts on its row.
+    private func clearRowsOfRemoved(_ removed: [URL]) {
+        let keys = Set(removed.map { $0.lastPathComponent })
+        var changed = false
+        for (owner, e) in entries where keys.contains(e.key) {
+            if case .done = e.status, !hasCrawl(mapFolder(for: e.key)) { entries[owner] = nil; changed = true }
         }
-        return best
+        if changed { onChange?() }
+    }
+
+    /// Size and the newest modification time of a folder, in one pass.
+    static func measure(_ folder: URL) -> (Int64, Date) {
+        var n: Int64 = 0
+        var best = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        guard let walk = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey, .contentModificationDateKey]) else { return (0, best) }
+        for case let f as URL in walk {
+            let v = try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey, .contentModificationDateKey])
+            if v?.isRegularFile == true { n += Int64(v?.totalFileAllocatedSize ?? 0) }
+            if let d = v?.contentModificationDate, d > best { best = d }
+        }
+        return (n, best)
     }
 
     // MARK: Row
@@ -485,7 +579,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         switch e.status {
         case .queued: return "walk queued"
         case .walking(_, let known): return known > 0 ? "walking… \(known) screen\(known == 1 ? "" : "s")" : "walking…"
-        case .done(let n, let crashes): return "\(n) screen\(n == 1 ? "" : "s")" + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : "")
+        case .done(let n, let crashes, let unfinished):
+            return "\(n) screen\(n == 1 ? "" : "s")" + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : "") + (unfinished ? ", not finished" : "")
         case .failed: return "walk failed"
         case .stopped: return "walk stopped"
         }
@@ -496,6 +591,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         switch e.status {
         case .failed(let why): lines.append(why)
         case .stopped: lines.append("The walk was stopped. \"Walk again\" starts it.")
+        case .done(_, _, true): lines.append("The walk ran out of time before it had tried everything. \"Walk again\" tries again.")
         default: break
         }
         if let n = e.note { lines.append(n.prefix(1).uppercased() + n.dropFirst() + ".") }
@@ -530,12 +626,17 @@ final class Evidence: NSObject, NSMenuItemValidation {
         let again = NSMenuItem(title: "Walk Again", action: #selector(walkAgainMenu(_:)), keyEquivalent: "")
         let stop = NSMenuItem(title: "Stop Walking", action: #selector(stopMenu(_:)), keyEquivalent: "")
         let auto = NSMenuItem(title: "Walk New Builds Automatically", action: #selector(autoMenu(_:)), keyEquivalent: "")
-        for i in [again, stop, auto] { i.target = self }
-        return [.separator(), again, stop, auto]
+        let data = NSMenuItem(title: "Walk with My Signed-In Data", action: #selector(dataMenu(_:)), keyEquivalent: "")
+        for i in [again, stop, auto, data] { i.target = self }
+        return [.separator(), again, stop, auto, data]
     }
 
     @objc private func walkAgainMenu(_ sender: Any?) { clickedSession().map { controller?.walkAgain($0) } }
     @objc private func stopMenu(_ sender: Any?) { clickedSession().map { controller?.stopWalking($0) } }
+    @objc private func dataMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller else { return }
+        c.setWalkWithData(!c.walksWithData(s), for: s)
+    }
     @objc private func autoMenu(_ sender: Any?) {
         guard let s = clickedSession(), let c = controller else { return }
         c.setAuto(c.auto(of: s) == .off ? .onBuild : .off, for: s)
@@ -547,6 +648,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case #selector(walkAgainMenu(_:))?: return controller?.hasBuild(s) == true
         case #selector(stopMenu(_:))?: return isWalking(s.worktree.path)
         case #selector(autoMenu(_:))?: item.state = controller?.auto(of: s) == .off ? .off : .on; return true
+        case #selector(dataMenu(_:))?: item.state = controller?.walksWithData(s) == true ? .on : .off; return true
         default: return true
         }
     }

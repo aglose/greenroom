@@ -149,9 +149,12 @@ something records, or the Recorder encodes from the surfaces itself.
 - **When** (`Workspace.auto`): `off`, `onBuild` (default: every new build is walked), `onTurnEnd` (when the
   session's Claude turn ends and the sources are newer than the build: build, then walk). A walk is cancelled when
   a newer build of the same session arrives; one walk runs at a time.
-- **Sign-ins**: the walk runs on a clone of the session's data slot (`--keep-data` on the clone), so it starts
-  where the person is signed in and changes nothing of theirs. The crawler's skip list (delete, pay, send, sign
-  out...) applies as always.
+- **Sign-ins**: by default a walk is fresh: no session's data is used, so nothing taps through the person's real
+  session on every build. A workspace can opt in ("Walk with my signed-in data", off by default): the walk then runs
+  on a clone of the session's data slot (`--keep-data` on the clone, which the crawler walks with one simulator and
+  never with a base), so it starts where the person is signed in and changes nothing of theirs; the row's detail
+  says which it was. The crawler's skip list (delete, pay, send, sign out...) applies as always. The captures of
+  screens (which may show signed-in content) stay under `evidence/` until the store prunes them with their build.
 - **Limits said in the UI**: a walk reaches what tapping reaches within its budget; a screen behind typed input
   or a server state is not found. "Add a start" (a deep link) and a saved recording replayed on each build
   (`apksim replay`, already in `ReplayRunner`) cover what the walk cannot.

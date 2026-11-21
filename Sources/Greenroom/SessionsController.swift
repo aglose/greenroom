@@ -53,6 +53,8 @@ final class SessionsController {
         evidence.store = store
         evidence.onChange = { [weak self] in self?.onChange?() }
         evidence.clickedSession = { [weak workbench] in workbench?.clickedSession }
+        evidence.shouldPause = { [weak self] owner in self?.walkShouldWait(owner) ?? false }
+        evidence.watchInput()
         // ⌘1-9 and ⌥⌘Tab. A monitor, not menu items: the number of sessions changes. Command keys are never sent to
         // the device (SimulatorView), so these leave the keys the app under test may use (⌃1, ⌃Tab...) alone.
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak workbench] event in
@@ -132,6 +134,7 @@ final class SessionsController {
     }
 
     func removeWorkspace(containing session: Session) {
+        for s in sessions where s.workspace.path == session.workspace.path { evidence.forget(worktree: s.worktree.path) }
         workspaces.removeAll { $0.root.path == session.workspace.path }
         store.saveWorkspaces(workspaces)
         refresh()
@@ -176,6 +179,7 @@ final class SessionsController {
                 }
             }
             guard mine == self.generation else { return }
+            if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
             self.sessions = ClaudeSessions.shared.attach(all)
             self.watch(all)
             self.onChange?()
@@ -332,6 +336,8 @@ final class SessionsController {
             guard let build = store.record(apk: apk, source: .local, sha: sha, ref: ref, dirty: dirty) else { return }
             store.note(build: build.key, of: path)
             DispatchQueue.main.async {
+                // Builds are filed on a concurrent queue and may arrive reversed: the newer one stays.
+                if let have = self?.builds[path], have.date > build.date { return }
                 self?.builds[path] = build
                 self?.onChange?()
                 self?.buildArrivedForEvidence(path, build)
@@ -393,6 +399,7 @@ final class SessionsController {
     /// selected or not) reloads on it with its data kept. A build the simulator already runs reloads nothing.
     func adopt(_ build: Build, forWorktree path: String) {
         builds[path] = build
+        buildArrivedForEvidence(path, build)
         if let session = sessions.first(where: { $0.worktree.path == path }), let old = simulator(for: session),
            old.apk.resolvingSymlinksInPath().path != build.apk.resolvingSymlinksInPath().path {
             reload(old, of: session, to: build.apk)
@@ -405,7 +412,24 @@ final class SessionsController {
     /// A build of the session was filed (a rebuild landed, or a session with a build was started).
     private func buildArrivedForEvidence(_ worktree: String, _ build: Build) {
         guard let s = sessions.first(where: { $0.worktree.path == worktree }) else { return }
-        evidence.buildArrived(worktree: worktree, build: build, auto: auto(of: s))
+        evidence.buildArrived(worktree: worktree, build: build, auto: auto(of: s), withData: walksWithData(s))
+    }
+
+    /// Whether a queued walk is held back now: a recipe of its workspace is building, or the person is using a
+    /// simulator (it starts by itself later).
+    private func walkShouldWait(_ owner: String) -> Bool {
+        if evidence.interacting { return true }
+        guard let s = sessions.first(where: { $0.worktree.path == owner }) else { return false }
+        return buildQueue.isBuilding(workspace: s.workspace.path)
+    }
+
+    func walksWithData(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.walkWithData ?? false }
+
+    func setWalkWithData(_ on: Bool, for s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        workspaces[i].walkWithData = on
+        store.saveWorkspaces(workspaces)
+        onChange?()
     }
 
     func auto(of s: Session) -> Auto { workspaces.first { $0.root.path == s.workspace.path }?.auto ?? .onBuild }
@@ -420,7 +444,7 @@ final class SessionsController {
 
     func walkAgain(_ s: Session) {
         guard let b = builds[s.worktree.path] ?? s.build else { return }
-        evidence.walkAgain(worktree: s.worktree.path, build: b)
+        evidence.walkAgain(worktree: s.worktree.path, build: b, withData: walksWithData(s))
     }
 
     func stopWalking(_ s: Session) { evidence.stop(worktree: s.worktree.path) }

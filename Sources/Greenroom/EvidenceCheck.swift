@@ -65,8 +65,13 @@ enum EvidenceCheck {
                 exit(failures == 0 ? 0 : 1)
             }
 
-            try? fm.removeItem(at: base)
+            // Everything lives in base, and the engine's own state in base/engine-state (Engine.init): nothing of the
+            // person's is used. The state folder is already there; the rest of an earlier run is removed.
+            for old in (try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? [] where old.lastPathComponent != "engine-state" {
+                try? fm.removeItem(at: old)
+            }
             try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+            expect(Engine.shared.state.path.hasPrefix(base.path + "/"), "the check runs on a state folder of its own (\(Engine.shared.state.lastPathComponent))")
             let repo = base.appendingPathComponent("repo", isDirectory: true)
             try? fm.createDirectory(at: repo, withIntermediateDirectories: true)
             try? "build/\n".write(to: repo.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
@@ -106,7 +111,7 @@ enum EvidenceCheck {
                 say("FAIL could not make the worktrees and their builds"); failures += 1; finish()
             }
 
-            let store = SessionStore(root: base.appendingPathComponent("state", isDirectory: true))
+            let store = SessionStore(root: base.appendingPathComponent("state", isDirectory: true))   // beside the engine's own
             sessions.use(store: store)
             ev.budget = Evidence.Budget(depth: 1, seconds: 60, jobs: 2)
             let data = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
@@ -176,7 +181,7 @@ enum EvidenceCheck {
             expect(aDone && hasMap(keyA), "a's walk ends with evidence/<key>/map/crawl.json")
             let nCaptures = captures(keyA)
             expect(nCaptures > 0, "the walk's captures are there (\(nCaptures) screens captured)")
-            if case .done(let n, _)? = ev.entry(of: a.worktree.path)?.status { expect(n >= 3, "the row says N screens (\(n))") }
+            if case .done(let n, _, _)? = ev.entry(of: a.worktree.path)?.status { expect(n >= 3, "the row says N screens (\(n))") }
             expect(!fm.fileExists(atPath: mapDir(keyA).deletingLastPathComponent().appendingPathComponent("map.part").path), "no half-made map is left")
             let bDone = await wait("b's walk", 240) { isDone(b.worktree.path, keyB) }
             expect(bDone && hasMap(keyB), "b's walk follows and ends with its own map")
@@ -189,7 +194,11 @@ enum EvidenceCheck {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             expect(ev.started == 2 && isDone(a.worktree.path, keyA), "a build with a map is not walked again (\(ev.started) walks)")
 
-            // 3. A marker in the session's data is unchanged by a walk, which ran on a copy of it.
+            expect(ev.entry(of: a.worktree.path)?.note?.contains("walked fresh, with no sign-in") == true && !sessions.walksWithData(a),
+                   "by default a walk is fresh, with none of the session's data")
+            // 3. With the workspace's opt-in, a marker in the session's data is unchanged by a walk, which ran on a copy of it.
+            sessions.setWalkWithData(true, for: a)
+            expect(sessions.walksWithData(a) && store.loadWorkspaces().first?.walkWithData == true, "\"Walk with my signed-in data\" is saved with the workspace")
             _ = await wait("a's data slot", 60) { !slotFolders(a.slot).isEmpty }
             let marker = "evidence-check-marker.txt"
             for f in slotFolders(a.slot) { try? "kept".write(to: f.appendingPathComponent(marker), atomically: true, encoding: .utf8) }
@@ -223,6 +232,19 @@ enum EvidenceCheck {
             expect(ev.cancelledRuns > cancelledBefore && !hasMap(key3), "the older build's walk was cancelled and left no map (\(ev.cancelledRuns - cancelledBefore) cancelled)")
             expect(!fm.fileExists(atPath: mapDir(key3).deletingLastPathComponent().appendingPathComponent("map.part").path), "its half-made map is gone")
             expect(clones().isEmpty, "the cancelled walk's data copy is gone")
+
+            // 4b. Two builds filed in the opposite order of their dates: the newer one is walked, not the older.
+            let startedReversed = ev.started
+            if let r1 = variant(), let r2 = variant(),
+               let older = store.record(apk: r1, source: .local, sha: nil, ref: nil, dirty: false, date: Date().addingTimeInterval(-60)),
+               let newer = store.record(apk: r2, source: .local, sha: nil, ref: nil, dirty: false, date: Date()) {
+                ev.buildArrived(worktree: a.worktree.path, build: newer, auto: .onBuild)
+                ev.buildArrived(worktree: a.worktree.path, build: older, auto: .onBuild)
+                let walkedNewer = await wait("the newer build's walk", 240) { isDone(a.worktree.path, newer.key) }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                expect(walkedNewer && ev.entry(of: a.worktree.path)?.key == newer.key && !hasMap(older.key) && ev.started == startedReversed + 1,
+                       "builds that arrive in reverse order: the newer is walked and the older ignored (\(ev.started - startedReversed) walk)")
+            } else { expect(false, "two builds could be filed") }
 
             // 5. One at a time, all through.
             expect(maxCrawlers <= 1 && maxWalking <= 1, "never more than one walk at once (crawlers \(maxCrawlers), rows walking \(maxWalking))")
@@ -266,6 +288,17 @@ enum EvidenceCheck {
                     let gone = await wait("the cancelled run to end", 30) { ev.entry(of: "changes:\(key4)-\(keyB)") == nil && (run("/usr/bin/pgrep", ["-f", "scripts/crawl.py .*evidence-check/state"]) ?? "").isEmpty }
                     expect(gone && !fm.fileExists(atPath: store.root.appendingPathComponent("changes/\(key4)-\(keyB)/crawl.json").path), "no process and no result is left of it")
                 }
+                // Two callers share one run; one cancelling does not hang the other.
+                var first: Result<Evidence.ChangesResult, Evidence.Failure>?
+                var second: Result<Evidence.ChangesResult, Evidence.Failure>?
+                if let other = store.build(keyB) {
+                    let t1 = ev.changes(head: head, base: other) { first = $0 }
+                    ev.changes(head: head, base: other) { second = $0 }
+                    t1.cancel()
+                    if case .failure? = first { expect(true, "the caller that cancelled is told so at once") } else { expect(false, "the caller that cancelled is told so at once") }
+                    let finished = await wait("the other caller's comparison", 300) { second != nil }
+                    if case .success? = second { expect(finished, "the other caller still gets the comparison") } else { expect(false, "the other caller still gets the comparison") }
+                }
             } else { expect(false, "a's build is in the store") }
 
             // 8. Pruning a build removes its evidence; the cap removes the oldest first.
@@ -286,7 +319,7 @@ enum EvidenceCheck {
                 try? fm.setAttributes([.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: d.path)
             }
             fake("oldest", age: 3000); fake("middle", age: 2000); fake("newest", age: 1000)
-            capEv.pruneToCap(cap: 1_300_000)
+            capEv.pruneToCap(cap: 1_300_000, force: true)
             _ = await wait("the cap to be applied", 10) { !fm.fileExists(atPath: capStore.root.appendingPathComponent("evidence/oldest").path) }
             try? await Task.sleep(nanoseconds: 500_000_000)
             expect(!fm.fileExists(atPath: capStore.root.appendingPathComponent("evidence/oldest").path)
