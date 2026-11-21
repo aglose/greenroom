@@ -9,6 +9,9 @@ final class MapCanvas: NSView {
     var onOpen: ((String) -> Void)?
     private(set) var selected: String?
     private(set) var map: ScreenMapData?
+    /// What a comparison found per screen (Changes): a coloured edge and a badge on its card, and the routes into
+    /// a new or gone screen in its colour. Set before `show`.
+    var marks: [String: MapMark] = [:]
     /// The capture each card shows (an index into the run's combinations).
     var comboIndex = 0 { didSet { if oldValue != comboIndex { loadThumbnails() } } }
 
@@ -164,6 +167,7 @@ final class MapCanvas: NSView {
             for (i, s) in list.enumerated() {
                 let f = cardFrame(depth: d, row: i, rows: list.count, height: bounds.height)
                 var badges: [(String, NSColor)] = []
+                if let m = marks[s.id] { badges.append((m.label, m.color)) }
                 if let c = crashes[s.id]?.count { badges.append(("\(c) crash" + (c == 1 ? "" : "es"), Design.record)) }
                 if let e = exits[s.id]?.count { badges.append(("\(e) exit" + (e == 1 ? "" : "s"), Design.warning)) }
                 if let l = selfLoops[s.id]?.count { badges.append(("↻ \(l)", Design.mute)) }
@@ -220,8 +224,8 @@ final class MapCanvas: NSView {
         image.masksToBounds = true
         image.backgroundColor = NSColor(white: 1, alpha: 0.06).cgColor
         image.contentsGravity = .resizeAspectFill
-        image.borderWidth = 1
-        image.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
+        image.borderWidth = marks[s.id] == nil ? 1 : 2.5
+        image.borderColor = (marks[s.id]?.color ?? NSColor(white: 1, alpha: 0.12)).cgColor
         let shadow = CALayer()
         shadow.frame = image.frame
         shadow.cornerRadius = 12
@@ -403,7 +407,8 @@ final class MapCanvas: NSView {
         for i in routes.indices {
             let r = routes[i]
             let out = focus != nil && r.from == focus, into = focus != nil && r.to == focus
-            let color: NSColor = out ? Design.accent : (into ? NSColor(white: 1, alpha: 0.55) : NSColor(white: 1, alpha: focus == nil ? 0.22 : 0.07))
+            var color: NSColor = out ? Design.accent : (into ? NSColor(white: 1, alpha: 0.55) : NSColor(white: 1, alpha: focus == nil ? 0.22 : 0.07))
+            if !out, !into, let m = marks[r.to], m.tintRoutes { color = m.color.withAlphaComponent(focus == nil ? 0.8 : 0.25) }   // the way into a new or gone screen
             r.line.strokeColor = color.cgColor
             r.line.lineWidth = out ? 2.2 : 1.6
             r.tip.fillColor = color.cgColor

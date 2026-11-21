@@ -56,10 +56,11 @@ struct ScreenMapData {
     func screen(_ id: String) -> MapScreen? { screens.first { $0.id == id } }
     var crashes: [MapFinding] { findings.filter { $0.kind == "crash" } }
 
-    static func read(_ folder: URL) -> ScreenMapData? {
+    /// `screensKey`/`edgesKey` name another build's lists of a comparison run (`base_screens`, `base_edges`).
+    static func read(_ folder: URL, screensKey: String = "screens", edgesKey: String = "edges") -> ScreenMapData? {
         guard let data = try? Data(contentsOf: folder.appendingPathComponent("crawl.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = json["screens"] as? [[String: Any]] else { return nil }
+              let list = json[screensKey] as? [[String: Any]] else { return nil }
         let combos = (json["combos"] as? [String]) ?? []
         let screens: [MapScreen] = list.compactMap { s in
             guard let id = s["id"] as? String else { return nil }
@@ -69,7 +70,7 @@ struct ScreenMapData {
             let captures = order.compactMap { c -> (String, URL)? in
                 guard let rel = caps[c] else { return nil }
                 let u = folder.appendingPathComponent(rel)
-                return FileManager.default.fileExists(atPath: u.path) ? (c, u) : nil
+                return u.isInside(folder) && FileManager.default.fileExists(atPath: u.path) ? (c, u) : nil
             }
             let controls = ((s["actions"] as? [[String: Any]]) ?? []).map {
                 (label: ($0["label"] as? String) ?? "", cmd: ($0["cmd"] as? String) ?? "", skipped: $0["skipped"] as? String)
@@ -80,7 +81,7 @@ struct ScreenMapData {
                              captures: captures, texts: (s["texts"] as? [String]) ?? [], settled: (s["settled"] as? Bool) ?? true,
                              flaky: s["flaky"] as? String, controls: controls)
         }
-        let edges: [MapEdge] = ((json["edges"] as? [[String: Any]]) ?? []).compactMap { e in
+        let edges: [MapEdge] = ((json[edgesKey] as? [[String: Any]]) ?? []).compactMap { e in
             guard let from = e["from"] as? String else { return nil }
             let to: MapEdge.Target
             switch e["to"] as? String {
@@ -121,6 +122,8 @@ final class CrawlRun {
         var jobs = 3
         /// `--base`: walk this build too and compare (Evidence's changes runs; not with `keepData`).
         var base: URL?
+        /// `--base-option`: engine options for the base build's launches only (a check's way to make a changed build).
+        var baseOption = ""
         /// `--keep-data`: use the data slot named in `engineOptions` as it is (a clone: see Evidence).
         var keepData = false
         /// Options for the engine's launches, after `--` (`--data-slots NAME`).
@@ -156,6 +159,7 @@ final class CrawlRun {
         else { a += ["--matrix", "appearance=" + settings.appearances.joined(separator: ",")] }
         if let s = settings.start, !s.isEmpty { a += ["--start", s] }
         if let base = settings.base { a += ["--base", base.path] }
+        if !settings.baseOption.isEmpty { a += ["--base-option", settings.baseOption] }
         if settings.keepData { a.append("--keep-data") }
         let tail = settings.engineOptions + (settings.offline ? ["--network-profile", "offline"] : [])
         if !tail.isEmpty { a += ["--"] + tail }

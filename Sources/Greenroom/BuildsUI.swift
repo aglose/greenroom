@@ -161,6 +161,7 @@ extension SessionsController {
             with.submenu = sub
             items.append(with)
         }
+        items.append(ClosureMenuItem("Changes…") { [weak self] in self?.workbench?.showChanges(of: s) })
         items.append(ClosureMenuItem("Add Pull Request…") { [weak self] in self?.pulls.askAndAdd() })
         if buildQueue.job(for: s) != nil {
             items.append(ClosureMenuItem("Show Build Log") { [weak self] in self?.showBuildLog(s, from: nil) })

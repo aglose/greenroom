@@ -46,10 +46,12 @@ final class Engine {
         // with --agent-check on the command line (scripts/mcp-check.py passes it): never from the environment alone.
         if Engine.agentCheck, let other = ProcessInfo.processInfo.environment["GREENROOM_STATE"], other.hasPrefix("/") {
             state = URL(fileURLWithPath: other, isDirectory: true)
-        } else if let i = CommandLine.arguments.firstIndex(of: "--evidence-check"), i + 2 < CommandLine.arguments.count {
-            // `--evidence-check DIR APK` keeps its whole state (store, engine, app data) in DIR/evidence-check/engine-state.
+        } else if let (flag, i) = ["--evidence-check", "--changes-check"].compactMap({ f in CommandLine.arguments.firstIndex(of: f).map { (f, $0) } }).first,
+                  i + 2 < CommandLine.arguments.count {
+            // `--evidence-check DIR APK` (and `--changes-check`) keep their whole state (store, engine, app data) in
+            // DIR/evidence-check/engine-state (DIR/changes-check/engine-state).
             state = URL(fileURLWithPath: CommandLine.arguments[i + 1], isDirectory: true).resolvingSymlinksInPath()
-                .appendingPathComponent("evidence-check/engine-state", isDirectory: true)
+                .appendingPathComponent(flag.dropFirst(2).replacingOccurrences(of: "-check", with: "") + "-check/engine-state", isDirectory: true)
         } else {
             state = support.appendingPathComponent("Greenroom", isDirectory: true)
         }

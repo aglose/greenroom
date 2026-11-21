@@ -26,6 +26,18 @@ version of it and adds the workbench.
 - **Compare** (⇧⌘D, or File > Compare With APK… for a second build) marks what differs between the chosen
   simulator and the others as you use them: boxes around content that is only on one side or has moved, shading
   over pixels that differ, and a summary under the pictures. With Mirror Input, two builds are driven as one.
+- **Changes** (⌘D, "Changes…" in a session row's menu, or the command palette) shows what a session's build did to the
+  app, against a base you pick: the repository's base branch, another session, a pull request, a branch or commit, or
+  an APK file. Greenroom walks both builds on hidden devices and shows, in tabs, **Summary** (screens new, changed
+  and gone, crashes on either side, what the walk did not finish), **Screens** (base, head and a difference map side
+  by side or under a wipe slider, and "Go there" to open the screen on the session's simulator), **Map** (the head's
+  screen map with new screens green, changed amber and gone red), **Video** (a recorded tour: both builds taken to
+  each screen that differs, played together with a chapter per screen) and **Live** (both builds side by side with
+  mirrored input). "Copy summary" puts a Markdown summary on the clipboard and "Open report" opens the crawler's own
+  report. The base is never built for you: with no build of it stored or on CI the sheet says so and offers to check
+  the commit out as a worktree, and you build it from its row. Closing the sheet does not stop a comparison that
+  is running; reopen it to see the result. A tour is recorded on this Mac by two hidden simulators and kept with
+  the comparison; nothing leaves the Mac.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
 - **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.
