@@ -2,7 +2,7 @@
 """Checks the agent interface as an agent uses it: `Greenroom --mcp` on stdin/stdout, against the bundled test app.
 Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK
 Starts Greenroom (its executable, in the background) if it is not running, and quits the copy it started."""
-import json, os, signal, subprocess, sys, time
+import glob, json, os, signal, subprocess, sys, time
 
 exe, apk = sys.argv[1], sys.argv[2]
 state = os.path.expanduser("~/Library/Application Support/Greenroom/agent.json")
@@ -135,5 +135,12 @@ finally:
         except subprocess.TimeoutExpired:
             started.kill()
 
+if failures and started:
+    print("the app it started " + ("is running" if started.poll() is None else f"ended with status {started.returncode}") + "; its output:")
+    print(open(app_log.name, errors="replace").read()[-4000:])
+    reports = sorted(glob.glob(os.path.expanduser("~/Library/Logs/DiagnosticReports/Greenroom*")), key=os.path.getmtime)
+    if reports:
+        print("its newest crash report, " + reports[-1] + ":")
+        print(open(reports[-1], errors="replace").read()[:4000])
 print(f"mcp-check: {len(failures)} failed" if failures else "mcp-check: all passed")
 sys.exit(1 if failures else 0)
