@@ -59,6 +59,12 @@ what to build through environment variables. The recipes that come with Greenroo
 credentials: `git` and Gradle for `local`, the GitHub CLI (`gh`) with your own sign-in for `ci`. Those tools talk to
 the network as themselves, when you press Build, add a pull request or choose a recipe, and only then. Greenroom
 makes no connection of its own for it, and shares your sign-ins with no one: it never sees them (`gh` keeps its own).
+The **remote** recipe is the one that sends something away: it uploads this repository's source code (the committed
+files, your uncommitted changes and the untracked files `.gitignore` does not ignore) to your own boat.dev account,
+with the `boat` tool and your own sign-in, and stops the sandbox when the build ends. Greenroom says so in a sheet
+before the first run and needs your yes for each repository; no run happens without it. The APK comes back; none is
+uploaded.
+
 Adding a pull request runs `gh` for that pull request's head commit and its CI artifact; the APK it fetches is
 opened on this Mac like any other. What a build leaves comes back to this Mac; no APK is uploaded.
 
