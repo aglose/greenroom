@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenus()
         workbench = Workbench()
         workbench.window.makeKeyAndOrderFront(nil)
+        let early = openedEarly; openedEarly = []
+        if !early.isEmpty { application(NSApp, open: early) }
         if !CommandLine.arguments.contains("--background") { NSApp.activate() }
         startAgentServer()
         // `kill` (and a script that started the app) quits it as the menu would: simulators stopped, nothing left behind.
@@ -574,14 +576,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Files and links macOS asks the app to open before the workbench exists (an APK double-clicked to launch it,
+    /// or documents reopened at launch): opened once it does.
+    private var openedEarly: [URL] = []
+
     func application(_ application: NSApplication, open urls: [URL]) {
+        guard workbench != nil else { openedEarly += urls; return }
         for url in urls {
             if url.pathExtension.lowercased() == "apkrec" { workbench.view(recording: url) } else { workbench.open(url) }
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows { workbench.window.makeKeyAndOrderFront(nil) }
+        if !hasVisibleWindows { workbench?.window.makeKeyAndOrderFront(nil) }
         return true
     }
 
@@ -589,7 +596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Reports.shared.saveUsage()
         agent.stop()
         TestRun.terminateAll()
-        workbench.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
+        workbench?.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
         ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
         ScreenRecording.shared.stopAll()   // recordings end as finished files
         Engine.shared.stopAll()
