@@ -150,9 +150,9 @@ the screen as it was, so what was on screen is in it.
 - The Agent popover says when it is recording and links the file. Files stay on this Mac under the build's evidence
   until the build is pruned; nothing leaves it. The switch is per repository, on by default.
 
-Calls on one agent connection are handled one at a time, except `build` and `changes`, which wait for minutes and run
-beside them: `session`, `screen` and the rest answer while one waits, and other agents' calls are never held up. One
-call waits at most 200 s in all (resolving the base included), then says it is still going; calling again joins the
+Calls are handled one at a time, all agents' together, except `build` and `changes`, which wait for minutes and run
+beside them: `session`, `screen` and the rest answer while one of those waits, but a long `launch` or `wait_for` holds
+up the other ordinary calls, another agent's too. One `build` or `changes` call waits at most 200 s in all (resolving the base included), then says it is still going; calling again joins the
 same build, base fetch or walk instead of starting another.
 
 ## What an agent cannot do

@@ -136,7 +136,7 @@ enum ClaudeConnect {
     }
 
     private static func same(_ a: String, _ b: String) -> Bool {
-        URL(fileURLWithPath: a).standardizedFileURL.path == URL(fileURLWithPath: b).standardizedFileURL.path
+        URL(fileURLWithPath: a).resolvingSymlinksInPath().standardizedFileURL.path == URL(fileURLWithPath: b).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     /// What `get` or `list` said about the server: connected here (the whole command equals this program's path),
@@ -179,7 +179,9 @@ enum ClaudeConnect {
         let said = got.output.lowercased()
         if got.status == 0, said.contains(serverName) { return judge(got.output) }
         let unsupported = said.contains("unknown command") || said.contains("unrecognized") || said.contains("unknown argument")
-        if got.status == 1, !unsupported { return .notConnected }
+        // Exit 1 is "no such server" only when the answer says so: a broken configuration also exits 1.
+        let missing = said.contains("no mcp server") || said.contains("not found") || said.contains(serverName) || said.isEmpty
+        if got.status == 1, !unsupported { return missing ? .notConnected : .unknown(lines(got.output)) }
         guard unsupported else { return .unknown(lines(got.output)) }
         let list = run(exe, listArguments, env: env)
         if list.timedOut { return .unknown("claude did not answer within \(Int(timeout)) s") }

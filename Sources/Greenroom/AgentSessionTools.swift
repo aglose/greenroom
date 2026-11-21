@@ -206,11 +206,11 @@ extension AgentTools {
         var box: ResolveBox!
         var begun = false
         changesLock.lock()
-        if let b = pendingResolves[key] { box = b } else { box = ResolveBox(); pendingResolves[key] = box; begun = true }
+        // Entered under the lock: a second call that finds the box must find its group already entered, or it would not wait.
+        if let b = pendingResolves[key] { box = b } else { box = ResolveBox(); box.group.enter(); pendingResolves[key] = box; begun = true }
         changesLock.unlock()
         if begun {
             let mine: ResolveBox = box
-            mine.group.enter()
             Task.detached { [weak self] in
                 let r = await Bases.resolve(base: ref, in: ws, sessions: sessions, store: store, worktree: wt)
                 mine.result = r
