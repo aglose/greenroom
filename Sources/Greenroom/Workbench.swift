@@ -7,6 +7,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     let window: NSWindow
     private let table = NSTableView()
     private let grid = SimulatorGrid(frame: .zero)
+    private let memoryMeter = MemoryMeter()
+    /// The stage of devices, for the checks.
+    var stage: SimulatorGrid { grid }
     /// Every running simulator at once, tiled, rather than the chosen one alone.
     private(set) var sideBySide = false
     /// Input in one simulator, and the toolbar's commands, go to all of them.
@@ -181,6 +184,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         content.view = drop
         buildChrome(in: drop)
         linkPanes()
+        grid.onClose = { Engine.shared.close($0) }
+        memoryMeter.onReading = { [weak self] in self?.grid.memoryLabel.show($0) }
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
         inspectorItem.minimumThickness = 240
@@ -282,6 +287,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let sims = Engine.shared.simulators
         if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
         refreshGrid()
+        memoryMeter.watch(sims)
         let nothing = sims.isEmpty
         if emptyStage.isHidden == nothing {   // shown when nothing runs, gone (after a fade) when something does
             if nothing { emptyStage.reload(); emptyStage.alphaValue = 0; emptyStage.isHidden = false }
@@ -670,6 +676,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             add("shot", "Save screenshot", "Device", "camera", "⌘S", keywords: "capture picture") { [weak self] in self?.screenshot(nil) }
             add("restart", "Restart the app", "App", "arrow.clockwise", "⇧⌘R") { [weak self] in self?.restart(nil) }
             add("close", "Close this simulator", "App", "xmark.circle", "⇧⌘W", keywords: "quit stop") { [weak self] in self?.closeSelected(nil) }
+            if grid.canTidy {
+                add("tidy", "Tidy up the simulators", "Device", "square.grid.2x2", keywords: "arrange layout tile reset size") { [weak self] in self?.tidyUp(nil) }
+            }
             setting("dark", "Dark appearance", "moon", "appearance dark", keywords: "night theme")
             setting("light", "Light appearance", "sun.max", "appearance light", keywords: "day theme")
             for (d, _) in [("phone", 0), ("foldable", 0), ("pixel-10-pro-fold", 0), ("watch", 0), ("tablet", 0), ("desktop", 0), ("tv", 0)] {
@@ -1485,6 +1494,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func appearance(_ sender: Any?) { targets.forEach { $0.send("appearance toggle") }; scheduleCompare() }
     @objc func restart(_ sender: Any?) { targets.forEach { $0.send("restart") }; scheduleCompare() }
     @objc func closeSelected(_ sender: Any?) { if let s = selected { Engine.shared.close(s) } }
+    /// Side by side: tiles the devices again after they were moved or resized by hand.
+    @objc func tidyUp(_ sender: Any?) { grid.tidy() }
 
     @objc func device(_ sender: NSMenuItem) {
         guard let d = sender.representedObject as? String else { return }
