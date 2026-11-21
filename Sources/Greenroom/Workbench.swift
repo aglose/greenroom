@@ -985,6 +985,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         menu.addItem(withTitle: "Open in Claude", action: #selector(openInClaudeClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
         menu.delegate = self
+        sessions.evidence.menuItems().forEach(menu.addItem)   // Walk Again, Stop Walking, ... (Evidence.swift)
         table.menu = menu
         table.registerForDraggedTypes([.fileURL])   // a folder dropped here is a repository to add
 
@@ -1137,6 +1138,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let row = table.clickedRow
         guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
         if !ClaudeSessions.openInClaude(session.claude) { toast.show("Claude is not installed on this Mac", problem: true) }
+    }
+
+    /// The session row under the pointer when the sidebar's context menu opened.
+    var clickedSession: Session? {
+        let row = table.clickedRow
+        guard row >= 0, row < rows.count, case .session(let s) = rows[row] else { return nil }
+        return s
     }
 
     @objc private func removeRepositoryClicked() {

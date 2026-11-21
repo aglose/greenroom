@@ -117,6 +117,14 @@ final class CrawlRun {
         var appearances: [String] = ["light"]
         var offline = false
         var start: String?
+        /// Simulators the walk runs at once (the crawler forces 1 with `keepData`).
+        var jobs = 3
+        /// `--base`: walk this build too and compare (Evidence's changes runs; not with `keepData`).
+        var base: URL?
+        /// `--keep-data`: use the data slot named in `engineOptions` as it is (a clone: see Evidence).
+        var keepData = false
+        /// Options for the engine's launches, after `--` (`--data-slots NAME`).
+        var engineOptions: [String] = []
     }
     enum Event {
         /// Depth `depth` has `exploring` screens; `known` found so far.
@@ -141,11 +149,14 @@ final class CrawlRun {
         self.python = python
         self.out = out
         var a = [Engine.shared.root.appendingPathComponent("scripts/crawl.py").path, apk.path, "--out", out.path,
-                 "--max-depth", String(settings.depth), "--max-seconds", String(settings.seconds), "-j", "3"]
+                 "--max-depth", String(settings.depth), "--max-seconds", String(settings.seconds), "-j", String(settings.jobs)]
         if settings.appearances.isEmpty { a.append("--no-captures") }
         else { a += ["--matrix", "appearance=" + settings.appearances.joined(separator: ",")] }
         if let s = settings.start, !s.isEmpty { a += ["--start", s] }
-        if settings.offline { a += ["--", "--network-profile", "offline"] }
+        if let base = settings.base { a += ["--base", base.path] }
+        if settings.keepData { a.append("--keep-data") }
+        let tail = settings.engineOptions + (settings.offline ? ["--network-profile", "offline"] : [])
+        if !tail.isEmpty { a += ["--"] + tail }
         process.arguments = a
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let meta: [String: Any] = ["apk": apk.path, "depth": settings.depth, "seconds": settings.seconds,

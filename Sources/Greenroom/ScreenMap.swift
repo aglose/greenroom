@@ -275,6 +275,15 @@ final class ScreenMap: NSView {
         onToggle?()
     }
 
+    /// Shows a finished run from another folder (Sessions' evidence) without starting a walk; false when the folder
+    /// has no map or a walk is running here.
+    @discardableResult
+    func show(folder: URL) -> Bool {
+        guard run?.isRunning != true, let d = ScreenMapData.read(folder) else { return false }
+        present(d, animated: false)
+        return true
+    }
+
     /// A walk goes on when the sheet closes; the map is there when it opens again.
     func close() {
         guard isOpen else { return }

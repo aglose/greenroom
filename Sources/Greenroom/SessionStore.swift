@@ -160,7 +160,7 @@ final class SessionStore {
         guard !dropped.isEmpty else { return }
         saveHistory(h)
         let kept = Set(h.values.flatMap { $0 })
-        for key in dropped where !kept.contains(key) { try? fm.removeItem(at: folder(of: key)) }
+        for key in dropped where !kept.contains(key) { try? fm.removeItem(at: folder(of: key)); removeEvidence(of: key) }
     }
 
     func build(_ key: String) -> Build? {
