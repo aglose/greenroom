@@ -97,6 +97,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     let snapshotReview = SnapshotReview(frame: .zero)
     // The screen map (ScreenMap.swift): a full-stage sheet too.
     let screenMap = ScreenMap(frame: .zero)
+    // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
+    let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
@@ -435,6 +437,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         palette.isHidden = true
         installSnapshotReview(in: host)
         installScreenMap(in: host)
+        installChangesSheet(in: host)
         scrim.onClick = { [weak self] in self?.hidePalette() }
         palette.onClose = { [weak self] in self?.hidePalette() }
         palette.source = { [weak self] in self?.paletteItems() ?? [] }
@@ -569,6 +572,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     func showSnapshots(run: Bool = false) {
         Reports.shared.count(.snapshots)
         if screenMap.isOpen { screenMap.close() }
+        if changesSheet.isOpen { changesSheet.close() }
         snapshotReview.open()
         if run { snapshotReview.runIfReady() }
     }
@@ -591,8 +595,40 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     func showMap(walk: Bool = false) {
         Reports.shared.count(.screenMap)
         if snapshotReview.isOpen { snapshotReview.close() }
+        if changesSheet.isOpen { changesSheet.close() }
         screenMap.open()
         if walk, screenMap.run == nil { screenMap.walk() }
+    }
+
+    // MARK: Changes
+
+    private func installChangesSheet(in host: NSView) {
+        changesSheet.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(changesSheet, positioned: .below, relativeTo: scrim)
+        NSLayoutConstraint.activate([changesSheet.topAnchor.constraint(equalTo: host.topAnchor), changesSheet.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+                                     changesSheet.leadingAnchor.constraint(equalTo: host.leadingAnchor), changesSheet.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+        changesSheet.controller = sessions
+        changesSheet.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+        changesSheet.onToggle = { [weak self] in self?.updateChrome() }
+        changesSheet.onGo = { [weak self] screen, map in self?.goThere(screen, map) }
+        changesSheet.onLive = { [weak self] session, base in
+            guard let self else { return }
+            self.sessions.activate(session)
+            self.compare(with: base.apk)
+        }
+    }
+
+    /// Device > Changes… (⌘D): the current session's build against its base.
+    @objc func showChanges(_ sender: Any?) {
+        guard let session = sessions.currentSession else { toast.show("Add a repository first: Changes compares a session's build with a base", problem: true); return }
+        showChanges(of: session)
+    }
+
+    func showChanges(of session: Session, compare: Bool = true) {
+        if changesSheet.isOpen, changesSheet.session?.worktree.path == session.worktree.path { changesSheet.close(); return }
+        if snapshotReview.isOpen { snapshotReview.close() }
+        if screenMap.isOpen { screenMap.close() }
+        changesSheet.open(session: session, compare: compare)
     }
 
     /// Replays a screen's route from the map on the selected device: restart (at the route's deep link), then each

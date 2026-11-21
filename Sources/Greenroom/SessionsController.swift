@@ -469,6 +469,7 @@ final class SessionsController {
         }
         out.append(PaletteItem(id: "session.add", title: "Add a repository to Sessions…", group: "Sessions", symbol: "plus.rectangle.on.folder",
                                keywords: "git worktree folder") { [weak self] in self?.chooseRepository() })
+        out += changesPaletteItems()   // Changes: this session's build against a base (ChangesSheet.swift)
         out += buildPaletteItems()   // Build this session, Cancel build (BuildsUI.swift)
         out += recipePaletteItems()  // Add pull request, Prepare remote builder, Build settings (RecipesUI.swift)
         return out
