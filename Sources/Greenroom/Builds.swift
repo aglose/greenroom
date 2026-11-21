@@ -34,7 +34,7 @@ final class BuildJob {
     /// A sandbox the remote recipe made from a template (it says so in a line of its log).
     fileprivate(set) var createdSandbox: String?
 
-    init(session: Session, workspace: Workspace, recipeName: String, recipe: Recipe, store: SessionStore) {
+    init(session: Session, workspace: Workspace, recipeName: String, recipe: Recipe, store: SessionStore, environment: [String: String] = [:]) {
         self.session = session.worktree.path
         self.workspace = workspace.root
         self.title = session.title
@@ -43,7 +43,7 @@ final class BuildJob {
         self.recipe = recipe
         self.module = workspace.module ?? ""
         self.variant = workspace.variant
-        self.extra = workspace.recipeEnvironment
+        self.extra = workspace.recipeEnvironment.merging(environment) { _, new in new }
         let work = store.root.appendingPathComponent("sessions/work/\(session.slot)", isDirectory: true)
         self.out = work.appendingPathComponent("app.apk")
         self.logFile = work.appendingPathComponent("build.log")
@@ -89,12 +89,12 @@ final class Builds {
     /// Queues a build of `session` with the recipe named (the workspace's default when nil). Gives the job, or nil
     /// when there is nothing to run (and says why through `error`).
     @discardableResult
-    func start(_ session: Session, workspace: Workspace, recipeName: String? = nil, store: SessionStore, error: (String) -> Void = { _ in }) -> BuildJob? {
+    func start(_ session: Session, workspace: Workspace, recipeName: String? = nil, store: SessionStore, environment: [String: String] = [:], error: (String) -> Void = { _ in }) -> BuildJob? {
         if let j = jobs[session.worktree.path], j.isActive { error("\(session.title) is already building"); return nil }
         let name = recipeName ?? workspace.defaultRecipeName
         guard let recipe = workspace.recipe(named: name) else { error("There is no recipe called \(name)"); return nil }
         if let why = workspace.refusal(forRecipe: name) { error(why); return nil }   // the remote recipe needs the person's yes
-        let job = BuildJob(session: session, workspace: workspace, recipeName: name, recipe: recipe, store: store)
+        let job = BuildJob(session: session, workspace: workspace, recipeName: name, recipe: recipe, store: store, environment: environment)
         jobs[job.session] = job
         queued.append(job)
         job.append("queued: \(name) for \(session.title)")

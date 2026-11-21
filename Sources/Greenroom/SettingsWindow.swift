@@ -6,7 +6,7 @@ final class SettingsWindow: NSWindowController {
     static let shared = SettingsWindow()
 
     private init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Settings"
         window.contentView = NSHostingView(rootView: SettingsView())
@@ -58,6 +58,7 @@ struct SettingsView: View {
                     .onChange(of: claudeSessions) { _, on in ClaudeSessions.shared.enabled = on }
                 Text("Titles and status of your Claude Code sessions appear on the matching rows in Sessions. Read from Claude Code\u{2019}s own files on this Mac while this is on (small transcripts whole, long ones at their ends), checking whether each session\u{2019}s process still runs and running git, read-only, in the folders of sessions from repositories you have not added, whose names then show in the sidebar. Shown in this window and sent nowhere.")
                     .font(.caption).foregroundStyle(.secondary)
+                ClaudeConnectView()
             }
             Section("Privacy") {
                 Toggle("Send crash reports", isOn: $crashes)

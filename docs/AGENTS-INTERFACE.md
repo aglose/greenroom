@@ -5,11 +5,19 @@ and check Android apps in the same simulators the person at the Mac is looking a
 
 ## Connecting
 
-Claude Code:
+Claude Code: **Settings > Claude Code > Connect Claude Code** shows the exact command and runs it on a click, with
+your own `claude` program found on your login shell's PATH. It says when Greenroom is already connected, when
+`claude` is not installed, and shows `claude`'s own words when the command fails; Disconnect runs the matching
+`claude mcp remove`. By hand it is:
 
 ```bash
-claude mcp add greenroom -- "/Applications/Greenroom.app/Contents/MacOS/Greenroom" --mcp
+claude mcp add --scope user greenroom -- "/Applications/Greenroom.app/Contents/MacOS/Greenroom" --mcp
 ```
+
+If `claude` already has a `greenroom` entry that runs another copy of the app, Settings says so and offers
+Reconnect (remove, then add). The `claude mcp` flags were checked against the CLI's `--help` and exercised only
+against a stand-in `claude`, never run for real; they are in one place, `ClaudeConnect.swift`. Each call is stopped
+at a deadline, and none runs on the app's main thread.
 
 Any other MCP client: run that program with `--mcp` as a stdio server. The toolbar's Agent button (✦) has the
 command for this copy of the app, a log of what agents did, and a switch that pauses them.
@@ -43,6 +51,9 @@ The answers are built to be cheap to read:
 | `key`, `back`, `swipe`, `open_url` | keys, Back, a swipe by `direction` or coordinates, a deep link |
 | `set` | appearance, locale, font scale, rotation, network, device, time zone, animation scale, permissions; home, resume, lock, unlock, recreate, restart, process-death |
 | `screen`, `check`, `wait_for`, `screenshot`, `logs` | reading and verifying |
+| `session` | this worktree's session: branch and commit, clean or not, its build (age, source, current or stale), the default recipe, the base, whether its simulator runs, the Claude session's title when known |
+| `build` | run a recipe for the session and wait (`recipe`, `timeout_s`: 10 to 200 s, default 200): answers the build's key and age, or the log's last error lines |
+| `changes` | the session's newest build against a base (`base`, `timeout_s`: 10 to 200 s, default 200): `+ Settings > Privacy (new) [s4]`, `~ Trips: 4,812 px differ [s3]`, `- Legacy import (gone) [s9]`, then counts, crashes and what the walk did not finish; `screenshot` takes `screen` (an id in brackets) and `side` `head`, `base` or `diff` for the stored pictures |
 | `compare` | how two simulators' screens differ: `-` only on the base, `+` only on the other, `>` moved, and the share of pixels that differ; `map` adds a picture of where |
 
 With several simulators running, each tool takes `sim` (`s1`, `s2`...). A second `launch` puts its simulator
@@ -84,12 +95,74 @@ The headers are hints from a local program that already holds the token. They se
 tool can reach a file or an app it could not before, and the folder is never read, only compared with the added
 worktrees.
 
+## Verifying a change
+
+From a worktree of a repository added to Greenroom, with the agent started in that folder:
+
+1. `session`: the branch, whether the build is `current` or `stale`, and the base.
+2. `build`: runs the workspace's recipe and waits. It answers `built <key> ...`, or the last error lines of the log
+   to fix. The session's simulator reloads on the new build with its data kept.
+3. `changes`: what differs from the base, screen by screen. A `~` line with a pixel count is a screen that looks
+   different; `screenshot` with its `screen` id and `side: diff` shows where. `+` and `-` are screens the change
+   added or removed.
+4. `launch` (with no `apk`), then `tap`, `type`, `check` and `screenshot` on the screens the change touched.
+   `check` answers `PASS` or says what is missing.
+
+## What `build` and `changes` can and cannot start
+
+- `build` runs a recipe through the same queue as the Build button, one build at a time per repository. The
+  `remote` recipe uploads source code to the person's own boat.dev account, so it runs only after the person has
+  allowed it for that repository in Greenroom; an agent that asks for it without that yes gets a failure telling it
+  so, and can never give the yes itself. `ci` fetches what CI already built for the commit and never starts a
+  workflow from an agent's call (the answer says so when there is no run); only the person's Build button may.
+  `build` counts as an action: it is refused while the agent is paused.
+- `changes` starts a walk of the two builds (hidden simulators, a minute or two for a large app) when that pair has
+  not been compared, and answers from the stored one otherwise. It never starts a build of the base: a base nothing
+  built (a branch, a commit or a pull request with no stored build, no CI build and no worktree with a fresh APK)
+  is answered as text saying what would build it, and nothing runs. The base is the repository's base branch unless
+  `base` says `session:BRANCH`, `pr:NUMBER`, a branch, tag or commit, or the full path of an `.apk` (anything else with a path is refused). It is also an action,
+  refused while paused. `session` only reads, and works while paused.
+- All three work only for a connection tied to a session; from any other folder they answer `this folder is not a
+  worktree of a repository added to Greenroom`.
+
+## The agent's session is recorded
+
+While an agent drives a session's simulator, Greenroom records its screen: the first action starts
+`evidence/<build key>/video/agent-<time>.mp4` in the state folder, with a chapter per tool call and `steps.jsonl`
+beside it (one line per call: time, seconds into the video, tool, a short description, whether it failed).
+
+What is written about a call is its shape, never its content: `type` is "typed 14 characters"; `open_url` is the
+scheme alone for an app's own link and, for an http(s) link, host and path without query or fragment (a long or
+token-looking path segment becomes "…"); `set` is the setting's name (only if it is one of the known settings) without
+the value; `swipe` is its direction; a tapped or awaited text is "text of N characters"; `check` is how many texts it
+looked for. Typed text, query strings and values are not in `steps.jsonl` or the chapter names. The video itself is
+the screen as it was, so what was on screen is in it.
+
+- It stops after 60 s without an agent action (a call still waiting, such as `wait_for`, counts as activity, but never
+  for more than 10 minutes), when
+  the simulator ends, when the repository's switch in the Agent popover goes off (at once, for every session of that repository), or when the app quits.
+- A paused agent is not recorded: reading tools still answer while paused, but they neither start a recording nor
+  add to one.
+- It never starts while you are recording that simulator yourself. If you choose File > Record Screen while an agent
+  recording runs, the agent's file is finished and kept and yours starts.
+- A walk that `changes` or a new build starts uses its own hidden simulators; a live agent recording goes on, and an
+  agent recording never holds a walk back (only your own recording does).
+- The Agent popover says when it is recording and links the file. Files stay on this Mac under the build's evidence
+  until the build is pruned; nothing leaves it. The switch is per repository, on by default.
+
+Calls are handled one at a time, all agents' together, except `build` and `changes`, which wait for minutes and run
+beside them: `session`, `screen` and the rest answer while one of those waits, but a long `launch` or `wait_for` holds
+up the other ordinary calls, another agent's too. One `build` or `changes` call waits at most 200 s in all (resolving the base included), then says it is still going; calling again joins the
+same build, base fetch or walk instead of starting another.
+
 ## What an agent cannot do
 
 - Name a file for the engine to read or write. `screenshot` and `logs` answer with their content; nothing else
   touches the disk on an agent's say.
 - Send the engine a raw command. Settings and keys are checked against fixed patterns.
-- Act while paused. The Agent popover's switch refuses every action until it is lifted; reading still works.
+- Act while paused. The Agent popover's switch refuses every action, `build` and `changes` included, until it is
+  lifted; reading (`session`, `screen`, `screenshot`, `logs`...) still works.
+- Allow the remote recipe, or start a CI workflow, or build a base: see above.
 
 ## Who can reach it
 

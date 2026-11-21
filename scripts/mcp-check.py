@@ -2,9 +2,11 @@
 """Checks the agent interface as an agent uses it: `Greenroom --mcp` on stdin/stdout, against the bundled test app.
 Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK [--sessions]
 --sessions: the agent tied to its worktree's session (a temporary git repository with two worktrees, a state folder
-of its own); without it, the interface itself against the person's own state folder.
+of its own), and the session tools: session, build (a stand-in recipe), changes (against the same build and against
+a base that differs through crawl.py's --base-option), screenshot's screen, and the recording of the agent's session;
+without it, the interface itself against the person's own state folder.
 Starts Greenroom (its executable, in the background) if it is not running, and quits the copy it started."""
-import glob, hashlib, json, os, signal, subprocess, sys, tempfile, time, urllib.request
+import glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.request, zipfile
 
 exe, apk = sys.argv[1], sys.argv[2]
 
@@ -29,7 +31,37 @@ def sessions_mode():
         subprocess.run(["cp", apk, out + "/app-debug.apk"], check=True)
         os.makedirs(wt + "/app/src/deeper")
         trees[name] = wt
-    env = dict(os.environ, GREENROOM_STATE=state_dir, GREENROOM_ADD_REPOSITORY=repo, GREENROOM_CHECK_FEEDS="1")
+    # A second repository whose workspace has the recording switch off.
+    repo2 = root + "/repo2"
+    os.makedirs(repo2)
+    open(repo2 + "/README.md", "w").write("hello\n")
+    open(repo2 + "/.gitignore", "w").write("build/\n")
+    git("init", "-q", "-b", "main", cwd=repo2); git("add", ".", cwd=repo2); git("commit", "-q", "-m", "first", cwd=repo2)
+    os.makedirs(repo2 + "/app/build/outputs/apk/debug")
+    subprocess.run(["cp", apk, repo2 + "/app/build/outputs/apk/debug/app-debug.apk"], check=True)
+    def variant(name):
+        """The test APK with one more file in it: another build (another key) that runs the same."""
+        dst = f"{root}/{name}.apk"
+        shutil.copy(apk, dst)
+        with zipfile.ZipFile(dst, "a") as z:
+            z.writestr(f"assets/greenroom-check-{name}.txt", name)
+        return dst
+    built_apk, base_apk = variant("built"), variant("base")
+    def key_of(path):
+        return hashlib.sha256(open(path, "rb").read()).hexdigest()[:16]
+    # The stand-in recipe, the workspace's `local` one: records its environment, copies a build, or fails on request.
+    recipe = root + "/recipe.sh"
+    open(recipe, "w").write(f"""#!/bin/sh
+env | grep '^GREENROOM_' | sort > "{root}/recipe-env.txt"
+if [ -f "{root}/recipe-fail" ]; then echo "> Task :app:compileDebugKotlin FAILED"; echo "e: Foo.kt: error: unresolved reference: boom"; exit 1; fi
+if [ -f "{root}/recipe-sleep" ]; then sleep 8; fi
+cp "{built_apk}" "$GREENROOM_OUT"
+""")
+    os.chmod(recipe, 0o755)
+    env = dict(os.environ, GREENROOM_STATE=state_dir, GREENROOM_ADD_REPOSITORY=repo + "\n" + repo2, GREENROOM_CHECK_FEEDS="1",
+               GREENROOM_CHECK_RECIPE=recipe, GREENROOM_CHECK_AUTO="off", GREENROOM_CHECK_AGENT_IDLE="3", GREENROOM_CHECK_RECORD_OFF=repo2,
+               GREENROOM_CHECK_CRAWL_START="apksim://slot", GREENROOM_CHECK_CRAWL_DEPTH="1", GREENROOM_CHECK_CRAWL_SECONDS="40",
+               GREENROOM_CHECK_BASE_OPTION="--setting global:apksim_slot_seed=base")
     app_log = open(root + "/app.log", "w")
     app = subprocess.Popen([exe, "--background", "--agent-check"], stdout=app_log, stderr=subprocess.STDOUT, env=env)
     failures, shims = [], []
@@ -164,6 +196,7 @@ def sessions_mode():
         expect("feat-a's feed has its subfolder shim's call, feat-b's has none of a's",
                sum(e["tool"] == "launch" for e in feed_a) == 3 and sum(e["tool"] == "launch" for e in feed_b) == 3 and not any(e["tool"] == "tap" for e in feed_b), json.dumps(by)[:600])
         expect("calls from no session are a feed of their own", len(none) >= 4 and all(e["label"] == "" for e in none), json.dumps(none)[:400])
+        session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up)
     finally:
         for s in shims:
             try:
@@ -180,6 +213,155 @@ def sessions_mode():
         subprocess.run(["rm", "-rf", root])
     print(f"mcp-check --sessions: {len(failures)} failed" if failures else "mcp-check --sessions: all passed")
     sys.exit(1 if failures else 0)
+
+def mp4_has_video(path):
+    """A video track: a `hdlr` box whose handler type is `vide`, inside a file with a `moov`."""
+    data = open(path, "rb").read()
+    if b"moov" not in data:
+        return False
+    return any(data[i + 12:i + 16] == b"vide" for i in (m.start() for m in re.finditer(b"hdlr", data)))
+
+def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up):
+    """session, build, changes, screenshot's screen and the recording of the agent's session (W5b)."""
+    def sim_of(shim, branch):
+        sims, _ = shim.call("simulators")
+        return next((l.split()[0] for l in sims.split("\n") if f"(session {branch})" in l and "--fresh" not in l), None), sims
+    nowhere = "not a worktree of a repository added to Greenroom"
+    # session
+    t, err = a.call("session")
+    expect("session answers the branch, commit and that it is clean", not err and re.match(r"feat-a [0-9a-f]{7} \(clean", t), t)
+    expect("... its build, the default recipe, the base and the simulator",
+           "build: " in t and "default recipe: local" in t and "base: origin/main" in t and re.search(r"simulator: s\d+ running", t), t)
+    for tool in ("session", "build", "changes"):
+        t, err = away.call(tool)
+        expect(f"{tool} from a folder with no session fails clearly", err and nowhere in t, t)
+    t, err = away.call("screenshot", screen="s1")
+    expect("screenshot with a screen from no session fails clearly", err and nowhere in t, t)
+
+    # The recording of an agent's session: a few actions, then 3 s of nothing (the check's idle time; 60 s by default).
+    videos = lambda: set(glob.glob(state_dir + "/evidence/*/video/agent-*.mp4"))
+    sid, _ = sim_of(a, "feat-a")
+    # Earlier steps of this check were recorded too: let those recordings end (3 s idle), then count from here.
+    wait(lambda: not glob.glob(state_dir + "/evidence/*/video/*.part"), 30)
+    before = videos()
+    for call in (lambda: a.call("screen", sim=sid), lambda: a.call("check", sim=sid, visible=["FAB clicks"]), lambda: a.call("tap", sim=sid, text="Add"),
+                 lambda: a.call("tap", sim=sid, text="Add")):
+        call()
+    t, _ = a.call("session")
+    expect("session says it is being recorded while it is", "recording: " in t and ".mp4" in t, t)
+    new = wait(lambda: (videos() - before) and not glob.glob(state_dir + "/evidence/*/video/*.part"), 30)
+    files = sorted(videos() - before)
+    steps_rows = lambda f: [json.loads(l) for l in open(os.path.dirname(f) + "/steps.jsonl")] if os.path.exists(os.path.dirname(f) + "/steps.jsonl") else []
+    files = [f for f in files if [r["tool"] for r in steps_rows(f) if r["video"] == os.path.basename(f)][:4] == ["screen", "check", "tap", "tap"]] or files
+    expect("a few actions leave an agent-*.mp4 under the build's evidence", bool(new) and bool(files), str(glob.glob(state_dir + "/evidence/*/*")))
+    if files:
+        expect("... with a video track", mp4_has_video(files[0]) and os.path.getsize(files[0]) > 2000, files[0])
+        steps = os.path.dirname(files[0]) + "/steps.jsonl"
+        rows = [json.loads(l) for l in open(steps)] if os.path.exists(steps) else []
+        mine = [r for r in rows if r["video"] == os.path.basename(files[0])]
+        expect("... and steps.jsonl beside it lists the calls", [r["tool"] for r in mine][:4] == ["screen", "check", "tap", "tap"] and all("time" in r and "summary" in r for r in mine), json.dumps(mine)[:400])
+        expect("... and a chapters file with a chapter per call", os.path.exists(files[0][:-4] + ".chapters.json") and len(json.load(open(files[0][:-4] + ".chapters.json"))) >= 4,
+               str(glob.glob(os.path.dirname(files[0]) + "/*")))
+    # What is stored of the calls: never typed text, a link's query, a setting's value or the text of a tap or wait.
+    wait(lambda: not glob.glob(state_dir + "/evidence/*/video/*.part"), 30)
+    secret, query = "hunter2-SECRET-text", "SECRETQUERY"
+    a.call("tap", sim=sid, text="Trips")
+    a.call("type", sim=sid, text=secret, tap_text="Trip note")
+    a.call("open_url", sim=sid, url=f"apksim://composeapp/trips?token={query}#fragbit")
+    a.call("set", sim=sid, setting="appearance", value="dark")
+    a.call("set", sim=sid, setting="appearance", value="light")
+    a.call("wait_for", sim=sid, text="Italian vacation", timeout_ms=3000)
+    wait(lambda: not glob.glob(state_dir + "/evidence/*/video/*.part") and glob.glob(state_dir + "/evidence/*/video/steps.jsonl"), 30)
+    stored = ""
+    for f in glob.glob(state_dir + "/evidence/*/video/steps.jsonl") + glob.glob(state_dir + "/evidence/*/video/*.chapters.json"):
+        stored += open(f).read().replace("\\/", "/")   # JSON may escape slashes
+    mp4s = "".join(open(f, "rb").read().decode("latin-1") for f in glob.glob(state_dir + "/evidence/*/video/agent-*.mp4"))
+    expect("steps.jsonl and the chapters say how much was typed, not what", f"typed {len(secret)} characters" in stored and secret not in stored and secret not in mp4s and "SECRET" not in stored, stored[-600:])
+    expect("... an app's own link as its scheme alone", "open_url: apksim" in stored and "composeapp" not in stored and query not in stored and "fragbit" not in stored, "open lines: " + " | ".join(l for l in stored.replace("}", "\n").split("\n") if "open" in l or query in l or "fragbit" in l)[:600])
+    expect("... a setting without its value, a tapped or awaited text by its length",
+           '"set: appearance"' in stored and "dark" not in stored and "wait_for: text of 16 characters" in stored and "Italian vacation" not in stored and "Trip note" not in stored, stored[-600:])
+    # The per-repository switch, off for the second repository.
+    c = Shim(repo2)
+    t, err = c.call("launch")
+    expect("a repository with its recording off still launches", not err and "launched" in t, t)
+    before = videos()
+    sid2, _ = sim_of(c, "main")
+    for _ in range(3):
+        c.call("tap", sim=sid2, text="Add")
+    time.sleep(6)
+    expect("... and its agent's actions are not recorded", videos() == before, str(videos() - before))
+
+    # build, with a stand-in recipe as the workspace's local one.
+    sidb, _ = sim_of(b, "feat-b")
+    key = key_of(built_apk)
+    open(root + "/recipe-sleep", "w").write("x")
+    answer = []
+    th = threading.Thread(target=lambda: answer.append(b.call("build", timeout_s=240)))
+    th.start()
+    time.sleep(2.5)
+    t0 = time.time()
+    t, err = a.call("session")
+    expect("another agent call answers while a build runs", th.is_alive() and not err and "feat-a" in t and time.time() - t0 < 5, f"{time.time() - t0:.1f} s, build alive {th.is_alive()}")
+    th.join(120)
+    os.remove(root + "/recipe-sleep")
+    t, err = answer[0] if answer else ("no answer", True)
+    expect("build runs the recipe and answers the new build's key", not err and t.startswith(f"built {key} with the local recipe"), t)
+    env_seen = open(root + "/recipe-env.txt").read() if os.path.exists(root + "/recipe-env.txt") else ""
+    expect("... told never to dispatch a CI workflow", "GREENROOM_CI_DISPATCH=0" in env_seen and "GREENROOM_REF=feat-b" in env_seen, env_seen)
+    reloaded = wait(lambda: (lambda sims: f"/builds/{key}/app.apk" in "".join(l for l in sims.split("\n") if "(session feat-b)" in l and "--fresh" not in l))(b.call("simulators")[0]), 60)
+    expect("... and the session's simulator reloads on it", bool(reloaded), b.call("simulators")[0])
+    t, _ = b.call("session")
+    expect("session then shows that build, current", f"[{key}]" in t and "current" in t, t)
+    open(root + "/recipe-fail", "w").write("x")
+    t, err = b.call("build", timeout_s=120)
+    expect("a failing recipe answers the log's error lines", err and "build failed" in t and "unresolved reference: boom" in t, t)
+    os.remove(root + "/recipe-fail")
+    t, err = b.call("build", recipe="remote")
+    expect("the remote recipe without the person's yes is refused, saying who can give it",
+           err and "allow it in Greenroom" in t and "cannot give that yes" in t, t)
+    t, err = b.call("build", recipe="nonesuch")
+    expect("an unknown recipe is refused", err and "no recipe called nonesuch" in t, t)
+    open(state_dir + "/agent-paused-check", "w").write("1")
+    t, err = b.call("build")
+    expect("with the pause switch on, build is refused", err and "paused" in t, t)
+    t, err = a.call("changes", base=base_apk)
+    expect("... and so is changes", err and "paused" in t, t)
+    t, err = b.call("session")
+    expect("... while session still answers", not err and "feat-b" in t, t)
+    os.remove(state_dir + "/agent-paused-check")
+
+    # changes. First what needs no walk.
+    # A commit nothing built (no stored build, no CI, no worktree on it): a branch one commit ahead of main.
+    tree_sha = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD^{tree}"], cwd=root + "/repo", capture_output=True, text=True).stdout.strip()
+    head_sha = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=root + "/repo", capture_output=True, text=True).stdout.strip()
+    ghost = subprocess.run(["/usr/bin/git", "-c", "user.name=Check", "-c", "user.email=check@example.invalid", "commit-tree", tree_sha, "-p", head_sha, "-m", "unbuilt"],
+                           cwd=root + "/repo", capture_output=True, text=True).stdout.strip()
+    subprocess.run(["/usr/bin/git", "branch", "ghost", ghost], cwd=root + "/repo", check=True)
+    t, err = a.call("changes", base="ghost")
+    expect("a base nothing built is answered as text saying what would build it, and starts nothing",
+           not err and "no build of" in t.lower() and "Nothing was started" in t and not glob.glob(state_dir + "/changes/*"), t)
+    for bad in ("/etc/hosts", "/no/such/dir/x.apk", "relative.apk"):
+        t, err = a.call("changes", base=bad)
+        expect(f"a base path that is not a readable .apk file is refused ({bad})", err and (".apk" in t), t)
+    t, err = a.call("changes", base="no-such-branch")
+    expect("a base that does not exist is an error", err and "No branch or commit called" in t, t)
+    # Against the same build: a walk of both, no differences.
+    own = trees["a"] + "/app/build/outputs/apk/debug/app-debug.apk"
+    t, err = a.call("changes", base=own, timeout_s=280)
+    expect("changes against the same build answers no differences",
+           not err and "the same build" in t and not re.search(r"^[+~-] ", t, re.M) and "0 new, 0 changed, 0 gone" in t, t)
+    expect("... and counts crashes", "crashes: none" in t, t)
+    # Against another build whose launches differ (the base is launched with a different Settings value).
+    t, err = a.call("changes", base=base_apk, timeout_s=280)
+    lines = [l for l in t.split("\n") if l.startswith("~ ")]
+    expect("changes against a base that looks different answers a ~ line with its pixels", not err and len(lines) == 1 and re.search(r": [0-9,]+ px differ.* \[[^\]]+\]$", lines[0]), t)
+    sid_screen = re.search(r"\[([^\]]+)\]$", lines[0]).group(1) if lines else ""
+    for side in ("head", "base", "diff"):
+        r = a.rpc("tools/call", {"name": "screenshot", "arguments": {"screen": sid_screen, "side": side, "max_size": 400}}).get("result", {})
+        images = [x for x in r.get("content", []) if x["type"] == "image"]
+        expect(f"screenshot with that screen id returns the {side} capture", not r.get("isError") and len(images) == 1 and len(images[0]["data"]) > 1000, json.dumps(r)[:300])
+    t, err = a.call("screenshot", screen="nonesuch")
+    expect("an unknown screen id is an error", err and "no head capture" in t, t)
 
 if "--sessions" in sys.argv:
     sessions_mode()

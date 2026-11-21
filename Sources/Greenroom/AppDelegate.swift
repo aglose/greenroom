@@ -558,7 +558,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do { try agent.start() } catch { NSLog("Greenroom: the agent interface could not start: \(error)") }
         // Checks (--agent-check only): repositories to add to Sessions at launch (GREENROOM_ADD_REPOSITORY, one per line).
         for folder in (Engine.agentCheck ? ProcessInfo.processInfo.environment["GREENROOM_ADD_REPOSITORY"] ?? "" : "").split(separator: "\n") {
-            workbench.sessions.addRepository(URL(fileURLWithPath: String(folder), isDirectory: true))
+            let added = workbench.sessions.addRepository(URL(fileURLWithPath: String(folder), isDirectory: true))
+            let controller = workbench.sessions
+            Task { @MainActor in _ = await added.value; AgentCheckHooks.configure(controller) }   // the check's stand-in recipe
         }
     }
 

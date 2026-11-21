@@ -222,7 +222,7 @@ final class Recorder {
     }
 
     /// Whether a recorder is running for this simulator.
-    static func isRecording(_ sim: Simulator?) -> Bool { sim.map { ScreenRecording.shared.recorder(for: $0) != nil } ?? false }
+    static func isRecording(_ sim: Simulator?) -> Bool { sim.map { ScreenRecording.shared.recorder(for: $0) != nil && !AgentRecording.isAgentTake($0) } ?? false }   // an agent's take is not the person's recording: the item says "Record Screen" and a click starts theirs
 
     // MARK: One file
 
@@ -417,6 +417,11 @@ extension Workbench {
             guard let self else { return }
             if files.isEmpty { self.toast.show(reason, problem: true) }
             else { self.toast.show(reason, action: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(files) } }
+        }
+        // An agent's take is not the person's recording: the person's wins. The take is finished and kept, then theirs starts.
+        if AgentRecording.isAgentTake(sim), let agent = AgentRecording.current {
+            agent.end(sim) { [weak self] in self?.toggleScreenRecording(sender) }
+            return
         }
         if rec.recorder(for: sim) != nil {
             rec.stop(sim) { [weak self] files in

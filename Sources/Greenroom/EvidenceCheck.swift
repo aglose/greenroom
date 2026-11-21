@@ -125,6 +125,9 @@ enum EvidenceCheck {
                     ((try? fm.contentsOfDirectory(at: pkg, includingPropertiesForKeys: nil)) ?? []).filter { $0.lastPathComponent.hasPrefix("evg") && !$0.lastPathComponent.hasSuffix(".device") }
                 }
             }
+            // A run that was killed (a stop, a crash) leaves its walk's clone in this check's own state folder; the product sweeps
+            // those after a day. This run starts from none, so the step below sees only what this run left.
+            for c in clones() { try? fm.removeItem(at: c); try? fm.removeItem(at: URL(fileURLWithPath: c.path + ".device")) }
             func mapDir(_ key: String) -> URL { store.root.appendingPathComponent("evidence/\(key)/map") }
             func hasMap(_ key: String) -> Bool { fm.fileExists(atPath: mapDir(key).appendingPathComponent("crawl.json").path) }
             func captures(_ key: String) -> Int {
@@ -143,7 +146,7 @@ enum EvidenceCheck {
             func crawlers() -> Int {
                 guard let list = run("/bin/ps", ["-axo", "pid=,ppid=,command="]) else { return 0 }
                 var mine: [(pid: Int, ppid: Int)] = []
-                for line in list.split(separator: "\n") where line.contains("scripts/crawl.py") && line.contains("evidence-check/state") {
+                for line in list.split(separator: "\n") where line.contains("scripts/crawl.py") && line.contains(base.path + "/state") {
                     let f = line.split(separator: " ", omittingEmptySubsequences: true)
                     if f.count > 2, let pid = Int(f[0]), let ppid = Int(f[1]) { mine.append((pid, ppid)) }
                 }
@@ -186,7 +189,7 @@ enum EvidenceCheck {
             let bDone = await wait("b's walk", 240) { isDone(b.worktree.path, keyB) }
             expect(bDone && hasMap(keyB), "b's walk follows and ends with its own map")
             expect(ev.started == 2, "two builds, two walks (\(ev.started))")
-            expect(clones().isEmpty, "no clone of a data slot is left behind")
+            expect(await wait("the data copies to be removed", 20) { clones().isEmpty }, "no clone of a data slot is left behind")
 
             // 2. The same build is not walked again, however it arrives.
             _ = place("a", va)
@@ -231,7 +234,7 @@ enum EvidenceCheck {
             expect(newer && hasMap(key4), "the newer build is walked\(newer ? "" : " (row: \(String(describing: ev.entry(of: a.worktree.path))), running \(ev.runningOwner ?? "none"), started \(ev.started), key3 \(key3) key4 \(key4))")")
             expect(ev.cancelledRuns > cancelledBefore && !hasMap(key3), "the older build's walk was cancelled and left no map (\(ev.cancelledRuns - cancelledBefore) cancelled)")
             expect(!fm.fileExists(atPath: mapDir(key3).deletingLastPathComponent().appendingPathComponent("map.part").path), "its half-made map is gone")
-            expect(clones().isEmpty, "the cancelled walk's data copy is gone")
+            expect(await wait("the data copies to be removed", 20) { clones().isEmpty }, "the cancelled walk's data copy is gone")
 
             // 4b. Two builds filed in the opposite order of their dates: the newer one is walked, not the older.
             let startedReversed = ev.started
@@ -285,7 +288,7 @@ enum EvidenceCheck {
                     token.cancel()
                     _ = await wait("the cancelled comparison", 30) { result != nil }
                     if case .failure? = result { expect(true, "a cancelled comparison is told so") } else { expect(false, "a cancelled comparison is told so") }
-                    let gone = await wait("the cancelled run to end", 30) { ev.entry(of: "changes:\(key4)-\(keyB)") == nil && (run("/usr/bin/pgrep", ["-f", "scripts/crawl.py .*evidence-check/state"]) ?? "").isEmpty }
+                    let gone = await wait("the cancelled run to end", 30) { ev.entry(of: "changes:\(key4)-\(keyB)") == nil && (run("/usr/bin/pgrep", ["-f", "scripts/crawl.py .*" + NSRegularExpression.escapedPattern(for: base.path + "/state")]) ?? "").isEmpty }
                     expect(gone && !fm.fileExists(atPath: store.root.appendingPathComponent("changes/\(key4)-\(keyB)/crawl.json").path), "no process and no result is left of it")
                 }
                 // Two callers share one run; one cancelling does not hang the other.
