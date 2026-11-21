@@ -46,6 +46,8 @@ final class Simulator {
     private(set) var options: [String] = []
 
     var name: String { apk.deletingPathExtension().lastPathComponent }
+    /// A matrix wall cell's combination ("Dark · German"), shown under its picture instead of the APK's name.
+    var cellLabel: String?
     var isAlive: Bool { if case .ended = state { return false }; return true }
 
     init(apk: URL, log: URL) {
