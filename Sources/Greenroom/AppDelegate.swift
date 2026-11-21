@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
         PrivacyCheck.runIfAsked(self)   // scripts/network-check.sh
+        matrixCheckIfAsked()
         PerfCheck.runIfAsked(self)   // `--snapshots-check`, SnapshotCheck.swift
     }
 
@@ -602,6 +603,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(to(workbench: #selector(Workbench.toggleSideBySide(_:)), "Side by Side", "\\"))
         device.addItem(to(workbench: #selector(Workbench.toggleMirror(_:)), "Mirror Input", "M", [.command, .shift]))
         device.addItem(to(workbench: #selector(Workbench.toggleCompare(_:)), "Compare", "D", [.command, .shift]))
+        device.addItem(to(workbench: #selector(Workbench.showMatrix(_:)), "Matrix Wall…", "x", [.command, .option]))
+        device.addItem(to(workbench: #selector(Workbench.closeMatrix(_:)), "Close Matrix Wall", ""))
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.screenshot(_:)), "Save Screenshot", "s"))
         device.addItem(to(workbench: #selector(Workbench.restart(_:)), "Restart App", "R", [.command, .shift]))

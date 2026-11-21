@@ -12,7 +12,7 @@ usable by an LLM agent as by a person. The app is **Greenroom**, in its own publ
 | 1. App in a DMG | The app, icon, document types, bundling and signing of every binary, notarized and stapled images (0.1.0, 0.3.0, locally), CI, a release workflow, Sparkle updates (consent first, an appcast per release, `scripts/update-check.sh`) | A published GitHub release (the workflow's secrets are unset, so it has never run), training progress shown at first run, Install Command Line Tool |
 | 2. Workbench | Simulators in the app's window (on the H.264 stream), input, sidebar, toolbar, inspector (node list, pick by pointing), log panel, screenshot | Most device controls (see UI-PLAN.md), command palette, Gradle-folder watching, capture with a skin, the accessibility audit, hosted window mode and JSON/events in the engine (the stream and polling serve instead) |
 | 3. Agents | MCP served by the app behind a token, the stdio shim, 16 tools with stable references and change reports, annotated screenshots, checks, waits, logs, compare, a feed popover; a scripted session passes locally and in CI, a session with a real agent (Claude Code, Sonnet: 13 turns, 27 s, docs/AGENT-SESSION.md) | Verification bundles, the matrix tool, network and gaps tools, a pause button, one-click setup |
-| 4. Many at once | Side by side, mirrored input, Compare (content and pixels, in the window and as a tool) | Matrix wall, network and frame-timing differences, the HTML report, snapshot review, scenes |
+| 4. Many at once | Side by side, mirrored input, Compare (content and pixels, in the window and as a tool), the matrix wall (devices × appearances × languages × text sizes, up to 16, idle cells at 12 fps and the one under the pointer at full rate) | Network and frame-timing differences, the HTML report, snapshot review, scenes |
 | 5. Time and tests | Recorder on/off, save a recording, open one in the engine's trace viewer | In-window timeline, network inspector, replay and bisect, test runner, crawl map |
 | 6. Hot swap, polish | | All of it |
 | Security and privacy | State folder 0700, the sample app bundled (no download at first run), PRIVACY.md, the agent endpoint's token and Origin/Host checks, a control token per simulator (engine 0.54.0), the "no connections of our own" CI check (`scripts/network-check.sh`), opt-in crash reports and usage counts, asked once, shown before sending (`scripts/reports-check.sh`) | Where reports are sent (no endpoint yet), a tighter profile for APKs from strangers |
@@ -22,8 +22,10 @@ agent do the same, privately) is in place. What is still owed to call the core c
 token bundled and released, the no-connections check and a public release. The interface
 is the next large piece: docs/UI-PLAN.md.
 
-Found on the way, in apksim: two launches started together (a first launch and the background training it starts)
-race on `ln -sfn` of the class-path link in `$TMPDIR` and one dies with "File exists".
+Found on the way, in apksim: two launches started together (a first launch and the background training it starts, or
+the matrix wall's cells) race on `ln -sfn` of the class-path link in `$TMPDIR` and one dies with "File exists".
+Fixed in apksim (pull request 582); until Greenroom bundles an engine with the fix, the matrix wall starts its first
+cell 0.6 s before the others.
 
 Items marked *(unverified)* come from
 research that was not confirmed against a primary source or a test; each has a spike below.

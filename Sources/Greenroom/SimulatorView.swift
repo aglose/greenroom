@@ -292,7 +292,7 @@ final class SimulatorView: NSView {
         guard let sim = simulator else { caption.attributedStringValue = NSAttributedString(); return }
         let size = sim.deviceSize
         let text = NSMutableAttributedString(string: kindName, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink])
-        var rest = "   \(sim.name)"
+        var rest = "   \(sim.cellLabel ?? sim.name)"
         if size.width > 0 { rest += "   \(Int(size.width))×\(Int(size.height))" }
         if !captionExtra.isEmpty { rest += "   ·   \(captionExtra)" }
         text.append(NSAttributedString(string: rest, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.mute]))
@@ -422,15 +422,19 @@ final class SimulatorView: NSView {
 
     private func updateTracking() {
         if let tracking { removeTrackingArea(tracking) }
-        tracking = nil
-        if inspecting {
-            let t = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
-            addTrackingArea(t)
-            tracking = t
-        } else {
-            outlined = nil
-        }
+        // Entering and leaving always (the matrix wall runs the cell under the pointer at full rate); moves only
+        // while inspecting.
+        var options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect]
+        if inspecting { options.insert(.mouseMoved) } else { outlined = nil }
+        let t = NSTrackingArea(rect: .zero, options: options, owner: self)
+        addTrackingArea(t)
+        tracking = t
     }
+
+    /// The pointer came onto the view (true) or left it (false).
+    var onHover: ((SimulatorView, Bool) -> Void)?
+    override func mouseEntered(with event: NSEvent) { onHover?(self, true) }
+    override func mouseExited(with event: NSEvent) { onHover?(self, false) }
 
     private func point(_ event: NSEvent) {
         guard let f = fraction(event), let size = simulator?.deviceSize, pictureRect.contains(convert(event.locationInWindow, from: nil)) else { return }

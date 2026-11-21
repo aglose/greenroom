@@ -11,6 +11,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var sideBySide = false
     /// Input in one simulator, and the toolbar's commands, go to all of them.
     private(set) var mirror = false
+    /// The matrix wall's simulators (MatrixWall.swift), empty when none runs.
+    var matrixSims: [Simulator] = []
+
+    /// A click at a fraction of the chosen simulator's screen, routed as the mouse's would be (mirrored when on). Checks.
+    func clickForCheck(_ f: CGPoint) {
+        guard let sim = selected, let v = grid.view(for: sim) else { return }
+        v.route?(.touch("down", f), v); v.route?(.touch("up", f), v)
+    }
     /// Differences between the chosen simulator and the others are found and marked as the apps are used.
     private(set) var comparing = false
     /// The inspector pane is open: the pointer picks nodes on the chosen simulator.
@@ -248,6 +256,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 self.selected = sim
                 self.window.subtitle = sim.name
                 self.reload()
+            }
+            view.onHover = { [weak self] v, inside in
+                if let sim = v.simulator { self?.matrixHover(sim, inside: inside) }
             }
             view.route = { [weak self] input, v in
                 guard let self else { return }
@@ -635,6 +646,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         // Apps.
         add("open", "Open APK…", "App", "folder", "⌘O") { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
         add("compare.apk", "Compare with another build…", "App", "plusminus", "⇧⌘O") { [weak self] in self?.compareWithAPK(nil) }
+        add("matrix", "Matrix wall: every device, appearance, language and text size", "App", "square.grid.3x3", "⌥⌘X", keywords: "grid locale dark font rtl") { [weak self] in self?.showMatrix(nil) }
+        if !matrixSims.isEmpty { add("matrix.close", "Close the matrix wall", "App", "xmark.square") { [weak self] in self?.closeMatrix(nil) } }
         let sample = Engine.shared.root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
         if FileManager.default.fileExists(atPath: sample.path) { add("open.sample", "Open the sample app", "App", "shippingbox") { [weak self] in self?.open(sample) } }
         for url in Recents.all.prefix(8) {
