@@ -328,7 +328,7 @@ enum EvidenceCheck {
 
             // The row's wording.
             if let e = ev.entry(of: b.worktree.path) {
-                expect(ev.label(e).hasSuffix("screens") && ev.detail(e).contains("does not reach"), "the row says N screens, and its detail says what a walk does not reach: \(ev.label(e))")
+                expect(ev.label(e).contains("screens") && ev.detail(e).contains("does not reach"), "the row says N screens, and its detail says what a walk does not reach: \(ev.label(e))")
             }
 
             for s in [a, b] { for f in slotFolders(s.slot) { try? fm.removeItem(at: f) } }

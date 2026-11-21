@@ -236,7 +236,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     }
 
     static func done(_ data: ScreenMapData) -> Status {
-        .done(screens: data.screens.count, crashes: data.crashes.count, unfinished: !data.incomplete.isEmpty)
+        .done(screens: data.screens.count, crashes: data.crashes.count, unfinished: data.incomplete.contains { !$0.hasPrefix("--max-depth") })   // a depth limit is the budget's choice, not a walk cut short
     }
 
     /// Removes the owner's queued jobs and cancels its running one (a newer build has come).
