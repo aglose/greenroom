@@ -23,13 +23,30 @@ enum Git {
 
     private static let git = URL(fileURLWithPath: "/usr/bin/git")
 
+    /// Whether `/usr/bin/git` is a real git: without the Command Line Tools it is a stub that offers to install them.
+    /// Found out once, with `xcode-select -p`; nothing runs git again when it is not.
+    static let available: Bool = {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        p.arguments = ["-p"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }()
+
+    /// Switches off what a repository's own configuration could use to run a program: its fsmonitor hook and its hooks.
+    private static let safe = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+
     /// Runs git in `dir` and gives its standard output, or nil when it failed or took longer than `timeout`.
     static func run(_ args: [String], in dir: URL, timeout: TimeInterval = 20) async -> String? {
-        await withCheckedContinuation { cont in
+        guard available else { return nil }
+        return await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 let p = Process()
                 p.executableURL = git
-                p.arguments = args
+                p.arguments = safe + args
                 p.currentDirectoryURL = dir
                 var env = ProcessInfo.processInfo.environment
                 env["GIT_OPTIONAL_LOCKS"] = "0"      // reading status must not take the index lock a commit needs
@@ -120,7 +137,7 @@ enum Git {
 
     /// The commit two refs last had in common (what a pull request from `a` against `b` would show), or nil.
     static func mergeBase(_ a: String, _ b: String, in dir: URL) async -> String? {
-        guard let out = await run(["merge-base", a, b], in: dir) else { return nil }
+        guard !a.hasPrefix("-"), !b.hasPrefix("-"), let out = await run(["merge-base", "--", a, b], in: dir) else { return nil }
         let sha = out.trimmingCharacters(in: .whitespacesAndNewlines)
         return sha.isEmpty ? nil : sha
     }

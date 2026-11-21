@@ -18,6 +18,19 @@ struct Workspace: Codable, Equatable {
     var auto: Auto = .onBuild
 
     init(root: URL) { self.root = root }
+
+    // A file written before a field existed still reads: every key but the root has a default.
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        self.init(root: try c.decode(URL.self, forKey: .root))
+        module = try? c.decodeIfPresent(String.self, forKey: .module)
+        variant = (try? c.decodeIfPresent(String.self, forKey: .variant)) ?? variant
+        baseRef = (try? c.decodeIfPresent(String.self, forKey: .baseRef)) ?? baseRef
+        recipes = (try? c.decodeIfPresent([String: Recipe].self, forKey: .recipes)) ?? recipes
+        auto = (try? c.decodeIfPresent(Auto.self, forKey: .auto)) ?? auto
+    }
 }
 
 /// An executable that builds an APK. Run by W2; stored here so a workspace's settings round-trip.
@@ -64,7 +77,7 @@ struct Session {
     var title: String { claude?.title ?? branch ?? "(detached \(String(head.prefix(7))))" }
     var shortHead: String { String(head.prefix(7)) }
     /// The engine's data slot for this worktree: its own app data, kept across rebuilds and restarts.
-    var slot: String { SessionStore.slot(for: worktree) }
+    var slot: String { SessionStore.slot(for: worktree) }   // cached by path
     var isStale: Bool {
         guard let outputs, let sourcesDate else { return false }
         return outputs.date < sourcesDate
@@ -84,4 +97,18 @@ struct Build: Codable, Equatable {
     let ref: String?
     let dirty: Bool
     let date: Date
+}
+
+extension Build {
+    private enum Keys: String, CodingKey { case key, apk, source, sha, ref, dirty, date }
+
+    /// Tolerant like `Workspace`: a later workstream's new field does not make an older build.json unreadable.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        self.init(key: try c.decode(String.self, forKey: .key), apk: try c.decode(URL.self, forKey: .apk),
+                  source: (try? c.decodeIfPresent(Source.self, forKey: .source)) ?? .file,
+                  sha: try? c.decodeIfPresent(String.self, forKey: .sha), ref: try? c.decodeIfPresent(String.self, forKey: .ref),
+                  dirty: (try? c.decodeIfPresent(Bool.self, forKey: .dirty)) ?? false,
+                  date: (try? c.decodeIfPresent(Date.self, forKey: .date)) ?? Date(timeIntervalSince1970: 0))
+    }
 }
