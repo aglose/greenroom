@@ -4,6 +4,7 @@
   "author": { "name": "Greenroom" },
   "homepage": "https://github.com/aglose/greenroom",
   "repository": "https://github.com/aglose/greenroom",
+  "icon": "./icon.png",
   "keywords": ["android", "apk", "simulator", "mcp", "verification"],
   "mcpServers": {
     "greenroom": {
