@@ -605,6 +605,12 @@ final class Evidence: NSObject, NSMenuItemValidation {
     }
 
     /// The row's evidence button: its label is the status, a click opens the Screen Map on that build's run.
+    /// What `badge(for:)` shows, for the sidebar to tell whether the row changed.
+    func badgeKey(for session: Session) -> String {
+        guard let e = entries[session.worktree.path] else { return "" }
+        return label(e) + "|" + detail(e)
+    }
+
     func badge(for session: Session) -> NSView? {
         guard let e = entries[session.worktree.path] else { return nil }
         let b = NSButton(title: label(e), target: self, action: #selector(openMapClicked(_:)))

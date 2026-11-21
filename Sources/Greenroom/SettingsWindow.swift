@@ -30,6 +30,7 @@ struct SettingsView: View {
     @State private var usage = Reports.shared.usage
     @State private var waiting: [String] = []
     @State private var claudeSessions = ClaudeSessions.shared.enabled
+    @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.autoArchiveKey) as? Bool ?? true
 
     private func refresh() {
         waiting = Reports.shared.waiting().map(\.1)
@@ -59,6 +60,11 @@ struct SettingsView: View {
                 Toggle("Show my Claude Code sessions", isOn: $claudeSessions)
                     .onChange(of: claudeSessions) { _, on in ClaudeSessions.shared.enabled = on }
                 Text("Titles and status of your Claude Code sessions appear on the matching rows in Sessions. Read from Claude Code\u{2019}s own files on this Mac while this is on (small transcripts whole, long ones at their ends), checking whether each session\u{2019}s process still runs and running git, read-only, in the folders of sessions from repositories you have not added, whose names then show in the sidebar. Shown in this window and sent nowhere.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Archive a session when its pull request merges", isOn: $autoArchive)
+                    .onChange(of: autoArchive) { _, on in UserDefaults.standard.set(on, forKey: SessionsController.autoArchiveKey) }
+                    .disabled(!claudeSessions)
+                Text("Takes it out of the sidebar once every pull request of its branch is closed and one merged, as Claude Code recorded it, and nothing runs in it. The worktree and its data stay; the + menu lists it under Archived.")
                     .font(.caption).foregroundStyle(.secondary)
                 ClaudeConnectView()
             }

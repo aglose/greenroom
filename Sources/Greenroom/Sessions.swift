@@ -23,11 +23,18 @@ struct Workspace: Codable, Equatable {
     var walkWithData = false
     /// While an agent drives a session's simulator, its screen is recorded under the build's evidence (AgentRecording.swift).
     var recordAgent = true
+    /// The worktrees (paths) the person put in the sidebar, the newest first. Only these show, with any that has a
+    /// simulator running; the rest are a menu away, and the active ones are suggested.
+    var shown: [String] = []
+    /// Worktrees the person removed or dismissed: not suggested again (the + menu still has them).
+    var hidden: [String] = []
+    /// Worktrees put away because their pull request merged: not suggested again, listed apart in the + menu.
+    var archived: [String] = []
 
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, recordAgent }
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, recordAgent, shown, hidden, archived }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -41,6 +48,9 @@ struct Workspace: Codable, Equatable {
         remote = (try? c.decodeIfPresent(RemoteSettings.self, forKey: .remote)) ?? remote
         walkWithData = (try? c.decodeIfPresent(Bool.self, forKey: .walkWithData)) ?? walkWithData
         recordAgent = (try? c.decodeIfPresent(Bool.self, forKey: .recordAgent)) ?? recordAgent
+        shown = (try? c.decodeIfPresent([String].self, forKey: .shown)) ?? shown
+        hidden = (try? c.decodeIfPresent([String].self, forKey: .hidden)) ?? hidden
+        archived = (try? c.decodeIfPresent([String].self, forKey: .archived)) ?? archived
     }
 }
 
@@ -82,6 +92,19 @@ struct Session {
     var shortHead: String { String(head.prefix(7)) }
     /// The engine's data slot for this worktree: its own app data, kept across rebuilds and restarts.
     var slot: String { SessionStore.slot(for: worktree) }   // cached by path
+    /// The pull requests of this worktree's Claude sessions from its own branch (a main checkout's sessions open
+    /// them from many).
+    var pullRequests: [ClaudePR] {
+        (claude?.prs ?? []).filter { pr in pr.branch == nil || branch == nil || pr.branch == branch }
+    }
+    var hasOpenPR: Bool { pullRequests.contains { $0.state == .open } }
+    /// Every pull request known is closed and one of them merged: the work is in.
+    var prMerged: Bool {
+        let prs = pullRequests
+        return !prs.isEmpty && prs.allSatisfy { $0.state == .merged || $0.state == .closed } && prs.contains { $0.state == .merged }
+    }
+    /// A Claude session at work in it now (running, or waiting for the person).
+    var claudeActive: Bool { guard let c = claude, !c.archived else { return false }; return c.running || c.status == .waiting }
     var isStale: Bool {
         guard let outputs, let sourcesDate else { return false }
         return outputs.date < sourcesDate

@@ -75,10 +75,13 @@ final class SessionsController {
         refresh()
     }
 
-    /// Hands every row its Claude session (or takes it away) without asking git again.
+    /// Hands every row its Claude session (or takes it away) without asking git again. Says nothing when no row's
+    /// session changed in a way the row shows.
     func applyClaude() {
-        sessions = ClaudeSessions.shared.attach(sessions)
-        onChange?()
+        let next = ClaudeSessions.shared.attach(sessions)
+        let changed = next.map { $0.claude?.shown } != sessions.map { $0.claude?.shown }
+        sessions = next
+        if autoArchive() || changed { onChange?() }
     }
 
     /// Uses another store (the check's own, so a check never touches the person's workspaces).
@@ -125,6 +128,7 @@ final class SessionsController {
             } else {
                 self.workspaces.append(Workspace(root: root))
                 self.store.saveWorkspaces(self.workspaces)
+                ClaudeSessions.shared.workspacesChanged()
                 self.workbench?.toast.show("Added \(root.lastPathComponent)")
                 self.workbench?.showLibrary()
             }
@@ -137,8 +141,130 @@ final class SessionsController {
         for s in sessions where s.workspace.path == session.workspace.path { evidence.forget(worktree: s.worktree.path) }
         workspaces.removeAll { $0.root.path == session.workspace.path }
         store.saveWorkspaces(workspaces)
+        ClaudeSessions.shared.workspacesChanged()
         refresh()
     }
+
+    // MARK: Which rows show
+
+    /// Whether the sidebar has the session: the person added it, or its simulator runs or a build of it is under way
+    /// (what Greenroom is doing with it is never out of sight).
+    func isShown(_ s: Session) -> Bool {
+        if workspace(of: s)?.shown.contains(s.worktree.path) == true { return true }
+        return simulator(for: s) != nil || (buildQueue.job(for: s)?.isActive ?? false)
+    }
+
+    /// Worth suggesting: not shown, not put away, and a Claude session is at work in it or it has an open pull request.
+    func isSuggested(_ s: Session) -> Bool {
+        guard !isShown(s), let ws = workspace(of: s), !ws.hidden.contains(s.worktree.path), !ws.archived.contains(s.worktree.path) else { return false }
+        return s.claudeActive || s.hasOpenPR
+    }
+
+    /// The suggestions, active ones first.
+    func suggestions() -> [Session] {
+        sessions.filter(isSuggested).sorted { (Self.tier($0, live: false), $0.title) < (Self.tier($1, live: false), $1.title) }
+    }
+
+    /// The order rows show in: something running first (a simulator, a Claude session, a build), then an open pull
+    /// request, then the rest; within each, the order they were added in (newest first). Coarse on purpose: a status
+    /// that flickers does not make rows jump.
+    private static func tier(_ s: Session, live: Bool) -> Int {
+        if live || s.claudeActive { return 0 }
+        return s.hasOpenPR ? 1 : 2
+    }
+
+    /// Puts the session in the sidebar, at the top.
+    func show(_ s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        let path = s.worktree.path
+        guard !workspaces[i].shown.contains(path) else { return }
+        workspaces[i].shown.insert(path, at: 0)
+        workspaces[i].hidden.removeAll { $0 == path }
+        workspaces[i].archived.removeAll { $0 == path }
+        store.saveWorkspaces(workspaces)
+        onChange?()
+    }
+
+    /// Shows every worktree of the session's repository.
+    func showAll(in workspace: URL) {
+        for s in sessions where s.workspace.path == workspace.path { show(s) }
+    }
+
+    /// Takes the session out of the sidebar and quits its simulator (its data stays in its slot). It is not suggested
+    /// again; the + menu has it.
+    func remove(_ s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        let path = s.worktree.path
+        workspaces[i].shown.removeAll { $0 == path }
+        if !workspaces[i].hidden.contains(path) { workspaces[i].hidden.append(path) }
+        store.saveWorkspaces(workspaces)
+        closeSimulator(of: s)
+        onChange?()
+    }
+
+    /// Whether sessions whose pull request merged leave the sidebar by themselves.
+    static let autoArchiveKey = "sessionsAutoArchive"
+    var autoArchiveEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: Self.autoArchiveKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.autoArchiveKey); if newValue, autoArchive() { onChange?() } }
+    }
+
+    /// Archives the shown sessions whose pull requests have all closed with one merged, unless something is still
+    /// going on in them (a simulator, a build, a Claude session that runs) or they are a main checkout. Returns
+    /// whether one was archived.
+    @discardableResult
+    func autoArchive() -> Bool {
+        guard autoArchiveEnabled else { return false }
+        var done: [Session] = []
+        for s in sessions where !s.isMain && s.prMerged && !s.claudeActive && !(s.claude?.running ?? false) {
+            guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }), workspaces[i].shown.contains(s.worktree.path),
+                  simulator(for: s) == nil, !(buildQueue.job(for: s)?.isActive ?? false) else { continue }
+            workspaces[i].shown.removeAll { $0 == s.worktree.path }
+            workspaces[i].archived.append(s.worktree.path)
+            done.append(s)
+        }
+        guard !done.isEmpty else { return false }
+        store.saveWorkspaces(workspaces)
+        let what = done.count == 1 ? "\(done[0].title): its pull request merged" : "\(done.count) sessions whose pull requests merged"
+        workbench?.toast.show("Archived \(what). The + menu brings it back.")
+        return true
+    }
+
+    /// The + menu of a repository's header: the sessions it does not show, active ones first, then the archived.
+    func addMenu(for workspace: URL) -> NSMenu {
+        let menu = NSMenu()
+        let rest = sessions.filter { $0.workspace.path == workspace.path && !isShown($0) }
+        let archived = Set(self.workspace(at: workspace)?.archived ?? [])
+        func item(_ s: Session) -> NSMenuItem {
+            var bits: [String] = []
+            if let n = s.pullRequests.first(where: { $0.state == .open })?.number { bits.append("#\(n) open") }
+            else if let n = s.pullRequests.first?.number { bits.append("#\(n)") }
+            if s.claude?.status == .working && s.claude?.running == true { bits.append("Claude working") }
+            else if s.claude?.status == .waiting { bits.append("waiting for you") }
+            let i = ClosureMenuItem(s.title + (bits.isEmpty ? "" : "  ·  " + bits.joined(separator: " · "))) { [weak self] in self?.show(s) }
+            i.toolTip = (s.worktree.path as NSString).abbreviatingWithTildeInPath
+            return i
+        }
+        let active = rest.filter { ($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
+        let others = rest.filter { !($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
+        let gone = rest.filter { archived.contains($0.worktree.path) }
+        func section(_ title: String, _ list: [Session]) {
+            guard !list.isEmpty else { return }
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            if #available(macOS 14.0, *) { menu.addItem(.sectionHeader(title: title)) } else { menu.addItem(withTitle: title, action: nil, keyEquivalent: "").isEnabled = false }
+            list.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }.forEach { menu.addItem(item($0)) }
+        }
+        section("Active or with an open pull request", active)
+        section("Other worktrees", others)
+        section("Archived", gone)
+        if menu.items.isEmpty { menu.addItem(withTitle: "Every worktree is in the sidebar", action: nil, keyEquivalent: "").isEnabled = false }
+        menu.addItem(.separator())
+        if rest.count > 1 { menu.addItem(ClosureMenuItem("Show All \(rest.count)") { [weak self] in self?.showAll(in: workspace) }) }
+        menu.addItem(ClosureMenuItem("Add Repository…") { [weak self] in self?.chooseRepository() })
+        return menu
+    }
+
+    private func workspace(at root: URL) -> Workspace? { workspaces.first { $0.root.path == root.path } }
 
     /// The folders of a drag (files are not repositories).
     static func folders(in info: NSDraggingInfo) -> [URL] {
@@ -182,6 +308,7 @@ final class SessionsController {
             if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
             self.sessions = ClaudeSessions.shared.attach(all)
             self.watch(all)
+            if complete { self.autoArchive() }
             self.onChange?()
             if complete {
                 let store = self.store
@@ -191,14 +318,22 @@ final class SessionsController {
         }
     }
 
-    /// The rows by repository, with each session's simulator (when one is alive) attached.
-    func groups() -> [(header: String, sessions: [Session])] {
-        var out: [(String, [Session])] = []
-        if !workspaces.isEmpty, !Git.available { return [(Self.noGit, [])] }
+    /// The rows the sidebar shows, by repository, with each session's simulator (when one is alive) attached, in the
+    /// order of `tier`. `hidden` is how many of the repository's worktrees are a + away.
+    func groups() -> [(header: String, workspace: URL?, sessions: [Session], hidden: Int)] {
+        var out: [(String, URL?, [Session], Int)] = []
+        if !workspaces.isEmpty, !Git.available { return [(Self.noGit, nil, [], 0)] }
         for ws in workspaces {
-            let rows = sessions.filter { $0.workspace.path == ws.root.path }.map { s -> Session in var s = s; s.simulator = simulator(for: s); return s }
-            if rows.isEmpty { continue }
-            out.append((workspaces.count > 1 ? "Sessions: \(ws.root.lastPathComponent)" : "Sessions", rows))
+            let all = sessions.filter { $0.workspace.path == ws.root.path }
+            if all.isEmpty { continue }
+            let order = Dictionary(ws.shown.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+            let rows = all.filter(isShown).map { s -> Session in var s = s; s.simulator = simulator(for: s); return s }
+                .sorted { a, b in
+                    let ka = (Self.tier(a, live: a.simulator != nil), order[a.worktree.path] ?? -1)
+                    let kb = (Self.tier(b, live: b.simulator != nil), order[b.worktree.path] ?? -1)
+                    return ka < kb
+                }
+            out.append((workspaces.count > 1 ? ws.root.lastPathComponent : "Sessions", ws.root, rows, all.count - rows.count))
         }
         return out
     }
@@ -274,6 +409,7 @@ final class SessionsController {
     private func start(_ session: Session, from apk: URL, options: [String] = [], fromAgent: Bool = false, remember: Bool = false) -> Simulator? {
         guard let wb = workbench, let sim = wb.open(apk, remember: remember, options: ["--data-slots", session.slot] + options, fromAgent: fromAgent) else { return nil }
         launched[session.slot] = Self.modified(apk)
+        show(session)   // started from the palette, ⌘n or an agent: it is in use, so it is in the sidebar
         record(apk: apk, for: session)
         enforceWarmLimit(keeping: session.worktree.path)
         return sim
@@ -461,10 +597,12 @@ final class SessionsController {
 
     func paletteItems() -> [PaletteItem] {
         var out: [PaletteItem] = []
-        for (i, s) in groups().flatMap(\.sessions).enumerated() {
+        let rows = groups().flatMap(\.sessions)
+        let shown = Set(rows.map(\.worktree.path))
+        for (i, s) in (rows + sessions.filter { !shown.contains($0.worktree.path) }).enumerated() {
             let kind = s.simulator != nil ? "running" : (s.outputs == nil ? "no build" : "start")
             out.append(PaletteItem(id: "session." + s.worktree.path, title: "Go to session \(s.title) (\(kind))", group: "Sessions",
-                                   symbol: "arrow.triangle.branch", shortcut: i < 9 ? "⌘\(i + 1)" : "",
+                                   symbol: "arrow.triangle.branch", shortcut: i < min(9, rows.count) ? "⌘\(i + 1)" : "",
                                    keywords: "worktree branch change \(s.shortHead) \(s.worktree.lastPathComponent)") { [weak self] in self?.activate(s) })
         }
         out.append(PaletteItem(id: "session.add", title: "Add a repository to Sessions…", group: "Sessions", symbol: "plus.rectangle.on.folder",
@@ -477,27 +615,43 @@ final class SessionsController {
 
     // MARK: Row view
 
+    /// The second line of a row: what tells it apart (its pull request), then where its build is.
+    private func detail(for s: Session) -> (text: String, color: NSColor?) {
+        var bits: [String] = []
+        if let pr = s.pullRequests.first(where: { $0.state == .open }) ?? s.pullRequests.first, let n = pr.number {
+            bits.append("#\(n)" + (pr.state == .merged ? " merged" : pr.state == .closed ? " closed" : ""))
+        } else if let pr = s.claude?.pullRequest, let n = Int(pr.lastPathComponent) { bits.append("#\(n)") }
+        if let built = s.builtAt { bits.append(Self.age(built) + (s.isStale ? ", stale" : "")) } else { bits.append("not built") }
+        if s.dirty { bits.append("edited") }
+        if workspace(of: s)?.defaultRecipeName == "ci", let behind = CIBehind.note(for: s, store: store, then: { [weak self] in self?.onChange?() }) { bits.append(behind) }
+        return (bits.joined(separator: " · "), nil)
+    }
+
+    /// Everything a session's row shows, as one string: the sidebar rebuilds a row only when this changed.
+    func rowKey(for s: Session) -> String {
+        let job = buildQueue.job(for: s)
+        let jobKey = job.map { "\($0.id)|\($0.state == .queued)|\($0.isActive)|\($0.lastLine ?? "")|\($0.failure ?? "")" } ?? "-"
+        let sim = s.simulator.map { $0.state == .running ? "run" : "on" } ?? "off"
+        let c = s.claude.map { "\($0.status)|\($0.running)|\($0.archived)" } ?? "-"
+        return [s.title, detail(for: s).text, sim, c, jobKey, evidence.badgeKey(for: s), workspace(of: s)?.defaultRecipeName ?? ""].joined(separator: "\u{1f}")
+    }
+
     func cell(for s: Session) -> NSView {
         let sim = s.simulator
         let running = sim?.state == .running
         let icon = NSImageView(image: NSImage(systemSymbolName: sim == nil ? "circle" : (running ? "circle.fill" : "circle.dotted"), accessibilityDescription: nil) ?? NSImage())
-        icon.contentTintColor = running ? .systemGreen : .secondaryLabelColor
+        icon.contentTintColor = running ? .systemGreen : .tertiaryLabelColor
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
         icon.setContentHuggingPriority(.required, for: .horizontal)
         let name = NSTextField(labelWithString: s.title)
         name.font = .systemFont(ofSize: 13)
-        name.lineBreakMode = .byTruncatingMiddle
-        // What tells rows apart, first: the pull request, then the branch when a title took its place. The head's
-        // hash and the commits ahead were noise here; they are in the row's tooltip.
-        var detail: [String] = []
-        if let pr = s.claude?.pullRequest, let n = Int(pr.lastPathComponent) { detail.append("#\(n)") }
-        if s.claude?.title != nil, let b = s.branch { detail.append(b) }
-        if let built = s.builtAt { detail.append(Self.age(built)) } else { detail.append("not built") }
-        if s.dirty { detail.append("edited") }
-        if workspace(of: s)?.defaultRecipeName == "ci", let behind = CIBehind.note(for: s, store: store, then: { [weak self] in self?.onChange?() }) { detail.append(behind) }
+        name.lineBreakMode = .byTruncatingTail
+        // The branch, the head's hash and the commits ahead are in the tooltip: the row keeps to what tells it apart.
         let build = buildAccessories(for: s)
-        let sub = NSTextField(labelWithString: build.detail ?? detail.joined(separator: " · "))
+        let line = detail(for: s)
+        let sub = NSTextField(labelWithString: build.detail ?? line.text)
         sub.font = .systemFont(ofSize: 10)
-        sub.textColor = build.color ?? .secondaryLabelColor
+        sub.textColor = build.color ?? (s.isStale && s.builtAt != nil ? .systemOrange : .secondaryLabelColor)
         sub.lineBreakMode = .byTruncatingTail
         let text = NSStackView(views: [name, sub])
         text.orientation = .vertical
@@ -505,33 +659,110 @@ final class SessionsController {
         text.spacing = 0
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         var views: [NSView] = [icon, text]
-        if let dot = ClaudeUI.dot(for: s.claude) { views.append(dot) }
+        if let dot = ClaudeUI.dot(for: s.claude), s.claude?.running == true || s.claude?.status == .waiting { views.append(dot) }   // a finished session's dot said nothing
         if let walk = evidence.badge(for: s) { views.append(walk) }   // "walking…", "N screens" (Evidence.swift)
-        if s.builtAt != nil && s.isStale {   // "not built" is on the second line; the hammer offers the build
-            let badge = NSTextField(labelWithString: "stale")
-            badge.font = .systemFont(ofSize: 9, weight: .semibold)
-            badge.textColor = .systemOrange
-            badge.setContentHuggingPriority(.required, for: .horizontal)
-            badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-            views.append(badge)
+        // A build under way keeps its spinner and cancel in sight; the hammer, the log and the cross show on hover.
+        let active = buildQueue.job(for: s)?.isActive ?? false
+        var hover: [NSView] = []
+        for v in build.views {
+            if active, v is NSProgressIndicator || (v as? ClosureButton)?.toolTip?.hasPrefix("Cancel") == true { views.append(v) } else { hover.append(v); views.append(v) }
         }
-        views += build.views
-        let stack = NSStackView(views: views)
+        let remove = ClosureButton(symbol: "xmark", tip: "Remove from the sidebar (the + menu brings it back)") { [weak self] in self?.remove(s) }
+        remove.contentTintColor = .tertiaryLabelColor
+        hover.append(remove)
+        views.append(remove)
+        let stack = HoverRow(views: views)
+        stack.hoverOnly = hover
         stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 6)
         var tip = [s.branch ?? "detached", s.shortHead + (s.ahead > 0 ? ", \(s.ahead) ahead" : ""), (s.worktree.path as NSString).abbreviatingWithTildeInPath]
-        if let pr = s.claude?.pullRequest { tip.append(pr.absoluteString) }
+        for pr in s.pullRequests { tip.append(pr.url.absoluteString + (pr.state.map { " (\($0.rawValue.lowercased()))" } ?? "")) }
+        if s.pullRequests.isEmpty, let pr = s.claude?.pullRequest { tip.append(pr.absoluteString) }
         stack.toolTip = tip.joined(separator: "\n")
         return stack
+    }
+
+    /// A suggested session: one line, with + to add it and a cross to stop suggesting it.
+    func suggestionCell(for s: Session) -> NSView {
+        let add = ClosureButton(symbol: "plus.circle", tip: "Add to the sidebar") { [weak self] in self?.show(s) }
+        add.contentTintColor = .controlAccentColor
+        let name = NSTextField(labelWithString: s.title)
+        name.font = .systemFont(ofSize: 12)
+        name.textColor = .secondaryLabelColor
+        name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        var why = ""
+        if s.claude?.status == .waiting { why = "waiting" }
+        else if s.claude?.running == true && s.claude?.status == .working { why = "working" }
+        else if let n = s.pullRequests.first(where: { $0.state == .open })?.number { why = "#\(n)" }
+        else if s.claude?.running == true { why = "open" }
+        let tag = NSTextField(labelWithString: why)
+        tag.font = .systemFont(ofSize: 10)
+        tag.textColor = s.claude?.status == .waiting ? .systemOrange : .tertiaryLabelColor
+        tag.setContentHuggingPriority(.required, for: .horizontal)
+        tag.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let dismiss = ClosureButton(symbol: "xmark", tip: "Don't suggest this one again") { [weak self] in self?.dismiss(s) }
+        dismiss.contentTintColor = .tertiaryLabelColor
+        let stack = HoverRow(views: [add, name, tag, dismiss])
+        stack.hoverOnly = [dismiss]
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 2, bottom: 0, right: 6)
+        stack.toolTip = [s.branch ?? "detached", (s.worktree.path as NSString).abbreviatingWithTildeInPath].joined(separator: "\n")
+        return stack
+    }
+
+    /// Stops suggesting the session (it stays in the + menu).
+    func dismiss(_ s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        if !workspaces[i].hidden.contains(s.worktree.path) { workspaces[i].hidden.append(s.worktree.path) }
+        store.saveWorkspaces(workspaces)
+        onChange?()
+    }
+
+    /// The suggestion row's key, like `rowKey`.
+    func suggestionKey(for s: Session) -> String {
+        [s.title, "\(s.claude?.status as Any)", "\(s.claude?.running as Any)", s.pullRequests.first(where: { $0.state == .open })?.url.absoluteString ?? ""].joined(separator: "\u{1f}")
     }
 
     private static func modified(_ file: URL) -> Date {
         (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 
+    private static let ageFormatter: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated; return f }()
+
     private static func age(_ date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
-        return "built " + f.localizedString(for: date, relativeTo: Date())
+        "built " + ageFormatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+/// A row whose `hoverOnly` views show while the pointer is over it: the sidebar stays quiet until a row is pointed at.
+final class HoverRow: NSStackView {
+    var hoverOnly: [NSView] = [] { didSet { hoverOnly.forEach { $0.isHidden = !inside } } }
+    private var inside = false
+    private var area: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let a = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(a)
+        area = a
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A row rebuilt under the pointer starts hovered, or its buttons would wait for the pointer to leave and come back.
+        guard let window else { return }
+        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setInside(bounds.contains(p))
+    }
+
+    override func mouseEntered(with event: NSEvent) { setInside(true) }
+    override func mouseExited(with event: NSEvent) { setInside(false) }
+
+    private func setInside(_ on: Bool) {
+        guard on != inside else { return }
+        inside = on
+        hoverOnly.forEach { $0.isHidden = !on }
     }
 }

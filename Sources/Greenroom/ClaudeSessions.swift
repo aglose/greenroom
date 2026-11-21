@@ -6,6 +6,16 @@ import CoreServices
 // Settings is on. They are not an interface Claude Code promises: every field is optional here, a file that does not
 // parse is skipped without a word, and when nothing parses the rows stay plain worktree rows with one line saying so.
 
+/// A pull request a Claude Code session opened, with its state when the desktop app recorded one.
+struct ClaudePR: Equatable {
+    enum State: String { case open = "OPEN", merged = "MERGED", closed = "CLOSED" }
+    var url: URL
+    var state: State?
+    /// The branch it is from, when known: a main checkout's sessions open pull requests from many branches.
+    var branch: String?
+    var number: Int? { Int(url.lastPathComponent) }
+}
+
 /// What is known of one Claude Code session.
 struct ClaudeSession: Equatable {
     enum Status: String { case working, idle, waiting }
@@ -18,12 +28,16 @@ struct ClaudeSession: Equatable {
     var status: Status = .idle
     var branch: String?
     var pullRequests: [URL] = []
+    /// The same pull requests with their state and branch (the desktop app's files have them; a transcript's do not).
+    var prs: [ClaudePR] = []
     var lastActivity: Date?
     /// Whether the process of a `~/.claude/sessions/<pid>.json` file is still there.
     var running = false
     var archived = false
 
     var pullRequest: URL? { pullRequests.first }
+    /// What a row shows: the same session without the time of its last activity, which moves with every write.
+    var shown: ClaudeSession { var c = self; c.lastActivity = nil; return c }
 }
 
 /// Where the three sources are. Injectable, so a check can point the reader at fixtures.
@@ -84,6 +98,7 @@ enum ClaudeReader {
         var procStart: Date?
         var branch: String?
         var prs: [URL] = []
+        var prInfo: [URL: (state: ClaudePR.State?, branch: String?)] = [:]
         var date: Date?
         var archived = false
         var fromDesktop = false
@@ -172,13 +187,16 @@ enum ClaudeReader {
                 groups.append(r)
             }
         }
+        var resolved: [String: URL] = [:]   // many sessions share a folder: each is resolved once
+        func res(_ p: String) -> URL { if let u = resolved[p] { return u }; let u = resolve(p); resolved[p] = u; return u }
         return groups.compactMap { g in
             guard let folder = g.folder else { return nil }
             var status = ClaudeSession.Status.idle
             if g.alive && g.busy { status = .working }
             if g.waiting && !g.archived { status = .waiting }
-            return ClaudeSession(folder: resolve(folder), repository: g.repository.map(resolve), title: g.title ?? g.pidName, status: status,
-                                 branch: g.branch, pullRequests: g.prs, lastActivity: g.date, running: g.alive, archived: g.archived)
+            let prs = g.prs.map { ClaudePR(url: $0, state: g.prInfo[$0]?.state, branch: g.prInfo[$0]?.branch) }
+            return ClaudeSession(folder: res(folder), repository: g.repository.map(res), title: g.title ?? g.pidName, status: status,
+                                 branch: g.branch, pullRequests: g.prs, prs: prs, lastActivity: g.date, running: g.alive, archived: g.archived)
         }
     }
 
@@ -197,6 +215,7 @@ enum ClaudeReader {
         r.alive = a.alive || b.alive
         r.branch = a.branch ?? b.branch
         for u in b.prs where !r.prs.contains(u) { r.prs.append(u) }
+        for (u, info) in b.prInfo where r.prInfo[u]?.state == nil { r.prInfo[u] = info }
         r.date = [a.date, b.date].compactMap { $0 }.max()
         r.archived = a.archived || b.archived
         r.fromDesktop = a.fromDesktop || b.fromDesktop
@@ -340,7 +359,14 @@ extension ClaudeReader.Record {
         archived = (obj["isArchived"] as? Bool) ?? false
         waiting = (obj["interruptedAwaitingPerson"] as? Bool) ?? false
         date = ClaudeReader.date(obj["lastActivityAt"])
-        if let list = obj["prs"] as? [Any] { prs = list.compactMap { ClaudeReader.url($0) } }
+        if let list = obj["prs"] as? [Any] {
+            for item in list {
+                guard let u = ClaudeReader.url(item) else { continue }
+                if !prs.contains(u) { prs.append(u) }
+                let d = item as? [String: Any]
+                prInfo[u] = (ClaudeReader.string(d?["state"]).flatMap { ClaudePR.State(rawValue: $0.uppercased()) }, ClaudeReader.string(d?["branch"]))
+            }
+        }
         fromDesktop = true
     }
 
@@ -412,6 +438,7 @@ final class ClaudeSessions {
     private let cache = ClaudeReader.Cache()
     private var generation = 0
     private var mainCheckouts: [String: URL?] = [:]
+    private var loadedOnce = false
 
     deinit { stopWatching() }
 
@@ -422,12 +449,13 @@ final class ClaudeSessions {
     }
 
     /// Reads the three sources on a utility queue and publishes the answer on the main thread. With the switch off
-    /// it opens nothing and publishes an empty answer.
-    func reload() {
+    /// it opens nothing and publishes an empty answer. `quiet`: a reload the watcher asked for tells no one when no
+    /// session changed in a way a row shows (a busy session writes every second or so).
+    func reload(quiet: Bool = false) {
         generation += 1
         let mine = generation
         guard enabled else {
-            sessions = []; note = nil; offers = []
+            sessions = []; note = nil; offers = []; loadedOnce = false
             onChange?()
             return
         }
@@ -438,6 +466,12 @@ final class ClaudeSessions {
             self?.lock.lock(); self?.scans -= 1; self?.lock.unlock()
             DispatchQueue.main.async {
                 guard let self, mine == self.generation, self.enabled else { return }
+                let note = result.seen > 0 && result.parsed == 0
+                if quiet, self.loadedOnce, note == (self.note != nil), result.sessions.map(\.shown) == self.sessions.map(\.shown) {
+                    self.sessions = result.sessions   // the times, for ranking, without telling anyone
+                    return
+                }
+                self.loadedOnce = true
                 self.sessions = result.sessions
                 self.note = result.seen > 0 && result.parsed == 0
                     ? "Claude Code's session files could not be read (a newer version?), so rows show branches."
@@ -450,35 +484,59 @@ final class ClaudeSessions {
     /// Whether a read is under way (a check waits for none before it counts opened files).
     var isScanning: Bool { lock.lock(); defer { lock.unlock() }; return scans > 0 }
 
-    /// Gives each row its Claude session (nil with the switch off).
+    /// Gives each row its Claude session (nil with the switch off), carrying the pull requests of every session of
+    /// that worktree. Each path is resolved once and sessions are matched on strings: with hundreds of sessions and
+    /// a dozen worktrees, resolving inside the match ran to hundreds of thousands of file system calls on the main
+    /// thread at every write Claude Code made.
     func attach(_ rows: [Session]) -> [Session] {
-        let all = rows.map(\.worktree)
-        return rows.map { var r = $0; r.claude = enabled ? Self.best(for: r.worktree, among: all, in: sessions) : nil; return r }
+        guard enabled, !sessions.isEmpty else { return rows.map { var r = $0; r.claude = nil; return r } }
+        let paths = rows.map { $0.worktree.resolvingSymlinksInPath().path }
+        var byOwner: [String: [ClaudeSession]] = [:]
+        for s in sessions {   // `folder` was resolved when read
+            if let o = Self.owner(path: s.folder.path, among: paths) { byOwner[o, default: []].append(s) }
+        }
+        return zip(rows, paths).map { row, path in
+            var r = row
+            guard let mine = byOwner[path], var best = mine.max(by: { Self.rank($0) < Self.rank($1) }) else { r.claude = nil; return r }
+            for s in mine { for pr in s.prs where !best.prs.contains(where: { $0.url == pr.url }) { best.prs.append(pr) } }
+            r.claude = best
+            return r
+        }
     }
 
-    /// The worktree a folder belongs to: the folder itself or the deepest of `worktrees` above it (matched on whole
-    /// path components, so `/a/app` is not above `/a/app-2`, and a worktree nested in the main checkout wins over it).
-    static func owner(of folder: URL, among worktrees: [URL]) -> String? {
-        let f = folder.resolvingSymlinksInPath().path
+    /// `owner(of:among:)` on paths already resolved.
+    static func owner(path f: String, among worktrees: [String]) -> String? {
         var best: String?
-        for w in worktrees {
-            let p = w.resolvingSymlinksInPath().path
+        for p in worktrees {
             guard f == p || f.hasPrefix(p.hasSuffix("/") ? p : p + "/") else { continue }
             if best == nil || p.count > best!.count { best = p }
         }
         return best
     }
 
+    /// The worktree a folder belongs to: the folder itself or the deepest of `worktrees` above it (matched on whole
+    /// path components, so `/a/app` is not above `/a/app-2`, and a worktree nested in the main checkout wins over it).
+    static func owner(of folder: URL, among worktrees: [URL]) -> String? {
+        owner(path: folder.resolvingSymlinksInPath().path, among: worktrees.map { $0.resolvingSymlinksInPath().path })
+    }
+
     /// The best session of a worktree: not archived over archived, running over not, then the most recent. `among`
     /// is every worktree of the rows, so a session started in a subfolder finds its worktree.
     static func best(for worktree: URL, among all: [URL] = [], in list: [ClaudeSession]) -> ClaudeSession? {
         let path = worktree.resolvingSymlinksInPath().path
-        return list.filter { owner(of: $0.folder, among: all + [worktree]) == path }.max { rank($0) < rank($1) }
+        let paths = (all + [worktree]).map { $0.resolvingSymlinksInPath().path }
+        return list.filter { owner(path: $0.folder.path, among: paths) == path }.max { rank($0) < rank($1) }
     }
 
-    private static func rank(_ s: ClaudeSession) -> (Int, Int, Date) { (s.archived ? 0 : 1, s.running ? 1 : 0, s.lastActivity ?? .distantPast) }
+    fileprivate static func rank(_ s: ClaudeSession) -> (Int, Int, Date) { (s.archived ? 0 : 1, s.running ? 1 : 0, s.lastActivity ?? .distantPast) }
 
     // MARK: Offers
+
+    /// The workspaces changed: the offers are worked out again from the sessions already read.
+    func workspacesChanged() {
+        guard enabled else { return }
+        refreshOffers(generation)
+    }
 
     /// Repositories with live-ish Claude sessions (not archived, active in the last 30 days or running) that are not
     /// among `workspaces`' main checkouts. The main checkout of a folder is asked of git once.
@@ -491,6 +549,8 @@ final class ClaudeSessions {
             var found: [String: (URL, Int)] = [:]
             var learned = known
             var done = Set<String>()
+            var perFolder: [String: Int] = [:]
+            for s in recent { perFolder[s.folder.path, default: 0] += 1 }
             for s in recent {
                 let key = s.folder.path
                 guard !done.contains(key) else { continue }
@@ -501,7 +561,7 @@ final class ClaudeSessions {
                 guard let repo else { continue }
                 _ = done.insert(key)
                 if added.contains(repo.path) { continue }
-                found[repo.path] = (repo, (found[repo.path]?.1 ?? 0) + recent.filter { $0.folder.path == key }.count)
+                found[repo.path] = (repo, (found[repo.path]?.1 ?? 0) + (perFolder[key] ?? 0))
             }
             guard mine == self.generation else { return }
             self.mainCheckouts = learned
@@ -550,7 +610,7 @@ final class ClaudeSessions {
         if pending == nil { burstStart = now }
         let item = DispatchWorkItem { [weak self] in
             self?.lock.lock(); self?.pending = nil; self?.burstStart = nil; self?.lock.unlock()
-            DispatchQueue.main.async { self?.reload() }
+            DispatchQueue.main.async { self?.reload(quiet: true) }
         }
         pending = item
         queue.asyncAfter(deadline: .now() + 1.5, execute: item)
@@ -607,15 +667,15 @@ enum ClaudeUI {
         return FileManager.default.fileExists(atPath: home.path)
     }
 
-    /// "Show Claude Code's session titles": clicking the row turns the switch on; the cross closes the offer.
+    /// "Show Claude Code's sessions": clicking the row turns the switch on; the cross closes the offer.
     static func titlesPromptCell(onHide: @escaping () -> Void) -> NSView {
         let icon = NSImageView(image: NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = .controlAccentColor
         icon.setContentHuggingPriority(.required, for: .horizontal)
-        let name = NSTextField(labelWithString: "Show Claude Code's session titles")
+        let name = NSTextField(labelWithString: "Show Claude Code's sessions")
         name.font = .systemFont(ofSize: 12)
         name.lineBreakMode = .byTruncatingTail
-        let sub = NSTextField(labelWithString: "Name rows by their session, not their branch")
+        let sub = NSTextField(labelWithString: "Titles, pull requests and what to add")
         sub.font = .systemFont(ofSize: 10)
         sub.textColor = .secondaryLabelColor
         sub.lineBreakMode = .byTruncatingTail
