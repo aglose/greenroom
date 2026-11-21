@@ -189,7 +189,7 @@ enum EvidenceCheck {
             let bDone = await wait("b's walk", 240) { isDone(b.worktree.path, keyB) }
             expect(bDone && hasMap(keyB), "b's walk follows and ends with its own map")
             expect(ev.started == 2, "two builds, two walks (\(ev.started))")
-            expect(clones().isEmpty, "no clone of a data slot is left behind")
+            expect(await wait("the data copies to be removed", 20) { clones().isEmpty }, "no clone of a data slot is left behind")
 
             // 2. The same build is not walked again, however it arrives.
             _ = place("a", va)
@@ -234,7 +234,7 @@ enum EvidenceCheck {
             expect(newer && hasMap(key4), "the newer build is walked\(newer ? "" : " (row: \(String(describing: ev.entry(of: a.worktree.path))), running \(ev.runningOwner ?? "none"), started \(ev.started), key3 \(key3) key4 \(key4))")")
             expect(ev.cancelledRuns > cancelledBefore && !hasMap(key3), "the older build's walk was cancelled and left no map (\(ev.cancelledRuns - cancelledBefore) cancelled)")
             expect(!fm.fileExists(atPath: mapDir(key3).deletingLastPathComponent().appendingPathComponent("map.part").path), "its half-made map is gone")
-            expect(clones().isEmpty, "the cancelled walk's data copy is gone")
+            expect(await wait("the data copies to be removed", 20) { clones().isEmpty }, "the cancelled walk's data copy is gone")
 
             // 4b. Two builds filed in the opposite order of their dates: the newer one is walked, not the older.
             let startedReversed = ev.started
