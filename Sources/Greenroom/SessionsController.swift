@@ -7,7 +7,7 @@ import AppKit
 final class SessionsController {
     private(set) weak var workbench: Workbench?
     private(set) var store = SessionStore.shared
-    private(set) var workspaces: [Workspace] = []
+    var workspaces: [Workspace] = []
     /// Every worktree of every workspace, in the order shown (each workspace's main checkout first).
     private(set) var sessions: [Session] = []
     /// Worktree paths, most recently used first.
@@ -25,6 +25,8 @@ final class SessionsController {
     /// no newer (the system touching a file it has just read or cloned) is not a build.
     private var launched: [String: Date] = [:]
     private var monitor: Any?
+    /// The build queue (Builds.swift); its rows and buttons are BuildsUI.swift.
+    private(set) lazy var buildQueue = Builds(sessions: self)
 
     /// Told on the main thread when the rows changed.
     var onChange: (() -> Void)?
@@ -55,6 +57,7 @@ final class SessionsController {
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refresh()   // edits made elsewhere (dirty files) are not watched; looking again when the app is shown is enough
         }
+        installBuilds()
         refresh()
     }
 
@@ -199,9 +202,12 @@ final class SessionsController {
             noteUsed(session.worktree.path)
             return true
         }
-        // The newest output if it is still there (`gradle clean` deletes it without an event), else the stored build.
+        // The newest of the worktree's Gradle output and the stored builds (a recipe's), that is still there
+        // (`gradle clean` deletes an output without an event).
         let fm = FileManager.default
-        guard let apk = [session.outputs?.apk, session.build?.apk, builds[session.worktree.path]?.apk].compactMap({ $0 }).first(where: { fm.fileExists(atPath: $0.path) }) else {
+        let candidates: [(URL, Date)] = [session.outputs.map { ($0.apk, $0.date) }, session.build.map { ($0.apk, $0.date) },
+                                         builds[session.worktree.path].map { ($0.apk, $0.date) }].compactMap { $0 }
+        guard let apk = candidates.filter({ fm.fileExists(atPath: $0.0.path) }).max(by: { $0.1 < $1.1 })?.0 else {
             wb.toast.show("\(session.title) has no build yet. Build it, and it appears here.", problem: true)
             refresh()
             return false
@@ -317,15 +323,34 @@ final class SessionsController {
         let owner = sessions.filter { file.path.hasPrefix($0.worktree.resolvingSymlinksInPath().path + "/") }
             .max { $0.worktree.path.count < $1.worktree.path.count }
         guard let session = owner, SessionStore.isBuildOutput(file, in: session.worktree) else { return }
+        // A recipe is building this session: when it finishes, `adopt` reloads the simulator once, on the filed build.
+        if buildQueue.isBuilding(session.worktree.path) { return }
         record(apk: file, for: session)
         if let old = simulator(for: session), old.apk.resolvingSymlinksInPath().path == file.path,
            Self.modified(file) > launched[session.slot] ?? .distantPast {
-            launched[session.slot] = Self.modified(file)
-            DevHooks.shared.relaunch(old, apk: file, options: old.options) { [weak self] new in
-                guard let self, let new else { return }
-                self.workbench?.toast.show("Reloaded \(session.title) on its new build")
-                self.onReload?(session, new)
-            }
+            reload(old, of: session, to: file)
+        }
+        refresh()
+    }
+
+    /// The one place a session's simulator is replaced by a new build of it (same options, same data slot). Where hot
+    /// swap's swap -> recreate -> relaunch ladder plugs in.
+    private func reload(_ old: Simulator, of session: Session, to apk: URL) {
+        launched[session.slot] = Self.modified(apk)
+        DevHooks.shared.relaunch(old, apk: apk, options: old.options) { [weak self] new in
+            guard let self, let new else { return }
+            self.workbench?.toast.show("Reloaded \(session.title) on its new build")
+            self.onReload?(session, new)
+        }
+    }
+
+    /// A build a recipe made, filed in the store: it is the session's newest, and its simulator (if one is alive,
+    /// selected or not) reloads on it with its data kept. A build the simulator already runs reloads nothing.
+    func adopt(_ build: Build, forWorktree path: String) {
+        builds[path] = build
+        if let session = sessions.first(where: { $0.worktree.path == path }), let old = simulator(for: session),
+           old.apk.resolvingSymlinksInPath().path != build.apk.resolvingSymlinksInPath().path {
+            reload(old, of: session, to: build.apk)
         }
         refresh()
     }
@@ -342,6 +367,7 @@ final class SessionsController {
         }
         out.append(PaletteItem(id: "session.add", title: "Add a repository to Sessions…", group: "Sessions", symbol: "plus.rectangle.on.folder",
                                keywords: "git worktree folder") { [weak self] in self?.chooseRepository() })
+        out += buildPaletteItems()   // Build this session, Cancel build (BuildsUI.swift)
         return out
     }
 
@@ -357,12 +383,13 @@ final class SessionsController {
         name.font = .systemFont(ofSize: 13)
         name.lineBreakMode = .byTruncatingMiddle
         var detail = [s.shortHead]
-        if let o = s.outputs { detail.append(Self.age(o.date)) }
+        if let built = s.builtAt { detail.append(Self.age(built)) }
         if s.ahead > 0 { detail.append("\(s.ahead) ahead") }
         if s.dirty { detail.append("edited") }
-        let sub = NSTextField(labelWithString: detail.joined(separator: " · "))
+        let build = buildAccessories(for: s)
+        let sub = NSTextField(labelWithString: build.detail ?? detail.joined(separator: " · "))
         sub.font = .systemFont(ofSize: 10)
-        sub.textColor = .secondaryLabelColor
+        sub.textColor = build.color ?? .secondaryLabelColor
         sub.lineBreakMode = .byTruncatingTail
         let text = NSStackView(views: [name, sub])
         text.orientation = .vertical
@@ -370,14 +397,15 @@ final class SessionsController {
         text.spacing = 0
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         var views: [NSView] = [icon, text]
-        if s.outputs == nil || s.isStale {
-            let badge = NSTextField(labelWithString: s.outputs == nil ? "no build" : "stale")
+        if s.builtAt == nil || s.isStale {
+            let badge = NSTextField(labelWithString: s.builtAt == nil ? "no build" : "stale")
             badge.font = .systemFont(ofSize: 9, weight: .semibold)
-            badge.textColor = s.outputs == nil ? .secondaryLabelColor : .systemOrange
+            badge.textColor = s.builtAt == nil ? .secondaryLabelColor : .systemOrange
             badge.setContentHuggingPriority(.required, for: .horizontal)
             badge.setContentCompressionResistancePriority(.required, for: .horizontal)
             views.append(badge)
         }
+        views += build.views
         let stack = NSStackView(views: views)
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)

@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 /// The main window: running simulators and recent APKs in a sidebar, the selected simulator beside it,
 /// device controls in the toolbar. An APK dropped anywhere on the window opens.
-final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     let window: NSWindow
     private let table = NSTableView()
     private let grid = SimulatorGrid(frame: .zero)
@@ -973,6 +973,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
+        menu.delegate = self
         table.menu = menu
         table.registerForDraggedTypes([.fileURL])   // a folder dropped here is a repository to add
 
@@ -1092,6 +1093,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
         if case .recent(let url) = rows[row] { open(url) }
+    }
+
+    /// The row's context menu: a session's row gets Build, Build with and the log in front (SessionsController).
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.items.filter { $0.tag == 77 }.forEach { menu.removeItem($0) }
+        let row = table.clickedRow
+        guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
+        let items = sessions.buildMenuItems(for: session) + [.separator()]
+        for (i, item) in items.enumerated() { item.tag = 77; menu.insertItem(item, at: i) }
     }
 
     @objc private func closeClicked() {

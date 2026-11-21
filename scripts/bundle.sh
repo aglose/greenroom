@@ -39,6 +39,7 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/${GREENROOM_BUILD:-$(git rev-list -
 [[ -f Resources/AppIcon.icns ]] && cp Resources/AppIcon.icns "$C/Resources/"
 cp -Rc "$ENGINE" "$C/Resources/engine"
 cp "$TESTAPP" "$C/Resources/engine-testapp.apk"
+cp -R Resources/recipes "$C/Resources/recipes"
 chmod -R u+w "$APP"   # a release's JDK files are read-only; signing rewrites them
 xattr -cr "$APP"
 

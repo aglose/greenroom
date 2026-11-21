@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         extrasCheckIfAsked()
         devHooksCheckIfAsked()
         sessionsCheckIfAsked()
+        buildsCheckIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
@@ -476,6 +477,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SessionsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
     }
 
+    /// `Greenroom --builds-check DIR APK`: see BuildsCheck.
+    private func buildsCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--builds-check"), i + 2 < args.count else { return }
+        BuildsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
     private func defaults_forgetRecent(_ apk: URL) {
         var paths = UserDefaults.standard.stringArray(forKey: "recentApks") ?? []
         paths.removeAll { $0 == apk.path }
@@ -539,6 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Reports.shared.saveUsage()
         agent.stop()
         TestRun.terminateAll()
+        workbench.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
         ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
         Engine.shared.stopAll()
     }
