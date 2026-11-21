@@ -16,25 +16,41 @@ SPARKLE="$ROOT/.build/artifacts/sparkle/Sparkle/bin"
 W=$(mktemp -d "${TMPDIR:-/tmp}/greenroom-update.XXXXXX")
 mkdir -p "$W/installed" "$W/feed"
 SERVER=; APP_PID=
-trap '[[ -n "$APP_PID" ]] && kill "$APP_PID" 2>/dev/null; [[ -n "$SERVER" ]] && kill "$SERVER" 2>/dev/null; true' EXIT
+# The installed copy has Greenroom's bundle id, so Sparkle keeps its state (last check, and so on) in Greenroom's own
+# preferences: they are saved here and put back at the end.
+DOMAIN=io.github.aglose.greenroom
+defaults export "$DOMAIN" "$W/prefs.plist" 2>/dev/null || true
+restore() {
+  [[ -n "$APP_PID" ]] && kill "$APP_PID" 2>/dev/null
+  [[ -n "$SERVER" ]] && kill "$SERVER" 2>/dev/null
+  pkill -f "$W/installed/Greenroom.app/Contents/MacOS/Greenroom" 2>/dev/null && sleep 2   # a relaunched copy writes on quit
+  defaults delete "$DOMAIN" 2>/dev/null
+  [[ -f "$W/prefs.plist" ]] && defaults import "$DOMAIN" "$W/prefs.plist"
+  rm -rf "$W"   # two builds and a disk image: ~1 GB
+  true
+}
+trap restore EXIT
 
 echo "== build $OLD and install it"
-"$ROOT/scripts/bundle.sh" --identity "$IDENTITY" --version "$OLD" | tail -1
+BUILD=$(git -C "$ROOT" rev-list --count HEAD)
+GREENROOM_BUILD=$BUILD "$ROOT/scripts/bundle.sh" --identity "$IDENTITY" --version "$OLD" | tail -1
 ditto "$ROOT/build/Greenroom.app" "$W/installed/Greenroom.app"
 echo "== build $NEW as a disk image, and an appcast for it"
-"$ROOT/scripts/bundle.sh" --identity "$IDENTITY" --version "$NEW" | tail -1
+GREENROOM_BUILD=$((BUILD + 1)) "$ROOT/scripts/bundle.sh" --identity "$IDENTITY" --version "$NEW" | tail -1
 "$ROOT/scripts/dmg.sh" --identity "$IDENTITY" | tail -1
 cp "$ROOT/build/Greenroom-$NEW.dmg" "$W/feed/"
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 "$SPARKLE/generate_appcast" --account greenroom --download-url-prefix "http://127.0.0.1:$PORT/" "$W/feed" >/dev/null
-grep -o 'sparkle:version="[^"]*"\|sparkle:shortVersionString>[^<]*\|sparkle:edSignature="[^"]\{8\}' "$W/feed/appcast.xml" | head -3
+grep -o '<sparkle:version>[^<]*\|<sparkle:shortVersionString>[^<]*\|sparkle:edSignature="[^"]\{8\}' "$W/feed/appcast.xml" | head -3
 (cd "$W/feed" && exec python3 -m http.server --bind 127.0.0.1 "$PORT") > "$W/server.log" 2>&1 &
+disown
 SERVER=$!
 sleep 1
 
 echo "== run $OLD with automatic checks and installs on"
 GREENROOM_UPDATE_FEED="http://127.0.0.1:$PORT/appcast.xml" "$W/installed/Greenroom.app/Contents/MacOS/Greenroom" --background \
-  -SUHasLaunchedBefore YES -SUEnableAutomaticChecks YES -SUAutomaticallyUpdate YES > "$W/app.log" 2>&1 &
+  -SUHasLaunchedBefore YES -SUEnableAutomaticChecks YES -SUAutomaticallyUpdate YES \
+  -SULastCheckTime '<date>2001-01-01T00:00:00Z</date>' > "$W/app.log" 2>&1 &
 APP_PID=$!
 for _ in $(seq 120); do grep -q "GET /Greenroom-$NEW.dmg" "$W/server.log" && break; sleep 1; done
 grep -q "GET /appcast.xml" "$W/server.log" || { echo "FAIL: the app never asked for the appcast"; cat "$W/app.log" | tail -20; exit 1; }
@@ -50,4 +66,3 @@ done
 pkill -f "$W/installed/Greenroom.app/Contents/MacOS/Greenroom" 2>/dev/null || true   # a relaunched copy, if any
 if [[ "$v" != "$NEW" ]]; then echo "FAIL: the installed app is still $v"; tail -20 "$W/app.log"; exit 1; fi
 codesign --verify --deep --strict "$W/installed/Greenroom.app" && echo "PASS: $OLD updated itself to $NEW, signature intact"
-rm -rf "$W"

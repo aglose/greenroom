@@ -3,6 +3,7 @@
 #   scripts/bundle.sh [--identity NAME|-] [--engine DIR --testapp APK] [--version X.Y.Z] [--check]
 # --identity   a codesign identity; "-" (default) signs ad hoc, for running on this Mac only
 # --engine     an unpacked apksim release to bundle instead of the one engine.lock names (with --testapp)
+# GREENROOM_BUILD  the build number (CFBundleVersion, which Sparkle compares); the commit count by default
 # --check      afterwards, run the bundled training app headless through the app and verify the signatures
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -33,7 +34,7 @@ cp "$BIN_PATH/Greenroom" "$C/MacOS/Greenroom"
 mkdir -p "$C/Frameworks"
 ditto "$BIN_PATH/Sparkle.framework" "$C/Frameworks/Sparkle.framework"
 rm -rf "$C/Frameworks/Sparkle.framework/Versions/B/XPCServices" "$C/Frameworks/Sparkle.framework/XPCServices"
-sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$(git rev-list --count HEAD 2>/dev/null || echo 1)/" \
+sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/${GREENROOM_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}/" \
     -e "s/@ENGINE@/$ENGINE_VERSION/" Resources/Info.plist > "$C/Info.plist"
 [[ -f Resources/AppIcon.icns ]] && cp Resources/AppIcon.icns "$C/Resources/"
 cp -Rc "$ENGINE" "$C/Resources/engine"
