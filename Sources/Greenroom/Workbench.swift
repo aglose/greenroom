@@ -13,7 +13,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var mirror = false
     /// The matrix wall's simulators (MatrixWall.swift), empty when none runs.
     var matrixSims: [Simulator] = []
-    /// Bumped by every run and close of the matrix, so a run's delayed start stands down once it is stale.
+    /// Bumped by every run and close of the matrix (a pending check or callback can tell its wall is gone).
     var matrixGeneration = 0
     /// Side by side and mirroring as they were before the matrix took them over, put back when it closes.
     var beforeMatrix: (sideBySide: Bool, mirror: Bool)?

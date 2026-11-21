@@ -108,31 +108,22 @@ extension Workbench {
         }
     }
 
-    /// Starts every cell (the simulators already running stay), side by side with input mirrored to all. The first cell
-    /// starts at once and the others 0.6 s later: engines up to 0.54.0 race when several first launches from a new
-    /// install folder start together (apksim's class-path link), and one of them dies.
+    /// Starts every cell (the simulators already running stay), side by side with input mirrored to all.
     func runMatrix(_ matrix: Matrix, apk: URL, done: (([Simulator]) -> Void)? = nil) {
         closeMatrix(nil)
         matrixGeneration += 1
-        let generation = matrixGeneration
-        func start(_ cell: Matrix.Cell) {
-            guard let sim = open(apk, remember: false, options: cell.options, fromAgent: true) else { return }
+        let cells = matrix.cells
+        guard !cells.isEmpty else { done?([]); return }
+        beforeMatrix = (sideBySide, mirror)
+        for cell in cells {
+            guard let sim = open(apk, remember: false, options: cell.options, fromAgent: true) else { continue }
             sim.cellLabel = cell.label
             matrixSims.append(sim)
         }
-        let cells = matrix.cells
-        guard let first = cells.first else { done?([]); return }
-        beforeMatrix = (sideBySide, mirror)
-        start(first)
         if let sim = matrixSims.first { select(sim) }
         setSideBySide(true)
         setMirror(true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            // Closed, or run again, meanwhile: the rest of this run's cells are not wanted.
-            guard let self, self.matrixGeneration == generation else { return }
-            for cell in cells.dropFirst() { start(cell) }
-            done?(self.matrixSims)
-        }
+        done?(matrixSims)
     }
 
     /// Quits the matrix's simulators (ended ones too, so their tiles go), and puts side by side and mirroring back.

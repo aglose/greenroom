@@ -24,8 +24,7 @@ is the next large piece: docs/UI-PLAN.md.
 
 Found on the way, in apksim: two launches started together (a first launch and the background training it starts, or
 the matrix wall's cells) race on `ln -sfn` of the class-path link in `$TMPDIR` and one dies with "File exists".
-Fixed in apksim (pull request 582); until Greenroom bundles an engine with the fix, the matrix wall starts its first
-cell 0.6 s before the others.
+Fixed in apksim 0.57.1 (pull request 582), which Greenroom bundles.
 
 Items marked *(unverified)* come from
 research that was not confirmed against a primary source or a test; each has a spike below.
