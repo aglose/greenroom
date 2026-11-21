@@ -22,6 +22,8 @@ final class BuildJob {
     let started = Date()
     var run: RecipeRun?
     fileprivate var cancelRequested = false
+    /// The recipe is done and its APK is being filed: a cancel now is honoured before the hand-off.
+    fileprivate var handingOff = false
     fileprivate var recipe: Recipe
     fileprivate var module: String
     fileprivate var variant: String
@@ -94,6 +96,11 @@ final class Builds {
     }
 
     /// Ends a job: a queued one is dropped, a running one has its whole process group ended.
+    /// At once, for the app quitting: every running recipe's group gets SIGKILL, synchronously.
+    func terminateAll() {
+        for job in jobs.values where job.isActive { job.cancelRequested = true; job.run?.killNow() }
+    }
+
     func cancel(_ worktree: String) {
         guard let job = jobs[worktree], job.isActive else { return }
         if job.state == .queued {
@@ -102,7 +109,7 @@ final class Builds {
             onChange?()
         } else {
             job.cancelRequested = true
-            job.run?.cancel()   // the run's completion does the rest
+            if !job.handingOff { job.run?.cancel() }   // the run's completion does the rest
         }
     }
 
@@ -148,7 +155,7 @@ final class Builds {
 
     private func finish(_ job: BuildJob, outcome: RecipeOutcome, store: SessionStore, sha: String, ref: String, dirty: Bool) {
         let work = job.logFile.deletingLastPathComponent()
-        let log = job.lines.joined(separator: "\n") + "\n"
+        let log = job.run?.logText ?? (job.lines.joined(separator: "\n") + "\n")
         let release = { [self] in
             running[job.workspace.path] = nil
             onChange?()
@@ -156,6 +163,9 @@ final class Builds {
         }
         switch outcome {
         case .cancelled:
+            let note = "cancelled. A Gradle daemon the recipe started may finish its current task."
+            job.append(note)
+            onLine?(job, note)
             job.set(.cancelled)
             try? FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
             try? log.write(to: job.logFile, atomically: true, encoding: .utf8)
@@ -167,6 +177,7 @@ final class Builds {
             release()
         case .built:
             let out = job.out, source = job.source
+            job.handingOff = true
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 // Hashing and cloning a big APK is off the main thread.
                 let build = store.record(apk: out, source: source, sha: sha.isEmpty ? nil : sha, ref: ref.isEmpty ? nil : ref, dirty: dirty, date: Date())
@@ -177,7 +188,13 @@ final class Builds {
                 try? FileManager.default.removeItem(at: out)
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    if let build {
+                    if build != nil, job.cancelRequested {
+                        // Cancel came while the APK was being filed: honoured before the session is handed it.
+                        let note = "cancelled before the build was adopted: it is kept in the store, the session keeps running its previous build"
+                        job.append(note)
+                        self.onLine?(job, note)
+                        job.set(.cancelled)
+                    } else if let build {
                         job.set(.built(build))
                         self.sessions?.adopt(build, forWorktree: job.session)
                         self.onBuilt?(job, build)

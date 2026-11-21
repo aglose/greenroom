@@ -123,7 +123,7 @@ extension SessionsController {
             spin.startAnimation(nil)
             spin.setContentHuggingPriority(.required, for: .horizontal)
             views.append(spin)
-            views.append(ClosureButton(symbol: "xmark.circle", tip: "Cancel build") { [weak self] in self?.cancelBuild(s) })
+            views.append(ClosureButton(symbol: "xmark.circle", tip: "Cancel build (a Gradle daemon may finish its current task)") { [weak self] in self?.cancelBuild(s) })
             detail = job.state == .queued ? "build queued: another build of this repository is running" : "building: " + (job.lastLine ?? job.recipeName)
         } else {
             if let job, let why = job.failure {
@@ -179,9 +179,13 @@ extension SessionsController {
 }
 
 /// The log of a build in a popover: it follows the build while it runs, with its reason and a Cancel.
-final class BuildLogPopover: NSViewController {
+final class BuildLogPopover: NSViewController, NSPopoverDelegate {
     static weak var current: BuildLogPopover?
     private static var popover: NSPopover?
+    private static let keepLines = 3000
+    private var shown: [String] = []
+    private var unflushed: [String] = []
+    private var flushScheduled = false
 
     private let job: BuildJob
     private let text = NSTextView()
@@ -200,6 +204,7 @@ final class BuildLogPopover: NSViewController {
         let c = BuildLogPopover(job: job, onCancel: onCancel)
         let p = NSPopover()
         p.behavior = .transient
+        p.delegate = c
         p.contentViewController = c
         p.show(relativeTo: anchor, of: view, preferredEdge: .maxX)
         popover = p
@@ -217,12 +222,13 @@ final class BuildLogPopover: NSViewController {
         text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         text.drawsBackground = false
         text.textContainerInset = NSSize(width: 6, height: 4)
-        text.string = job.lines.joined(separator: "\n")
+        shown = Array(job.lines.suffix(Self.keepLines))
+        text.string = shown.joined(separator: "\n")
         let scroll = NSScrollView()
         scroll.documentView = text
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
-        let cancel = ClosureButton(symbol: "xmark.circle", tip: "Cancel build") { [weak self] in self?.onCancel() }
+        let cancel = ClosureButton(symbol: "xmark.circle", tip: "Cancel build (a Gradle daemon may finish its current task)") { [weak self] in self?.onCancel() }
         let copy = ClosureButton(symbol: "doc.on.doc", tip: "Copy the log") { [weak self] in
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(self?.job.lines.joined(separator: "\n") ?? "", forType: .string)
@@ -240,13 +246,37 @@ final class BuildLogPopover: NSViewController {
         refresh()
     }
 
+    /// Lines are collected and drawn four times a second at most; the view keeps the last `keepLines`.
     func append(_ line: String, of other: BuildJob) {
         guard other === job, isViewLoaded else { return }
+        unflushed.append(line)
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.flush() }
+    }
+
+    private func flush() {
+        flushScheduled = false
+        guard isViewLoaded, !unflushed.isEmpty else { return }
         let atEnd = (text.enclosingScrollView?.verticalScroller?.floatValue ?? 1) > 0.98
-        text.textStorage?.append(NSAttributedString(string: (text.string.isEmpty ? "" : "\n") + line,
-                                                    attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor]))
+        let added = unflushed
+        shown.append(contentsOf: added)
+        unflushed = []
+        let cut = shown.count > Self.keepLines
+        if cut { shown.removeFirst(shown.count - Self.keepLines) }
+        if cut {
+            text.string = shown.joined(separator: "\n")
+        } else {
+            text.textStorage?.append(NSAttributedString(string: (text.string.isEmpty ? "" : "\n") + added.joined(separator: "\n"),
+                                                        attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor]))
+        }
         if atEnd { text.scrollToEndOfDocument(nil) }
         refresh()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        if Self.current === self { Self.current = nil }
+        Self.popover = nil
     }
 
     func refresh() {

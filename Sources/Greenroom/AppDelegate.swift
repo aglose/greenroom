@@ -547,6 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Reports.shared.saveUsage()
         agent.stop()
         TestRun.terminateAll()
+        workbench.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
         ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
         Engine.shared.stopAll()
     }

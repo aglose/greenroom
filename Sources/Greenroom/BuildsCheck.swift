@@ -114,10 +114,51 @@ enum BuildsCheck {
             }
 
             // 0. The login shell's environment is resolved (off the main thread).
-            let shellEnv: [String: String] = await Task.detached { LoginEnvironment.resolve() }.value
+            let shellEnv: [String: String] = await Task.detached { LoginEnvironment.resolve().env }.value
             let shellPath: String = shellEnv["PATH"] ?? ""
             let hasJava = shellEnv["JAVA_HOME"] != nil, hasSdk = shellEnv["ANDROID_HOME"] != nil
             expect(shellPath.contains("/usr/bin"), "the login shell's environment resolves (PATH has \(shellPath.split(separator: ":").count) entries, JAVA_HOME \(hasJava ? "set" : "unset"), ANDROID_HOME \(hasSdk ? "set" : "unset"))")
+            // The shell is the account's (not $SHELL), asked as `-l -i -c /usr/bin/env`, with a deadline: a stand-in
+            // shell that ignores SIGTERM and leaves a child holding the pipe must not hold a build.
+            func shellScript(_ name: String, _ body: String) -> String {
+                let f = bin.appendingPathComponent(name)
+                try? ("#!/bin/bash\n" + body + "\n").write(to: f, atomically: true, encoding: .utf8)
+                try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+                return f.path
+            }
+            let shellChild = base.appendingPathComponent("shell-child.pid")
+            LoginEnvironment.shellOverride = shellScript("stuck-shell", "trap '' TERM; (trap '' TERM; sleep 300) & echo $! > \"\(shellChild.path)\"; echo 'banner without an equals sign'; sleep 300")
+            LoginEnvironment.deadline = 2
+            LoginEnvironment.reset()
+            let askStart = Date()
+            let stuck: (env: [String: String], note: String?) = await Task.detached { LoginEnvironment.resolve() }.value
+            let asked = Date().timeIntervalSince(askStart)
+            let shellKid = pid_t((try? String(contentsOf: shellChild, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+            _ = await wait("the stuck shell's child to end", 10) { !alive(shellKid) }
+            expect(asked < 6 && (stuck.note ?? "").contains("did not finish") && !alive(shellKid) && shellKid > 0,
+                   "a login shell that ignores SIGTERM and leaves a child on the pipe is killed with its group at the deadline (\(String(format: "%.1f", asked)) s, child gone \(!alive(shellKid))): \(stuck.note ?? "no note")")
+            LoginEnvironment.shellOverride = shellScript("fish-like-shell", "echo 'Welcome'; echo 'PATH=/shell/bin:/usr/bin'; echo 'JAVA_HOME=/shell/jdk'; echo 'SECRET_TOKEN=do-not-log'")
+            LoginEnvironment.reset()
+            let fine = LoginEnvironment.resolve()
+            expect(fine.note == nil && fine.env["PATH"]?.hasPrefix("/shell/bin:") == true && fine.env["SECRET_TOKEN"] == ProcessInfo.processInfo.environment["SECRET_TOKEN"],
+                   "the shell's env output is parsed whatever the shell prints around it (only PATH, JAVA_HOME and the SDK variables are read)")
+            LoginEnvironment.shellOverride = shellScript("empty-shell", "echo 'PATH='")
+            LoginEnvironment.reset()
+            let emptyRun = RecipeRun(recipe: recipes["ok"]!, job: RecipeJob(worktree: worktree("b"), repo: repo, ref: "", sha: "", dirty: false, module: "", variant: "debug", out: base.appendingPathComponent("empty-out/app.apk")))
+            let emptyOutcome: RecipeOutcome = await withCheckedContinuation { c in emptyRun.start { c.resume(returning: $0) } }
+            let noted = emptyRun.lines.first { $0.hasPrefix("note:") } ?? ""
+            expect(emptyOutcome == .built && noted.contains("gave no PATH") && !emptyRun.lines.contains { $0.contains("do-not-log") || $0.contains("/shell/") },
+                   "an empty capture is said in the build log, without values (\(noted))")
+            LoginEnvironment.shellOverride = nil
+            LoginEnvironment.deadline = 8
+            LoginEnvironment.reset()
+
+            // Line splitting: \n, \r\n and a lone \r end a line, a runaway line is cut.
+            var splitter = LineSplitter(cap: 10)
+            var got = splitter.feed(Data("a\rb\r\nc\n12345678901234".utf8))
+            if let rest = splitter.finish() { got.append(rest) }
+            expect(got == ["a", "b", "c", "1234567890 […line cut]", "1234"], "progress lines split on \\r, and a line with no end is capped: \(got)")
+
             LoginEnvironment.override = ["PATH": "/check/bin:/usr/bin:/bin", "JAVA_HOME": "/check/jdk", "ANDROID_HOME": "/check/sdk"]
 
             // 1. A simulator on a's worktree build, with data to keep.
@@ -229,22 +270,75 @@ enum BuildsCheck {
             let notable: [String] = (jobL?.lines ?? []).filter { $0.contains("application module") || $0.hasPrefix("+") || $0.hasPrefix("built") }
             expect(localBuild?.key == apkKey, "local.sh found the application module, ran ./gradlew :app:assembleDebug and took the debug APK, not the newer release or the test one (\(notable.joined(separator: " | ")); \(jobL?.failure ?? "ok"))")
             expect(sessions.simulator(for: a0) === simA2, "the same build twice reloads nothing")
-            // No application module / several, through a scratch directory with the same recipe.
-            @MainActor func localRun(_ folder: URL) async -> RecipeOutcome {
+            // The recipe's choices, against scratch projects with a stand-in gradlew that writes what AGP writes.
+            @MainActor func localRun(_ folder: URL, variant: String = "debug", module: String = "") async -> (RecipeOutcome, [String], String?) {
                 let out = base.appendingPathComponent("scratch-out/app.apk")
-                let job = RecipeJob(worktree: folder, repo: folder, ref: "", sha: "", dirty: false, module: "", variant: "debug", out: out)
+                let job = RecipeJob(worktree: folder, repo: folder, ref: "", sha: "", dirty: false, module: module, variant: variant, out: out)
                 let run = RecipeRun(recipe: Recipe.builtIn("local")!, job: job)
-                return await withCheckedContinuation { c in run.start { c.resume(returning: $0) } }
+                let outcome: RecipeOutcome = await withCheckedContinuation { c in run.start { c.resume(returning: $0) } }
+                return (outcome, run.lines, try? String(contentsOf: out, encoding: .utf8))
             }
-            let none = base.appendingPathComponent("none", isDirectory: true)
-            try? fm.createDirectory(at: none, withIntermediateDirectories: true)
-            if case .failed(let r) = await localRun(none) { expect(r.contains("no Android application module"), "local.sh says plainly when there is no application module (\(r))") } else { expect(false, "local.sh with no application module should fail") }
-            let two = base.appendingPathComponent("two", isDirectory: true)
-            for m in ["one", "two"] {
-                try? fm.createDirectory(at: two.appendingPathComponent(m), withIntermediateDirectories: true)
-                try? "plugins { id 'com.android.application' }\n".write(to: two.appendingPathComponent(m + "/build.gradle"), atomically: true, encoding: .utf8)
+            func reasonOf(_ o: RecipeOutcome) -> String { if case .failed(let r) = o { return r }; return o == .built ? "built" : "cancelled" }
+            func project(_ name: String, buildFile: String, file: String = "app/build.gradle.kts", gradlew: String? = nil) -> URL {
+                let d = base.appendingPathComponent(name, isDirectory: true)
+                try? fm.createDirectory(at: d.appendingPathComponent((file as NSString).deletingLastPathComponent), withIntermediateDirectories: true)
+                try? buildFile.write(to: d.appendingPathComponent(file), atomically: true, encoding: .utf8)
+                if let gradlew {
+                    try? ("#!/bin/bash\necho \"stand-in gradle: $@\"\n" + gradlew + "\n").write(to: d.appendingPathComponent("gradlew"), atomically: true, encoding: .utf8)
+                    try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: d.appendingPathComponent("gradlew").path)
+                }
+                return d
             }
-            if case .failed(let r) = await localRun(two) { expect(r.contains("several application modules") && r.contains("one") && r.contains("two"), "local.sh says plainly when there are several (\(r))") } else { expect(false, "local.sh with two application modules should fail") }
+            // What AGP leaves next to a variant's APKs: output-metadata.json with the variant's name and files.
+            let writeVariant = """
+            # usage: variant_dir NAME FOLDER ELEMENTS...   (an element is "outputfile:TYPE:ABI")
+            variant() { name="$1"; dir="app/build/outputs/apk/$2"; shift 2; mkdir -p "$dir"; els=""
+              for e in "$@"; do f="${e%%:*}"; r="${e#*:}"; t="${r%%:*}"; abi="${r#*:}"
+                echo "content of $f" > "$dir/$f"
+                flt='[]'; [ -n "$abi" ] && flt="[{\\"filterType\\":\\"ABI\\",\\"value\\":\\"$abi\\"}]"
+                els="$els{\\"type\\":\\"ONE_OF_MANY\\",\\"outputType\\":{\\"type\\":\\"$t\\"},\\"filters\\":$flt,\\"outputFile\\":\\"$f\\"},"
+              done
+              printf '{"version":3,"artifactType":{"type":"APK","kind":"Directory"},"applicationId":"x","variantName":"%s","elements":[%s]}' "$name" "${els%,}" > "$dir/output-metadata.json"; }
+            """
+            let none = project("none", buildFile: "plugins { }\n", file: "lib/build.gradle")
+            let r1 = await localRun(none)
+            expect(reasonOf(r1.0).contains("no Android application module") && reasonOf(r1.0).contains("(module)"), "local.sh says plainly when there is no application module, and names the setting (\(reasonOf(r1.0)))")
+            let two = project("two", buildFile: "plugins { id 'com.android.application' }\n", file: "one/build.gradle")
+            try? fm.createDirectory(at: two.appendingPathComponent("two"), withIntermediateDirectories: true)
+            try? "plugins { alias(libs.plugins.androidApplication) }\n".write(to: two.appendingPathComponent("two/build.gradle.kts"), atomically: true, encoding: .utf8)
+            let r2 = await localRun(two)
+            expect(reasonOf(r2.0).contains("several application modules") && reasonOf(r2.0).contains("one") && reasonOf(r2.0).contains("two"), "local.sh says plainly when there are several, catalog alias included (\(reasonOf(r2.0)))")
+            // A version-catalog alias finds the module; flavors: 'debug' is ambiguous and says so, 'freeDebug' is one build whose universal APK wins.
+            let flavors = project("flavors", buildFile: "plugins { alias(libs.plugins.android.application) }\n", gradlew: writeVariant + """
+
+            case "$1" in
+              :app:assembleDebug) variant freeDebug free/debug free-universal.apk:UNIVERSAL: free-arm.apk:ONE_OF_MANY:arm64-v8a; variant paidDebug paid/debug paid-universal.apk:UNIVERSAL: ;;
+              :app:assembleFreeDebug) variant freeDebug free/debug free-arm.apk:ONE_OF_MANY:arm64-v8a free-universal.apk:UNIVERSAL: free-v7.apk:ONE_OF_MANY:armeabi-v7a ;;
+              *) echo "error: unexpected $1" >&2; exit 1 ;;
+            esac
+            """)
+            let r3 = await localRun(flavors)
+            expect(reasonOf(r3.0).contains("freeDebug") && reasonOf(r3.0).contains("paidDebug") && reasonOf(r3.0).contains("(variant)") && r3.1.contains("application module: app"),
+                   "a catalog alias finds the module; two flavors of 'debug' fail naming both and the variant setting (\(reasonOf(r3.0).replacingOccurrences(of: "\n", with: " ")))")
+            let r4 = await localRun(flavors, variant: "freeDebug")
+            expect(r4.0 == .built && r4.2 == "content of free-universal.apk\n", "variant freeDebug: output-metadata.json picks the universal APK over the ABI splits (\(reasonOf(r4.0)), got \(r4.2 ?? "nothing"))")
+            let abi = project("abi", buildFile: "plugins { id(\"com.android.application\") }\n", gradlew: writeVariant + """
+
+            variant debug debug app-v7.apk:ONE_OF_MANY:armeabi-v7a app-arm64.apk:ONE_OF_MANY:arm64-v8a app-x86.apk:ONE_OF_MANY:x86
+            """)
+            let r5 = await localRun(abi)
+            expect(r5.0 == .built && r5.2 == "content of app-arm64.apk\n", "without a universal APK the arm64-v8a one is taken (\(reasonOf(r5.0)))")
+            // No metadata (an old plugin): only a file this run wrote counts; a leftover does not.
+            let legacy = project("legacy", buildFile: "plugins { id 'com.android.application' }\n", file: "app/build.gradle", gradlew: "exit 0")
+            let old = legacy.appendingPathComponent("app/build/outputs/apk/debug/app-debug.apk")
+            try? fm.createDirectory(at: old.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? "stale".write(to: old, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -86400)], ofItemAtPath: old.path)
+            let r6 = await localRun(legacy)
+            expect(reasonOf(r6.0).contains("written by this build"), "a stale APK left in the outputs is not taken (\(reasonOf(r6.0)))")
+            let legacy2 = project("legacy2", buildFile: "plugins { id 'com.android.application' }\n", file: "app/build.gradle", gradlew: "mkdir -p app/build/outputs/apk/debug; echo fresh > app/build/outputs/apk/debug/app-debug.apk")
+            let r7 = await localRun(legacy2)
+            expect(r7.0 == .built && r7.2 == "fresh\n", "without metadata the APK this run wrote is taken (\(reasonOf(r7.0)))")
 
             // 5. Cancel ends the whole process group: the recipe, its child, and what the child started.
             q.onLine = nil
@@ -270,6 +364,27 @@ enum BuildsCheck {
             var bothBuilt = false
             if case .built? = jA?.state, case .built? = jB?.state { bothBuilt = true }
             expect(bothBuilt, "both became builds")
+
+            // 7. A deadline ends a recipe that closed its output and kept running; quitting the app ends a running one.
+            let hang = recipe("hang", "(sleep 300) & echo $! > \"$CHECK_CHILD\"; exec >&- 2>&-; sleep 300")
+            let hangRun = RecipeRun(recipe: hang, job: RecipeJob(worktree: worktree("b"), repo: repo, ref: "", sha: "", dirty: false, module: "", variant: "debug", out: base.appendingPathComponent("hang-out/app.apk")))
+            hangRun.timeout = 2
+            let hangStart = Date()
+            let hangOutcome: RecipeOutcome = await withCheckedContinuation { c in hangRun.start { c.resume(returning: $0) } }
+            let hangKid = pid_t((try? String(contentsOf: childPid, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+            _ = await wait("the hung recipe's child", 10) { !alive(hangKid) }
+            expect(reasonOf(hangOutcome).contains("longer than") && Date().timeIntervalSince(hangStart) < 15 && !alive(hangKid) && !alive(hangRun.pid),
+                   "a recipe that closes stdout and keeps running is stopped at the deadline with a reason, group and all (\(reasonOf(hangOutcome)))")
+            try? fm.removeItem(at: childPid)
+            let jobQ = q.start(a1, workspace: ws, recipeName: "sleep", store: store)
+            _ = await wait("the sleeper to start", 20) { (try? String(contentsOf: childPid, encoding: .utf8))?.isEmpty == false && jobQ?.lines.contains("started") == true }
+            let quitKid = pid_t((try? String(contentsOf: childPid, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+            let quitLead = jobQ?.run?.pid ?? 0
+            q.terminateAll()   // what applicationWillTerminate calls
+            var quitGone = !alive(quitKid)
+            if !quitGone { quitGone = await wait("the group to die", 5) { !alive(quitKid) && !alive(quitLead) } }
+            expect(quitKid > 0 && quitGone, "quitting the app kills a running recipe's group synchronously")
+            _ = await wait("the quit build to settle", 15) { jobQ?.isActive == false }
 
             for f in slotFolders(a0.slot) { try? fm.removeItem(at: f) }
             LoginEnvironment.override = nil
