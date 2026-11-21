@@ -418,6 +418,11 @@ extension Workbench {
             if files.isEmpty { self.toast.show(reason, problem: true) }
             else { self.toast.show(reason, action: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(files) } }
         }
+        // An agent's take is not the person's recording: the person's wins. The take is finished and kept, then theirs starts.
+        if AgentRecording.isAgentTake(sim), let agent = AgentRecording.current {
+            agent.end(sim) { [weak self] in self?.toggleScreenRecording(sender) }
+            return
+        }
         if rec.recorder(for: sim) != nil {
             rec.stop(sim) { [weak self] files in
                 guard let self else { return }

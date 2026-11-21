@@ -14,8 +14,10 @@ your own `claude` program found on your login shell's PATH. It says when Greenro
 claude mcp add --scope user greenroom -- "/Applications/Greenroom.app/Contents/MacOS/Greenroom" --mcp
 ```
 
-(The `claude mcp` flags are written from memory and were checked against a stand-in `claude`, never the real one:
-they are in one place, `ClaudeConnect.swift`.)
+If `claude` already has a `greenroom` entry that runs another copy of the app, Settings says so and offers
+Reconnect (remove, then add). The `claude mcp` flags were checked against the CLI's `--help` and exercised only
+against a stand-in `claude`, never run for real; they are in one place, `ClaudeConnect.swift`. Each call is stopped
+at a deadline, and none runs on the app's main thread.
 
 Any other MCP client: run that program with `--mcp` as a stdio server. The toolbar's Agent button (✦) has the
 command for this copy of the app, a log of what agents did, and a switch that pauses them.
@@ -118,7 +120,7 @@ From a worktree of a repository added to Greenroom, with the agent started in th
   not been compared, and answers from the stored one otherwise. It never starts a build of the base: a base nothing
   built (a branch, a commit or a pull request with no stored build, no CI build and no worktree with a fresh APK)
   is answered as text saying what would build it, and nothing runs. The base is the repository's base branch unless
-  `base` says `session:BRANCH`, `pr:NUMBER`, a branch, tag or commit, or the path of an `.apk`. It is also an action,
+  `base` says `session:BRANCH`, `pr:NUMBER`, a branch, tag or commit, or the full path of an `.apk` (anything else with a path is refused). It is also an action,
   refused while paused. `session` only reads, and works while paused.
 - All three work only for a connection tied to a session; from any other folder they answer `this folder is not a
   worktree of a repository added to Greenroom`.
@@ -126,12 +128,27 @@ From a worktree of a repository added to Greenroom, with the agent started in th
 ## The agent's session is recorded
 
 While an agent drives a session's simulator, Greenroom records its screen: the first action starts
-`evidence/<build key>/video/agent-<time>.mp4` in the state folder, with a chapter per tool call, and
-`steps.jsonl` beside it (one line per call: time, seconds into the video, tool, summary, whether it failed). It
-stops after 60 s without an agent action, when the simulator ends or when the app quits. It does not start while
-you are recording that simulator yourself. The Agent popover says when it is recording, links the file, and has a
-switch for each repository (on by default). Files are kept on this Mac under the build's evidence until the build
-is pruned; nothing leaves it.
+`evidence/<build key>/video/agent-<time>.mp4` in the state folder, with a chapter per tool call and `steps.jsonl`
+beside it (one line per call: time, seconds into the video, tool, a short description, whether it failed).
+
+What is written about a call is its shape, never its content: `type` is "typed 14 characters", `open_url` is the
+link without its query or fragment, `set` is the setting's name without the value, a tapped or awaited text is "text
+of N characters", `check` is how many texts it looked for. Typed text, query strings and values are not in
+`steps.jsonl` or the chapter names. The video itself is the screen as it was, so what was on screen is in it.
+
+- It stops after 60 s without an agent action (a call still waiting, such as `wait_for`, counts as activity), when
+  the simulator ends, when the repository's switch in the Agent popover goes off (at once), or when the app quits.
+- A paused agent is not recorded: reading tools still answer while paused, but they neither start a recording nor
+  add to one.
+- It never starts while you are recording that simulator yourself. If you choose File > Record Screen while an agent
+  recording runs, the agent's file is finished and kept and yours starts.
+- A walk that `changes` or a new build starts uses its own hidden simulators; a live agent recording goes on, and an
+  agent recording never holds a walk back (only your own recording does).
+- The Agent popover says when it is recording and links the file. Files stay on this Mac under the build's evidence
+  until the build is pruned; nothing leaves it. The switch is per repository, on by default.
+
+`build` and `changes` run beside the other tools, so `session`, `screen` and the rest answer while one waits. A call
+waits at most 4 minutes, then says it is still going; calling again joins the same build or walk.
 
 ## What an agent cannot do
 

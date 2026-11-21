@@ -115,7 +115,8 @@ extension AgentTools {
         if name == "remote", ws.refusal(forRecipe: "remote") != nil {
             throw Failure(message: "The remote recipe uploads this repository's source code to the person's own boat.dev account, and they have not allowed it. Ask them to allow it in Greenroom (the row's Build with > remote); an agent cannot give that yes. Meanwhile use the local recipe.")
         }
-        let timeout = clamp(args["timeout_s"], 10, 7200, 1500)
+        // One call waits at most 4 minutes (the shim gives up at 5); the build goes on and a second call joins it.
+        let timeout = min(clamp(args["timeout_s"], 10, 7200, 1500), 240)
         var why = ""
         // Never start a CI workflow from an agent's call: only the person's own Build button may.
         let job: BuildJob? = mainSync {
@@ -147,7 +148,7 @@ extension AgentTools {
                 throw Failure(message: "the build was cancelled in Greenroom")
             }
             if Date() > end {
-                throw Failure(message: "still building after \(Int(timeout)) s: the \(j.recipeName) build goes on in Greenroom. Call build again to wait for it.")
+                throw Failure(message: "still building after \(Int(timeout)) s: the \(j.recipeName) build goes on in Greenroom. Call build again to join it.")
             }
             Thread.sleep(forTimeInterval: 0.5)
         }
@@ -178,7 +179,15 @@ extension AgentTools {
             return .pullRequest(n.number)
         }
         if a.hasPrefix("/") || a.hasPrefix("~") || a.lowercased().hasSuffix(".apk") {
-            return .apk(URL(fileURLWithPath: (a as NSString).expandingTildeInPath))
+            // As launch does: an .apk, readable, that is a file. Anything else is not an APK to compare with.
+            guard a.hasPrefix("/") || a.hasPrefix("~") else { throw Failure(message: "base: give the .apk's full path (starting with / or ~)") }
+            let url = URL(fileURLWithPath: (a as NSString).expandingTildeInPath)
+            var isDir: ObjCBool = false
+            guard url.pathExtension.lowercased() == "apk", FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue,
+                  FileManager.default.isReadableFile(atPath: url.path) else {
+                throw Failure(message: "base: \(a) is not a readable .apk file")
+            }
+            return .apk(url)
         }
         return .ref(a)
     }
@@ -187,7 +196,7 @@ extension AgentTools {
         let (s, ws) = try tied(connection)
         guard let wb = workbench else { throw Failure(message: Self.noSession) }
         guard let head = headBuild(s) else { throw Failure(message: "no build yet for \(label(s)): call build") }
-        let timeout = clamp(args["timeout_s"], 10, 7200, 600)
+        let timeout = min(clamp(args["timeout_s"], 10, 7200, 600), 240)
         let (sessions, store) = mainSync { (wb.sessions.sessions, wb.sessions.store) }
         let ref = try baseRef(args["base"] as? String, s, sessions)
         let wt = s.worktree
@@ -205,14 +214,13 @@ extension AgentTools {
             token = wb.sessions.evidence.changes(head: head, base: base) { r in result = r; done.signal() }
         }
         if done.wait(timeout: .now() + timeout) == .timedOut {
-            mainSync { token?.cancel() }
-            throw Failure(message: "the comparison did not finish within \(Int(timeout)) s and was stopped (a walk takes a minute or two for a large app). Call changes again with a longer timeout_s.")
+            throw Failure(message: "still comparing after \(Int(timeout)) s: the walk goes on in Greenroom while another call waits for it. Call changes again with the same base to join it.")
         }
         guard let result else { throw Failure(message: "the comparison ended with no answer") }
         switch result {
         case .failure(let f): throw Failure(message: "the comparison failed: \(f.message)")
         case .success(let r):
-            lastChanges[s.worktree.path] = r.folder
+            setLastChanges(r.folder, for: s.worktree.path)
             let headNote = "\(label(s)) \(String(head.key.prefix(8))) (\(head.source.rawValue), \(age(head.date)))"
             let baseNote = "\(String(base.key.prefix(8))) (\(base.source.rawValue), \(age(base.date)))" + (base.key == head.key ? ", the same build" : "")
             return AgentChanges.describe(folder: r.folder, header: "changes: \(headNote) against \(baseNote)")
@@ -223,7 +231,7 @@ extension AgentTools {
 
     func changePicture(_ args: [String: Any], _ connection: Connection) throws -> [[String: Any]] {
         let (s, _) = try tied(connection)
-        guard let folder = lastChanges[s.worktree.path] else { throw Failure(message: "no comparison yet for \(label(s)): call changes first, then pass one of its screen ids") }
+        guard let folder = lastChanges(for: s.worktree.path) else { throw Failure(message: "no comparison yet for \(label(s)): call changes first, then pass one of its screen ids") }
         guard let screen = args["screen"] as? String, !screen.isEmpty else { throw Failure(message: "screen is a screen id from changes") }
         let side = (args["side"] as? String) ?? "head"
         guard ["head", "base", "diff"].contains(side) else { throw Failure(message: "side is head, base or diff") }
@@ -248,6 +256,9 @@ extension AgentTools {
                 ["type": "text", "text": "\(screen) \(side) \(w)x\(h) (capture \(cg.width)x\(cg.height))"]]
     }
 
+    func setLastChanges(_ f: URL, for worktree: String) { changesLock.lock(); lastChanges[worktree] = f; changesLock.unlock() }
+    func lastChanges(for worktree: String) -> URL? { changesLock.lock(); defer { changesLock.unlock() }; return lastChanges[worktree] }
+
     // MARK: Recording
 
     /// Starts the recording of this simulator if it belongs to a session whose workspace records the agent.
@@ -264,9 +275,11 @@ extension AgentTools {
         mainSync { recording.begin(sim, session: session, key: key, workbench: wb, enabled: true) }
     }
 
-    func noteRecording(_ tool: String, _ summary: String, failed: Bool) {
-        guard let sim = currentSim else { return }
-        mainSync { recording.note(sim, tool: tool, summary: summary, failed: failed) }
+    func noteRecording(_ tool: String, _ args: [String: Any], failed: Bool) {
+        guard let wb = workbench, let sim = currentSim else { return }
+        let session = sessionOf(sim)
+        let enabled = session.map { s in mainSync { wb.sessions.recordsAgent(s) } } ?? false
+        mainSync { recording.note(sim, shape: AgentRecording.shape(tool: tool, args: args), tool: tool, failed: failed, enabled: enabled) }
     }
 }
 
@@ -353,9 +366,15 @@ enum AgentChanges {
         guard let p else { return nil }
         let id = p["id"] as? String, base = p["base"] as? String
         let combos = (doc["combos"] as? [String]) ?? []
+        // A path in crawl.json is data: only a file that really lies inside the comparison's folder is served.
+        let root = folder.resolvingSymlinksInPath().path + "/"
+        func inside(_ rel: String) -> URL? {
+            let u = folder.appendingPathComponent(rel).resolvingSymlinksInPath()
+            return u.path.hasPrefix(root) && FileManager.default.fileExists(atPath: u.path) ? u : nil
+        }
         func first(_ screens: [[String: Any]], _ want: String?) -> URL? {
             guard let want, let s = screens.first(where: { ($0["id"] as? String) == want }), let caps = s["captures"] as? [String: String] else { return nil }
-            for c in combos + caps.keys.sorted() { if let rel = caps[c] { let u = folder.appendingPathComponent(rel); if FileManager.default.fileExists(atPath: u.path) { return u } } }
+            for c in combos + caps.keys.sorted() { if let rel = caps[c], let u = inside(rel) { return u } }
             return nil
         }
         switch side {
@@ -363,7 +382,7 @@ enum AgentChanges {
         case "base": return first((doc["base_screens"] as? [[String: Any]]) ?? [], base)
         default:
             guard let id, let d = (doc["diffs"] as? [String: [String: [String: Any]]])?[id] else { return nil }
-            for c in combos + d.keys.sorted() { if let rel = d[c]?["map"] as? String { let u = folder.appendingPathComponent(rel); if FileManager.default.fileExists(atPath: u.path) { return u } } }
+            for c in combos + d.keys.sorted() { if let rel = d[c]?["map"] as? String, let u = inside(rel) { return u } }
             return nil
         }
     }

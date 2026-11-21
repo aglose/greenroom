@@ -53,7 +53,10 @@ and that agent; Greenroom sends it nothing by itself.
 
 While an agent drives a session's simulator, Greenroom records that screen to a video and a list of the agent's
 calls (`agent-*.mp4` and `steps.jsonl`), kept on this Mac under that build's evidence until the build is pruned.
-Nothing is sent anywhere. It can be turned off for each repository in the Agent popover. "Connect Claude Code"
+The list holds only the shape of each call: the tool, how many characters were typed, a link without its query,
+the name of a setting without its value, the length of a text tapped or awaited; not the text itself. The video is
+the screen, so it shows what was on screen. Nothing is sent anywhere. It can be turned off for each repository in
+the Agent popover, which ends a running recording at once; a paused agent is not recorded. "Connect Claude Code"
 (Settings) runs `claude mcp add` with your own `claude` program, which changes Claude Code's own list of servers on
 this Mac and nothing else.
 

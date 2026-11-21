@@ -17,6 +17,8 @@ final class AgentServer {
     private let queue = DispatchQueue(label: "greenroom-agent-connections")
     /// Tool calls run one at a time, off the main thread (they wait for answers delivered there).
     private let work = DispatchQueue(label: "greenroom-agent-tools")
+    /// build and changes wait for minutes: they must not hold up the other tools' answers.
+    private let slow = DispatchQueue(label: "greenroom-agent-slow-tools", attributes: .concurrent)
     private(set) var port: UInt16 = 0
     /// Called on the main thread when an agent first talks to the server.
     var onClient: ((String) -> Void)?
@@ -110,7 +112,9 @@ final class AgentServer {
         }
         // Hints from a local program that already holds the token: they select a row and grant nothing.
         let hint = AgentServer.hint(headers)
-        work.async { [weak self] in
+        let isSlow = message["method"] as? String == "tools/call"
+            && AgentTools.slow.contains(((message["params"] as? [String: Any])?["name"] as? String) ?? "")
+        (isSlow ? slow : work).async { [weak self] in
             guard let self else { return }
             let who = message["method"] as? String == "tools/call" ? self.connect(hint) : self.note(hint)
             if let answer = self.dispatch(message, connection: who) { self.respond(connection, 200, json: answer) }

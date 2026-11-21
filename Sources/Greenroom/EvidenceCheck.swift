@@ -143,7 +143,7 @@ enum EvidenceCheck {
             func crawlers() -> Int {
                 guard let list = run("/bin/ps", ["-axo", "pid=,ppid=,command="]) else { return 0 }
                 var mine: [(pid: Int, ppid: Int)] = []
-                for line in list.split(separator: "\n") where line.contains("scripts/crawl.py") && line.contains("evidence-check/state") {
+                for line in list.split(separator: "\n") where line.contains("scripts/crawl.py") && line.contains(base.path + "/state") {
                     let f = line.split(separator: " ", omittingEmptySubsequences: true)
                     if f.count > 2, let pid = Int(f[0]), let ppid = Int(f[1]) { mine.append((pid, ppid)) }
                 }
@@ -285,7 +285,7 @@ enum EvidenceCheck {
                     token.cancel()
                     _ = await wait("the cancelled comparison", 30) { result != nil }
                     if case .failure? = result { expect(true, "a cancelled comparison is told so") } else { expect(false, "a cancelled comparison is told so") }
-                    let gone = await wait("the cancelled run to end", 30) { ev.entry(of: "changes:\(key4)-\(keyB)") == nil && (run("/usr/bin/pgrep", ["-f", "scripts/crawl.py .*evidence-check/state"]) ?? "").isEmpty }
+                    let gone = await wait("the cancelled run to end", 30) { ev.entry(of: "changes:\(key4)-\(keyB)") == nil && (run("/usr/bin/pgrep", ["-f", "scripts/crawl.py .*" + NSRegularExpression.escapedPattern(for: base.path + "/state")]) ?? "").isEmpty }
                     expect(gone && !fm.fileExists(atPath: store.root.appendingPathComponent("changes/\(key4)-\(keyB)/crawl.json").path), "no process and no result is left of it")
                 }
                 // Two callers share one run; one cancelling does not hang the other.

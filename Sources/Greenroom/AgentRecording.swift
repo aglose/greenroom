@@ -14,6 +14,8 @@ final class AgentRecording {
         let session: String
         let started = Date()
         var last = Date()
+        /// Tool calls begun and not yet answered: a long one (wait_for) is activity.
+        var inFlight = 0
         init(sim: Simulator, file: URL, session: String) { self.sim = sim; self.file = file; self.session = session }
     }
 
@@ -23,11 +25,16 @@ final class AgentRecording {
     var onChange: (() -> Void)?
 
     private var takes: [ObjectIdentifier: Take] = [:]
+    /// The one instance (the agent interface's), for the places that must tell an agent's take from the person's.
+    private(set) static weak var current: AgentRecording?
+    /// Whether the recording of `sim` now running is an agent's take (main thread).
+    static func isAgentTake(_ sim: Simulator) -> Bool { current?.takes[ObjectIdentifier(sim)] != nil }
     private var timer: Timer?
     /// The newest recording of each session (by worktree path), kept after it ends.
     private(set) var newest: [String: URL] = [:]
 
     init() {
+        Self.current = self
         if Engine.agentCheck, let s = ProcessInfo.processInfo.environment["GREENROOM_CHECK_AGENT_IDLE"], let d = Double(s), d > 0 { idleSeconds = d }
     }
 
@@ -45,29 +52,34 @@ final class AgentRecording {
     func begin(_ sim: Simulator, session: Session, key: String?, workbench: Workbench, enabled: Bool) {
         let id = ObjectIdentifier(sim)
         if let t = takes[id] {
-            if ScreenRecording.shared.recorder(for: sim) != nil { t.last = Date(); return }
+            if ScreenRecording.shared.recorder(for: sim) != nil { t.last = Date(); t.inFlight += 1; return }
             takes[id] = nil   // it ended by itself (the simulator quit): a new action starts another
         }
         guard enabled, sim.isAlive, ScreenRecording.shared.recorder(for: sim) == nil else { return }
         let file = newFile(for: sim, key: key, workbench: workbench)
         guard ScreenRecording.shared.start(sim, to: file) != nil else { return }
-        takes[id] = Take(sim: sim, file: file, session: session.worktree.path)
+        let take = Take(sim: sim, file: file, session: session.worktree.path)
+        take.inFlight = 1
+        takes[id] = take
         newest[session.worktree.path] = file
         startTimer()
         onChange?()
     }
 
-    /// After (or while) an agent's tool ran on `sim`: a chapter and a line of `steps.jsonl`.
-    func note(_ sim: Simulator, tool: String, summary: String, failed: Bool) {
-        guard let t = takes[ObjectIdentifier(sim)], let recorder = ScreenRecording.shared.recorder(for: sim) else { return }
+    /// After an agent's tool ran on `sim`: a chapter and a line of `steps.jsonl`. `shape` is what is stored: the tool
+    /// and a redacted description of the call (see `shape`), never what was typed, a link's query, a setting's value
+    /// or the text of a tap or wait. With the workspace's switch off the take ends instead.
+    func note(_ sim: Simulator, shape: String, tool: String, failed: Bool, enabled: Bool) {
+        guard let t = takes[ObjectIdentifier(sim)] else { return }
+        t.inFlight = max(0, t.inFlight - 1)
         t.last = Date()
-        let one = summary.split(separator: "\n").first.map(String.init) ?? ""
-        let short = one.count > 90 ? String(one.prefix(90)) + "…" : one
-        recorder.mark("\(tool): \(short)")
+        guard enabled else { end(sim) { [weak self] in self?.onChange?() }; return }
+        guard let recorder = ScreenRecording.shared.recorder(for: sim) else { return }
+        recorder.mark(shape)
         let stamp = ISO8601DateFormatter()
         stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let line: [String: Any] = ["time": stamp.string(from: Date()), "t": (Date().timeIntervalSince(t.started) * 1000).rounded() / 1000,
-                                   "video": t.file.lastPathComponent, "tool": tool, "summary": short, "failed": failed]
+                                   "video": t.file.lastPathComponent, "tool": tool, "summary": shape, "failed": failed]
         guard let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]) else { return }
         let steps = t.file.deletingLastPathComponent().appendingPathComponent("steps.jsonl")
         if !FileManager.default.fileExists(atPath: steps.path) { FileManager.default.createFile(atPath: steps.path, contents: nil, attributes: [.posixPermissions: 0o600]) }
@@ -76,6 +88,42 @@ final class AgentRecording {
             try? h.write(contentsOf: data + Data("\n".utf8))
             try? h.close()
         }
+    }
+
+    /// What a call is recorded as. Only the shape of the arguments: how many characters were typed, a link without its
+    /// query or fragment, which setting changed (not to what), how long a tapped or awaited text is.
+    static func shape(tool: String, args: [String: Any]) -> String {
+        func chars(_ k: String) -> String? { (args[k] as? String).map { "text of \($0.count) characters" } }
+        switch tool {
+        case "type":
+            let n = (args["text"] as? String)?.count ?? 0
+            return "type: typed \(n) characters"
+        case "open_url":
+            guard let raw = args["url"] as? String, let c = URLComponents(string: raw), let scheme = c.scheme else { return "open_url" }
+            return "open_url: \(scheme)://\(c.host ?? "")\(c.path)"
+        case "set": return "set: \((args["setting"] as? String) ?? "")"
+        case "tap":
+            if let t = chars("text") { return "tap: \(t)" }
+            if args["ref"] != nil { return "tap: a node" }
+            return "tap: at a point"
+        case "wait_for": return "wait_for: \(chars("text") ?? "a text")"
+        case "check": return "check: \((args["visible"] as? [String])?.count ?? 0) visible, \((args["absent"] as? [String])?.count ?? 0) absent"
+        case "swipe": return "swipe: \((args["direction"] as? String) ?? "by points")"
+        default: return tool
+        }
+    }
+
+    /// Ends the take of `sim` now, keeping its file (the person's own recording is starting, the workspace switch
+    /// went off, ...). `done` runs on the main thread when the file is finished.
+    func end(_ sim: Simulator, done: @escaping () -> Void = {}) {
+        takes[ObjectIdentifier(sim)] = nil
+        if takes.isEmpty { timer?.invalidate(); timer = nil }
+        ScreenRecording.shared.stop(sim) { _ in done() }
+    }
+
+    /// Ends every take of a session (its workspace's switch went off).
+    func endTakes(forSession worktree: String) {
+        for t in takes.values where t.session == worktree { end(t.sim) { [weak self] in self?.onChange?() } }
     }
 
     // MARK: Ending
@@ -89,7 +137,7 @@ final class AgentRecording {
         var changed = false
         for (id, t) in takes {
             if ScreenRecording.shared.recorder(for: t.sim) == nil { takes[id] = nil; changed = true; continue }   // the simulator ended
-            if Date().timeIntervalSince(t.last) >= idleSeconds {
+            if t.inFlight == 0, Date().timeIntervalSince(t.last) >= idleSeconds {
                 takes[id] = nil
                 changed = true
                 ScreenRecording.shared.stop(t.sim) { [weak self] _ in self?.onChange?() }

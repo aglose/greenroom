@@ -8,7 +8,13 @@ import Foundation
 /// says so. The real `claude` is never run: the lookup path is the stand-in's folder alone, and the login shell is
 /// not asked. One `[greenroom] connect: ok|FAIL ...` line per step, then `connect check: PASS|FAIL`; exits 0 or 1.
 enum ConnectCheck {
+    /// ClaudeConnect never runs on the main thread (it asserts so), so the check runs on a thread of its own.
     static func run(dir: URL) -> Never {
+        Thread.detachNewThread { body(dir: dir) }
+        dispatchMain()
+    }
+
+    private static func body(dir: URL) -> Never {
         var failures = 0
         func say(_ s: String) { fputs("[greenroom] connect: \(s)\n", stdout); fflush(stdout) }
         func expect(_ ok: Bool, _ what: String, _ got: String = "") {
@@ -25,16 +31,17 @@ enum ConnectCheck {
         #!/bin/sh
         D="$(cd "$(dirname "$0")/.." && pwd)"
         echo "$*" >> "$D/calls.log"
-        listed() { if [ -f "$D/registered" ]; then echo "$(cat "$D/registered"): /some/path --mcp - connected"; fi; echo "other: /x - connected"; }
+        listed() { if [ -f "$D/registered" ]; then echo "$(cat "$D/registered"): $(cat "$D/registered-exe") --mcp - connected"; fi; echo "other: /x - connected"; }
+        if [ -f "$D/hang" ]; then sleep 30; exit 0; fi
         case "$1 $2" in
           "mcp get")
             if [ -f "$D/get-unsupported" ]; then echo "error: unknown command 'get'" >&2; exit 2; fi
-            if [ "$(cat "$D/registered" 2>/dev/null)" = "greenroom" ]; then echo "greenroom:"; echo "  Scope: User config"; exit 0; fi
+            if [ "$(cat "$D/registered" 2>/dev/null)" = "greenroom" ]; then echo "greenroom:"; echo "  Scope: User config"; echo "  Command: $(cat "$D/registered-exe")"; exit 0; fi
             echo "No MCP server found with name: greenroom" >&2; exit 1 ;;
           "mcp list") echo "Checking MCP server health..."; listed; exit 0 ;;
           "mcp add")
             if [ -f "$D/fail-add" ]; then echo "error: could not write the configuration: permission denied" >&2; exit 1; fi
-            echo greenroom > "$D/registered"; echo "Added stdio MCP server greenroom to user config"; exit 0 ;;
+            echo greenroom > "$D/registered"; echo "$7" > "$D/registered-exe"; echo "Added stdio MCP server greenroom to user config"; exit 0 ;;
           "mcp remove")
             if [ -f "$D/registered" ]; then rm -f "$D/registered"; echo "Removed MCP server greenroom"; exit 0; fi
             echo "No MCP server found with name: greenroom" >&2; exit 1 ;;
@@ -50,9 +57,10 @@ enum ConnectCheck {
             let f = base.appendingPathComponent(name)
             if on { fm.createFile(atPath: f.path, contents: Data()) } else { try? fm.removeItem(at: f) }
         }
-        func registered(as name: String?) {
+        func registered(as name: String?, exe: String = ClaudeConnect.executable) {
             let f = base.appendingPathComponent("registered")
-            if let name { try? name.write(to: f, atomically: true, encoding: .utf8) } else { try? fm.removeItem(at: f) }
+            if let name { try? name.write(to: f, atomically: true, encoding: .utf8); try? exe.write(to: base.appendingPathComponent("registered-exe"), atomically: true, encoding: .utf8) }
+            else { try? fm.removeItem(at: f) }
         }
 
         LoginEnvironment.override = [:]   // the login shell is not asked
@@ -88,6 +96,29 @@ enum ConnectCheck {
         registered(as: "greenroom")
         flag("get-unsupported", false)
 
+        // An entry that runs another copy is not this one: Reconnect removes it and adds this.
+        registered(as: "greenroom", exe: "/Applications/Other.app/Contents/MacOS/Greenroom")
+        let other = ClaudeConnect.status()
+        expect(other == .otherCopy("/Applications/Other.app/Contents/MacOS/Greenroom"), "a greenroom entry running another program is connected to another copy", "\(other)")
+        try? fm.removeItem(at: log)
+        expect(ClaudeConnect.connect() == .otherCopy("/Applications/Other.app/Contents/MacOS/Greenroom"), "connect does not overwrite it by itself")
+        expect(!calls().contains { $0.hasPrefix("mcp add") || $0.hasPrefix("mcp remove") }, "... and runs no add or remove", calls().joined(separator: " | "))
+        flag("get-unsupported", true)
+        expect(ClaudeConnect.status() == .otherCopy("/Applications/Other.app/Contents/MacOS/Greenroom"), "the same through mcp list when get is unusable")
+        flag("get-unsupported", false)
+        try? fm.removeItem(at: log)
+        let re = ClaudeConnect.reconnect()
+        if case .connected = re {} else { expect(false, "reconnect connects", "\(re)") }
+        let seq = calls().filter { $0.hasPrefix("mcp remove") || $0.hasPrefix("mcp add") }
+        expect(seq == ["mcp remove --scope user greenroom", "mcp add --scope user greenroom -- \(exe) --mcp"], "reconnect runs remove, then add", seq.joined(separator: " | "))
+        expect(ClaudeConnect.status() == .connected, "and the entry then runs this copy")
+        // `get` saying there is no such server is final: no mcp list after it.
+        registered(as: nil)
+        try? fm.removeItem(at: log)
+        expect(ClaudeConnect.status() == .notConnected, "no such server")
+        expect(!calls().contains { $0.hasPrefix("mcp list") }, "... without asking mcp list", calls().joined(separator: " | "))
+        registered(as: "greenroom")
+
         // Disconnect.
         try? fm.removeItem(at: log)
         let off = ClaudeConnect.disconnect()
@@ -102,6 +133,18 @@ enum ConnectCheck {
         if case .failed(let why) = bad { expect(why.contains("permission denied") && why.contains("exit 1"), "a failing add reports claude's own words and its exit status", why) }
         else { expect(false, "a failing add is a failure", "\(bad)") }
         flag("fail-add", false)
+
+        // A claude that hangs: every call answers at the deadline, the process ended.
+        flag("hang", true)
+        ClaudeConnect.timeout = 2
+        let t0 = Date()
+        let hung = ClaudeConnect.connect()
+        let took = Date().timeIntervalSince(t0)
+        if case .failed(let why) = hung { expect(why.contains("timed out") && took < 15, "a hanging claude is stopped at its deadline and said so (\(String(format: "%.1f", took)) s)", why) }
+        else { expect(took < 15 && hung != .alreadyConnected, "a hanging claude is stopped at its deadline", "\(hung) after \(took) s") }
+        expect(ClaudeConnect.disconnect().message.contains("timed out"), "disconnect says it timed out too")
+        flag("hang", false)
+        ClaudeConnect.timeout = 20
 
         // No claude.
         ClaudeConnect.pathOverride = empty.path + ":/usr/bin:/bin"

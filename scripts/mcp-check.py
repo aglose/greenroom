@@ -6,7 +6,7 @@ of its own), and the session tools: session, build (a stand-in recipe), changes 
 a base that differs through crawl.py's --base-option), screenshot's screen, and the recording of the agent's session;
 without it, the interface itself against the person's own state folder.
 Starts Greenroom (its executable, in the background) if it is not running, and quits the copy it started."""
-import glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time, urllib.request, zipfile
+import glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.request, zipfile
 
 exe, apk = sys.argv[1], sys.argv[2]
 
@@ -54,6 +54,7 @@ def sessions_mode():
     open(recipe, "w").write(f"""#!/bin/sh
 env | grep '^GREENROOM_' | sort > "{root}/recipe-env.txt"
 if [ -f "{root}/recipe-fail" ]; then echo "> Task :app:compileDebugKotlin FAILED"; echo "e: Foo.kt: error: unresolved reference: boom"; exit 1; fi
+if [ -f "{root}/recipe-sleep" ]; then sleep 8; fi
 cp "{built_apk}" "$GREENROOM_OUT"
 """)
     os.chmod(recipe, 0o755)
@@ -261,6 +262,24 @@ def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, 
         expect("... and steps.jsonl beside it lists the calls", [r["tool"] for r in mine][:4] == ["screen", "check", "tap", "tap"] and all("time" in r and "summary" in r for r in mine), json.dumps(mine)[:400])
         expect("... and a chapters file with a chapter per call", os.path.exists(files[0][:-4] + ".chapters.json") and len(json.load(open(files[0][:-4] + ".chapters.json"))) >= 4,
                str(glob.glob(os.path.dirname(files[0]) + "/*")))
+    # What is stored of the calls: never typed text, a link's query, a setting's value or the text of a tap or wait.
+    wait(lambda: not glob.glob(state_dir + "/evidence/*/video/*.part"), 30)
+    secret, query = "hunter2-SECRET-text", "SECRETQUERY"
+    a.call("tap", sim=sid, text="Trips")
+    a.call("type", sim=sid, text=secret, tap_text="Trip note")
+    a.call("open_url", sim=sid, url=f"apksim://composeapp/trips?token={query}#fragbit")
+    a.call("set", sim=sid, setting="appearance", value="dark")
+    a.call("set", sim=sid, setting="appearance", value="light")
+    a.call("wait_for", sim=sid, text="Italian vacation", timeout_ms=3000)
+    wait(lambda: not glob.glob(state_dir + "/evidence/*/video/*.part") and glob.glob(state_dir + "/evidence/*/video/steps.jsonl"), 30)
+    stored = ""
+    for f in glob.glob(state_dir + "/evidence/*/video/steps.jsonl") + glob.glob(state_dir + "/evidence/*/video/*.chapters.json"):
+        stored += open(f).read()
+    mp4s = "".join(open(f, "rb").read().decode("latin-1") for f in glob.glob(state_dir + "/evidence/*/video/agent-*.mp4"))
+    expect("steps.jsonl and the chapters say how much was typed, not what", f"typed {len(secret)} characters" in stored and secret not in stored and secret not in mp4s and "SECRET" not in stored, stored[-600:])
+    expect("... a link without its query or fragment", "open_url: apksim://composeapp/trips" in stored and query not in stored and "fragbit" not in stored, stored[-600:])
+    expect("... a setting without its value, a tapped or awaited text by its length",
+           '"set: appearance"' in stored and "dark" not in stored and "wait_for: text of 16 characters" in stored and "Italian vacation" not in stored and "Trip note" not in stored, stored[-600:])
     # The per-repository switch, off for the second repository.
     c = Shim(repo2)
     t, err = c.call("launch")
@@ -275,7 +294,17 @@ def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, 
     # build, with a stand-in recipe as the workspace's local one.
     sidb, _ = sim_of(b, "feat-b")
     key = key_of(built_apk)
-    t, err = b.call("build", timeout_s=240)
+    open(root + "/recipe-sleep", "w").write("x")
+    answer = []
+    th = threading.Thread(target=lambda: answer.append(b.call("build", timeout_s=240)))
+    th.start()
+    time.sleep(2.5)
+    t0 = time.time()
+    t, err = a.call("session")
+    expect("another agent call answers while a build runs", th.is_alive() and not err and "feat-a" in t and time.time() - t0 < 5, f"{time.time() - t0:.1f} s, build alive {th.is_alive()}")
+    th.join(120)
+    os.remove(root + "/recipe-sleep")
+    t, err = answer[0] if answer else ("no answer", True)
     expect("build runs the recipe and answers the new build's key", not err and t.startswith(f"built {key} with the local recipe"), t)
     env_seen = open(root + "/recipe-env.txt").read() if os.path.exists(root + "/recipe-env.txt") else ""
     expect("... told never to dispatch a CI workflow", "GREENROOM_CI_DISPATCH=0" in env_seen and "GREENROOM_REF=feat-b" in env_seen, env_seen)
@@ -311,6 +340,9 @@ def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, 
     t, err = a.call("changes", base="ghost")
     expect("a base nothing built is answered as text saying what would build it, and starts nothing",
            not err and "no build of" in t.lower() and "Nothing was started" in t and not glob.glob(state_dir + "/changes/*"), t)
+    for bad in ("/etc/hosts", "/no/such/dir/x.apk", "relative.apk"):
+        t, err = a.call("changes", base=bad)
+        expect(f"a base path that is not a readable .apk file is refused ({bad})", err and (".apk" in t), t)
     t, err = a.call("changes", base="no-such-branch")
     expect("a base that does not exist is an error", err and "No branch or commit called" in t, t)
     # Against the same build: a walk of both, no differences.

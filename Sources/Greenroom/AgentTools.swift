@@ -15,6 +15,7 @@ final class AgentTools {
     var currentSim: Simulator?
     /// The folder of the newest `changes` answer of each session (by worktree path), for `screenshot`'s `screen`.
     var lastChanges: [String: URL] = [:]
+    let changesLock = NSLock()
     /// One line per call, for the person watching (main thread).
     var onActivity: ((_ tool: String, _ summary: String, _ failed: Bool, _ session: Session?) -> Void)?
 
@@ -63,6 +64,9 @@ final class AgentTools {
 
     /// The tools that act on a simulator and so are recorded (launch is noted when it has made one).
     static let driving: Set<String> = ["tap", "type", "key", "swipe", "back", "open_url", "set", "screen", "check", "wait_for", "screenshot", "logs"]
+
+    /// Tools that wait for builds and walks: they run on their own queue so the others still answer meanwhile.
+    static let slow: Set<String> = ["build", "changes"]
 
     static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session"]
 
@@ -136,9 +140,13 @@ final class AgentTools {
         if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readOnly.contains(name) {
             throw Failure(message: "The person at the Mac has paused the agent in Greenroom. Ask them to resume it.")
         }
-        currentSim = nil
+        // build and changes wait for minutes and run beside the other tools (AgentServer): they touch no simulator and no recording.
+        let slow = AgentTools.slow.contains(name)
+        // A paused agent is not recorded, reading included: recording follows what the agent does, and it is not allowed to act.
+        let recorded = !slow && !(paused || AgentCheckHooks.pausedByCheck)
+        if !slow { currentSim = nil }
         // An agent driving a session's simulator is recorded (AgentRecording): the first action starts it.
-        if AgentTools.driving.contains(name), !(name == "screenshot" && args["screen"] != nil), let s = try? sim(args) {
+        if recorded, AgentTools.driving.contains(name), !(name == "screenshot" && args["screen"] != nil), let s = try? sim(args) {
             currentSim = s
             beginRecording(s)
         }
@@ -167,12 +175,12 @@ final class AgentTools {
             default: throw Failure(message: "unknown tool \(name)")
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
-            if name == "launch", let s = currentSim { beginRecording(s) }
-            noteRecording(name, first, failed: false)
+            if recorded, name == "launch", let s = currentSim { beginRecording(s) }
+            if recorded { noteRecording(name, args, failed: false) }
             report(name, first, failed: false, connection)
             return content
         } catch let f as Failure {
-            noteRecording(name, f.message, failed: true)
+            if recorded { noteRecording(name, args, failed: true) }
             report(name, f.message, failed: true, connection)
             throw f
         }

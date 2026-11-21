@@ -162,6 +162,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
     @objc private func toggleRecording() {
         guard let c = selected(), let session = tools.workbench?.sessions.sessions.first(where: { $0.worktree.path == c.path }) else { return }
         tools.workbench?.sessions.setRecordsAgent(recordSwitch.state == .on, for: session)
+        if recordSwitch.state != .on { tools.recording.endTakes(forSession: session.worktree.path) }   // a live recording ends at once
         refresh()
     }
 
