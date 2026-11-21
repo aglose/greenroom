@@ -25,7 +25,7 @@ struct Workspace: Codable, Equatable {
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { XX a606ba2 (Evidence: walks are fresh unless the workspace opts in to its signed-in data, run at background priority and wait for builds and for the person; per-caller cancel, forgotten worktrees, newest build wins, shared maps, unfinished walks, pruning by owner, a check on a state folder of its own)
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)

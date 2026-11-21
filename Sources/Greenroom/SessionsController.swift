@@ -419,6 +419,7 @@ final class SessionsController {
     /// simulator (it starts by itself later).
     private func walkShouldWait(_ owner: String) -> Bool {
         if evidence.interacting { return true }
+        if Engine.shared.simulators.contains(where: { ScreenRecording.shared.recorder(for: $0) != nil }) { return true }   // the person is recording
         guard let s = sessions.first(where: { $0.worktree.path == owner }) else { return false }
         return buildQueue.isBuilding(workspace: s.workspace.path)
     }
