@@ -18,6 +18,9 @@ final class SessionsController {
     private var buildWatcher: BuildWatcher?
     private var watched: [String] = []
     private var generation = 0
+    /// Slots whose simulator is to start as soon as the one that held the slot has exited.
+    private var starting = Set<String>()
+    private static let noGit = "Sessions needs git: install the Command Line Tools (xcode-select --install)"
     /// The modified time of the file each session's simulator was last started from. An event for a file that is
     /// no newer (the system touching a file it has just read or cloned) is not a build.
     private var launched: [String: Date] = [:]
@@ -39,13 +42,14 @@ final class SessionsController {
     func install(workbench: Workbench) {
         self.workbench = workbench
         workspaces = store.loadWorkspaces()
-        // ⌃1-9 and ⌃Tab. A monitor, not menu items: the number of sessions changes, and the keys go to the simulator's
-        // view first otherwise.
+        DevHooks.shared.owns = { [weak self] sim in self?.session(forSimulator: sim) != nil }   // reloaded here, once
+        // ⌘1-9 and ⌥⌘Tab. A monitor, not menu items: the number of sessions changes. Command keys are never sent to
+        // the device (SimulatorView), so these leave the keys the app under test may use (⌃1, ⌃Tab...) alone.
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak workbench] event in
-            guard let self, let workbench, event.window === workbench.window,
-                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control else { return event }
-            if event.keyCode == 48 { return self.switchToLast() ? nil : event }   // Tab
-            if let c = event.charactersIgnoringModifiers, let n = Int(c), (1...9).contains(n) { return self.switchTo(n - 1) ? nil : event }
+            guard let self, let workbench, event.window === workbench.window else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if flags == [.command, .option], event.keyCode == 48 { return self.switchToLast() ? nil : event }   // Tab
+            if flags == .command, let c = event.charactersIgnoringModifiers, let n = Int(c), (1...9).contains(n) { return self.switchTo(n - 1) ? nil : event }
             return event
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -89,7 +93,7 @@ final class SessionsController {
     func addRepository(_ folder: URL) -> Task<URL?, Never> {
         Task { @MainActor in
             guard let root = await Git.mainCheckout(of: folder)?.resolvingSymlinksInPath() else {
-                self.workbench?.toast.show("\(folder.lastPathComponent) is not in a git repository", problem: true)
+                self.workbench?.toast.show(Git.available ? "\(folder.lastPathComponent) is not in a git repository" : Self.noGit, problem: true)
                 return nil
             }
             if self.workspaces.contains(where: { $0.root == root }) {
@@ -125,28 +129,45 @@ final class SessionsController {
         let mine = generation
         let spaces = workspaces
         let known = builds
+        let before = sessions
         Task { @MainActor in
             var all: [Session] = []
+            var live = Set<String>()
+            var complete = Git.available
             for ws in spaces {
-                for wt in await Git.worktrees(of: ws.root) {
-                    guard let state = await Git.state(of: wt.path) else { continue }
+                let list = await Git.worktrees(of: ws.root)
+                if list.isEmpty { complete = false }   // git failed, or the repository moved: do not judge by it
+                for wt in list {
+                    live.insert(wt.path.path)
                     let path = wt.path
                     let outputs = await Task.detached(priority: .utility) { SessionStore.newestAPK(in: path) }.value
-                    all.append(Session(worktree: wt.path, workspace: ws.root, branch: state.branch, head: state.head, dirty: state.dirty,
-                                       ahead: state.ahead, claude: nil, build: known[wt.path.path], simulator: nil,
-                                       outputs: outputs, sourcesDate: state.sourcesDate))
+                    if let state = await Git.state(of: wt.path) {
+                        all.append(Session(worktree: wt.path, workspace: ws.root, branch: state.branch, head: state.head, dirty: state.dirty,
+                                           ahead: state.ahead, claude: nil, build: known[wt.path.path], simulator: nil,
+                                           outputs: outputs, sourcesDate: state.sourcesDate))
+                    } else if var old = before.first(where: { $0.worktree.path == wt.path.path }) {
+                        // One failed call (a lock, a busy disk) must not drop the row, and with it the simulator's.
+                        old.outputs = outputs
+                        old.build = known[wt.path.path]
+                        all.append(old)
+                    }
                 }
             }
             guard mine == self.generation else { return }
             self.sessions = all
             self.watch(all)
             self.onChange?()
+            if complete {
+                let store = self.store
+                DispatchQueue.global(qos: .utility).async { store.prune(live: live) }
+            }
         }
     }
 
     /// The rows by repository, with each session's simulator (when one is alive) attached.
     func groups() -> [(header: String, sessions: [Session])] {
         var out: [(String, [Session])] = []
+        if !workspaces.isEmpty, !Git.available { return [(Self.noGit, [])] }
         for ws in workspaces {
             let rows = sessions.filter { $0.workspace.path == ws.root.path }.map { s -> Session in var s = s; s.simulator = simulator(for: s); return s }
             if rows.isEmpty { continue }
@@ -178,13 +199,35 @@ final class SessionsController {
             noteUsed(session.worktree.path)
             return true
         }
-        guard let apk = session.outputs?.apk ?? session.build?.apk else {
+        // The newest output if it is still there (`gradle clean` deletes it without an event), else the stored build.
+        let fm = FileManager.default
+        guard let apk = [session.outputs?.apk, session.build?.apk, builds[session.worktree.path]?.apk].compactMap({ $0 }).first(where: { fm.fileExists(atPath: $0.path) }) else {
             wb.toast.show("\(session.title) has no build yet. Build it, and it appears here.", problem: true)
+            refresh()
             return false
         }
         for stale in Engine.shared.simulators where !stale.isAlive && Self.slot(of: stale) == session.slot { Engine.shared.close(stale) }
         noteUsed(session.worktree.path)
-        guard wb.open(apk, remember: false, options: ["--data-slots", session.slot]) != nil else { return false }
+        // A simulator taken off the stage a moment ago may still hold the slot; one started now would get another.
+        if let old = Engine.shared.closing.first(where: { Self.slot(of: $0) == session.slot }) {
+            guard !starting.contains(session.slot) else { return true }
+            starting.insert(session.slot)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                old.waitUntilExit()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.starting.remove(session.slot)
+                    if self.simulator(for: session) == nil { self.start(session, from: apk) }
+                }
+            }
+            return true
+        }
+        return start(session, from: apk)
+    }
+
+    @discardableResult
+    private func start(_ session: Session, from apk: URL) -> Bool {
+        guard let wb = workbench, wb.open(apk, remember: false, options: ["--data-slots", session.slot]) != nil else { return false }
         launched[session.slot] = Self.modified(apk)
         record(apk: apk, for: session)
         enforceWarmLimit(keeping: session.worktree.path)
@@ -240,6 +283,7 @@ final class SessionsController {
         let store = self.store, sha = session.head, ref = session.branch, dirty = session.dirty, path = session.worktree.path
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let build = store.record(apk: apk, source: .local, sha: sha, ref: ref, dirty: dirty) else { return }
+            store.note(build: build.key, of: path)
             DispatchQueue.main.async { self?.builds[path] = build; self?.onChange?() }
         }
     }
@@ -268,13 +312,11 @@ final class SessionsController {
     /// (same options and data, through the developer hooks' relaunch), whether or not it is the selected one.
     private func built(_ apk: URL) {
         let file = apk.resolvingSymlinksInPath()
-        let name = file.lastPathComponent
-        if name.contains("androidTest") || name.contains("unaligned") { return }
         // The worktree holding the file; with worktrees inside one another (a main checkout holding its linked
-        // ones), the deepest.
+        // ones), the deepest. Only what Gradle leaves in build/outputs/apk is a build.
         let owner = sessions.filter { file.path.hasPrefix($0.worktree.resolvingSymlinksInPath().path + "/") }
             .max { $0.worktree.path.count < $1.worktree.path.count }
-        guard let session = owner else { return }
+        guard let session = owner, SessionStore.isBuildOutput(file, in: session.worktree) else { return }
         record(apk: file, for: session)
         if let old = simulator(for: session), old.apk.resolvingSymlinksInPath().path == file.path,
            Self.modified(file) > launched[session.slot] ?? .distantPast {
@@ -295,7 +337,7 @@ final class SessionsController {
         for (i, s) in groups().flatMap(\.sessions).enumerated() {
             let kind = s.simulator != nil ? "running" : (s.outputs == nil ? "no build" : "start")
             out.append(PaletteItem(id: "session." + s.worktree.path, title: "Go to session \(s.title) (\(kind))", group: "Sessions",
-                                   symbol: "arrow.triangle.branch", shortcut: i < 9 ? "⌃\(i + 1)" : "",
+                                   symbol: "arrow.triangle.branch", shortcut: i < 9 ? "⌘\(i + 1)" : "",
                                    keywords: "worktree branch change \(s.shortHead) \(s.worktree.lastPathComponent)") { [weak self] in self?.activate(s) })
         }
         out.append(PaletteItem(id: "session.add", title: "Add a repository to Sessions…", group: "Sessions", symbol: "plus.rectangle.on.folder",

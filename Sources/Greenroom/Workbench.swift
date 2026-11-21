@@ -312,9 +312,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             rows.append(.header(group.header))
             rows += group.sessions.map { .session($0) }
         }
-        if !sims.isEmpty {
+        let loose = sims.filter { sessions.session(forSimulator: $0) == nil }   // a session's own is on its row
+        if !loose.isEmpty {
             rows.append(.header("Running"))
-            rows += sims.map { .simulator($0) }
+            rows += loose.map { .simulator($0) }
         }
         let recents = Recents.all
         if !recents.isEmpty {

@@ -19,6 +19,8 @@ final class DevHooks {
     var onHarReport: ((String) -> Void)?
     /// Told after each reload a build watch made, with the simulators it started.
     var onReload: ((String, [Simulator]) -> Void)?
+    /// Simulators something else reloads (a session's: SessionsController), which a file-name match must leave alone.
+    var owns: (Simulator) -> Bool = { _ in false }
 
     // MARK: Install
 
@@ -266,8 +268,9 @@ final class DevHooks {
     /// A new APK settled in the watched folder: the simulators running a file of that name restart on it.
     private func built(_ apk: URL) {
         let name = apk.lastPathComponent
-        let sims = Engine.shared.simulators.filter { $0.apk.lastPathComponent == name }
-        guard !sims.isEmpty else { say("\(name) was rebuilt; no simulator runs it"); return }
+        let named = Engine.shared.simulators.filter { $0.apk.lastPathComponent == name }
+        let sims = named.filter { !owns($0) }
+        guard !sims.isEmpty else { if named.isEmpty { say("\(name) was rebuilt; no simulator runs it") }; return }
         var started: [Simulator] = []
         for (i, sim) in sims.enumerated() {
             relaunch(sim, apk: apk, options: sim.options) { [weak self] new in

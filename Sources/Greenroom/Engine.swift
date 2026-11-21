@@ -138,9 +138,17 @@ final class Engine {
         onChange?()
     }
 
+    /// Simulators taken off the stage whose process has not exited yet: until it has, it still holds its data slot.
+    private(set) var closing: [Simulator] = []
+
     func close(_ sim: Simulator) {
         sim.quit()
         simulators.removeAll { $0 === sim }
+        closing.append(sim)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            sim.waitUntilExit()
+            DispatchQueue.main.async { self?.closing.removeAll { $0 === sim } }
+        }
         onChange?()
     }
 
