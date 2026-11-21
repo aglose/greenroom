@@ -180,7 +180,9 @@ rm -rf src
 mkdir src
 tar -xf src.tar -C src
 if [ -s changes.patch ]; then
-  (cd src && git apply --whitespace=nowarn ../changes.patch)
+  # The ceiling keeps git from finding a repository around src (a home folder kept in git): inside one, git apply
+  # takes the patch's paths from that repository's top and silently skips every file.
+  (cd src && GIT_CEILING_DIRECTORIES="$(cd .. && pwd -P)" git apply --whitespace=nowarn ../changes.patch)
   echo "applied the uncommitted changes"
 fi
 if [ -f untracked.tar ]; then
@@ -194,6 +196,9 @@ cat > "$pack/build.sh" <<'BUILD'
 # $1: the application module (empty: found), $2: the variant.
 module="$1"; variant="$2"
 cd src
+# The same ceiling as unpack.sh's: a build that asks git (a version plugin, a commit hash) must not read the state of
+# a repository around src.
+GIT_CEILING_DIRECTORIES="$(cd .. && pwd -P)"; export GIT_CEILING_DIRECTORIES
 if [ -z "$module" ]; then
   found=""
   for f in $(find . -maxdepth 3 \( -name build.gradle -o -name build.gradle.kts \) -not -path '*/build/*' | sort); do
