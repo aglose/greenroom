@@ -27,7 +27,8 @@ session, with its own build, simulator and app data.
 3. **`changes`**: the new build against the base, screen by screen. `+ Name (new) [s4]` and `- Name (gone) [s9]` are
    screens the change added or removed; `~ Name: 4,812 px differ [s3]` is a screen that looks different.
    `screenshot` with `screen: "s3"` and `side: "diff"` (or `head`, `base`) shows where. Screens you did not mean to
-   change are the finding.
+   change are the finding. A last line `not finished: ...` means the walk of the app stopped early: the lines above
+   it stand, calling again gives the same answer, so cover the screens you care about yourself in steps 4 to 6.
 4. **`launch`** with no `apk`: the session's simulator, on its newest build, with its data kept.
 5. **`tap`** and **`type`** to reach the screens the change touched.
 6. **`check`**: texts that must be on screen (`visible`) and must not (`absent`), answered `PASS` or

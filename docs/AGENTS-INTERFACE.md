@@ -22,7 +22,7 @@ standard error when there is none. `GREENROOM_APP` names another copy (a build o
 `mcp__plugin_greenroom_greenroom__launch` and so on. Settings > Claude Code shows the two lines; Greenroom does not
 run them, and its "connected" line is about Connect alone. `scripts/plugin-check.py` checks the manifests and runs
 the script against a built app; to try the plugin from a checkout without installing it,
-`claude --plugin-dir plugin`.
+`claude --plugin-dir plugin` (not with `--strict-mcp-config`, which leaves out a plugin's servers too).
 
 **Connect**: Settings > Claude Code > Connect Claude Code shows the exact command and runs it on a click, with
 your own `claude` program found on your login shell's PATH. It says when Greenroom is already connected, when
