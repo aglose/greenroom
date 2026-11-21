@@ -6,7 +6,15 @@ import Foundation
 final class AgentTools {
     struct Failure: Error { let message: String }
 
-    weak var workbench: Workbench?
+    weak var workbench: Workbench? {
+        didSet { recording.onChange = { [weak self] in self?.workbench?.agentChanged() } }
+    }
+    /// The recording of an agent's session on a session's simulator (AgentRecording.swift).
+    let recording = AgentRecording()
+    /// The simulator the tool being run acts on (set while it runs; tools run one at a time).
+    var currentSim: Simulator?
+    /// The folder of the newest `changes` answer of each session (by worktree path), for `screenshot`'s `screen`.
+    var lastChanges: [String: URL] = [:]
     /// One line per call, for the person watching (main thread).
     var onActivity: ((_ tool: String, _ summary: String, _ failed: Bool, _ session: Session?) -> Void)?
 
@@ -53,7 +61,10 @@ final class AgentTools {
         "unlock": "^$", "recreate": "^$", "restart": "^$", "process-death": "^$",
     ]
 
-    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare"]
+    /// The tools that act on a simulator and so are recorded (launch is noted when it has made one).
+    static let driving: Set<String> = ["tap", "type", "key", "swipe", "back", "open_url", "set", "screen", "check", "wait_for", "screenshot", "logs"]
+
+    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session"]
 
     static let tools: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
@@ -85,12 +96,28 @@ final class AgentTools {
          schema(["visible": strings, "absent": strings])),
         ("wait_for", "Wait until a text is on screen (or, with gone, no longer is). Answers with what changed.",
          schema(["text": str, "gone": bool, "timeout_ms": int], required: ["text"])),
-        ("screenshot", "A picture of the screen, for what the nodes do not show. annotate draws each tappable node's ref on it.",
-         schema(["max_size": ["type": "integer", "description": "longest side in pixels (default 1000, 0 for full size)"], "annotate": bool])),
+        ("screenshot", "A picture of the screen, for what the nodes do not show. annotate draws each tappable node's ref on it. "
+            + "With screen (an id from changes) it answers that screen's stored capture instead: side head (default), base, or diff.",
+         schema(["max_size": ["type": "integer", "description": "longest side in pixels (default 1000, 0 for full size)"], "annotate": bool,
+                 "screen": ["type": "string", "description": "a screen id from the last changes answer (worktree sessions only)"],
+                 "side": ["type": "string", "enum": ["head", "base", "diff"]]])),
         ("compare", "How two simulators' screens differ (two builds, or two devices): - only on the base, + only on the other, > moved; "
             + "and, for screens of one size, the share of pixels that differ. map adds a picture of where.",
          schema(["base": ["type": "string", "description": "simulator id compared against (default: the first running)"],
                  "other": ["type": "string", "description": "simulator id compared (default: the second running)"], "map": bool], sim: false)),
+        ("session", "This worktree's session in Greenroom: branch and commit, whether it has uncommitted changes, its build (age, "
+            + "source, current or stale), the default recipe, the base changes are compared with, whether its simulator runs. "
+            + "Only for an agent started in a worktree of a repository added to Greenroom.", schema(sim: false)),
+        ("build", "Build this worktree with a recipe and wait: answers the new build's key and age, or the log's last error lines. "
+            + "The session's simulator then reloads on it with its data kept. The remote recipe needs the person's yes in Greenroom "
+            + "(an agent cannot give it); ci never starts a workflow from here.",
+         schema(["recipe": ["type": "string", "description": "local, ci, remote or a custom recipe's name (default: the workspace's)"],
+                 "timeout_s": ["type": "integer", "description": "how long to wait (default 1500)"]], sim: false)),
+        ("changes", "How this session's newest build differs from a base, as screens: + new, ~ changed (pixels), - gone, then counts, "
+            + "crashes and what the walk did not finish. Walks both builds if this pair has not been compared. Screen ids in [brackets] go to "
+            + "screenshot's screen. An unbuilt base is answered as text saying what would build it; nothing is started.",
+         schema(["base": ["type": "string", "description": "default: the workspace's base branch. Or session:BRANCH, pr:NUMBER, a branch/tag/commit, or the path of an .apk"],
+                 "timeout_s": ["type": "integer", "description": "how long to wait (default 600)"]], sim: false)),
         ("logs", "The app's log lines since the last call (android.util.Log and the engine's own).",
          schema(["filter": ["type": "string", "description": "keep lines containing this"], "lines": int])),
     ]
@@ -106,12 +133,21 @@ final class AgentTools {
     func call(_ name: String, _ args: [String: Any], connection: Connection = Connection()) throws -> [[String: Any]] {
         Reports.shared.count(.agentTool)
         guard AgentTools.tools.contains(where: { $0.name == name }) else { throw Failure(message: "unknown tool \(name)") }
-        if paused, !AgentTools.readOnly.contains(name) {
+        if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readOnly.contains(name) {
             throw Failure(message: "The person at the Mac has paused the agent in Greenroom. Ask them to resume it.")
+        }
+        currentSim = nil
+        // An agent driving a session's simulator is recorded (AgentRecording): the first action starts it.
+        if AgentTools.driving.contains(name), !(name == "screenshot" && args["screen"] != nil), let s = try? sim(args) {
+            currentSim = s
+            beginRecording(s)
         }
         do {
             let content: [[String: Any]]
             switch name {
+            case "session": content = text(try sessionTool(connection))
+            case "build": content = text(try buildTool(args, connection))
+            case "changes": content = text(try changesTool(args, connection))
             case "launch": content = text(try launch(args, connection))
             case "simulators": content = text(simulators())
             case "close": content = text(try close(args))
@@ -125,15 +161,18 @@ final class AgentTools {
             case "screen": content = text(try screen(args))
             case "check": content = text(try check(args))
             case "wait_for": content = text(try waitFor(args))
-            case "screenshot": content = try screenshot(args)
+            case "screenshot": content = args["screen"] != nil ? try changePicture(args, connection) : try screenshot(args)
             case "logs": content = text(try logs(args))
             case "compare": content = try compare(args)
             default: throw Failure(message: "unknown tool \(name)")
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
+            if name == "launch", let s = currentSim { beginRecording(s) }
+            noteRecording(name, first, failed: false)
             report(name, first, failed: false, connection)
             return content
         } catch let f as Failure {
+            noteRecording(name, f.message, failed: true)
             report(name, f.message, failed: true, connection)
             throw f
         }
@@ -143,11 +182,11 @@ final class AgentTools {
         DispatchQueue.main.async { self.onActivity?(tool, summary, failed, connection.session) }
     }
 
-    private func text(_ s: String) -> [[String: Any]] { [["type": "text", "text": s]] }
+    func text(_ s: String) -> [[String: Any]] { [["type": "text", "text": s]] }
 
     // MARK: Finding simulators and nodes
 
-    private func id(_ sim: Simulator) -> String {
+    func id(_ sim: Simulator) -> String {
         let key = ObjectIdentifier(sim)
         if let known = ids[key] { return known }
         let made = "s\(nextID)"
@@ -156,9 +195,9 @@ final class AgentTools {
         return made
     }
 
-    private func all() -> [Simulator] { DispatchQueue.main.sync { Engine.shared.simulators } }
+    func all() -> [Simulator] { DispatchQueue.main.sync { Engine.shared.simulators } }
 
-    private func sim(_ args: [String: Any]) throws -> Simulator {
+    func sim(_ args: [String: Any]) throws -> Simulator {
         let live = all().filter { $0.state == .running }
         if let want = args["sim"] as? String {
             guard let s = live.first(where: { id($0) == want }) else { throw Failure(message: "no running simulator \(want): call simulators") }
@@ -309,6 +348,7 @@ final class AgentTools {
             }
         }
         guard let sim = opened else { throw Failure(message: "Greenroom could not start \(name)") }
+        currentSim = sim
         // Marked as the session's, on whatever slot it runs.
         if let session, mark { DispatchQueue.main.sync { sim.agentSession = session.worktree.path } }
         let deadline = Date().addingTimeInterval(150)
@@ -329,7 +369,7 @@ final class AgentTools {
     }
 
     /// The session a simulator belongs to: the one an agent opened it for, else the one whose data slot it runs.
-    private func sessionOf(_ sim: Simulator) -> Session? {
+    func sessionOf(_ sim: Simulator) -> Session? {
         DispatchQueue.main.sync {
             guard let sessions = workbench?.sessions else { return nil }
             if let path = sim.agentSession, let s = sessions.sessions.first(where: { $0.worktree.path == path }) { return s }

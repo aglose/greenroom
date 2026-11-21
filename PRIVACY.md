@@ -51,6 +51,12 @@ of the apps you run and acts on them, on this Mac, through a connection only pro
 token in a file only you can read; web pages are refused). What the agent's own provider receives is between you
 and that agent; Greenroom sends it nothing by itself.
 
+While an agent drives a session's simulator, Greenroom records that screen to a video and a list of the agent's
+calls (`agent-*.mp4` and `steps.jsonl`), kept on this Mac under that build's evidence until the build is pruned.
+Nothing is sent anywhere. It can be turned off for each repository in the Agent popover. "Connect Claude Code"
+(Settings) runs `claude mcp add` with your own `claude` program, which changes Claude Code's own list of servers on
+this Mac and nothing else.
+
 ## Build recipes
 
 If you add a git repository (Sessions) and build it, Greenroom runs a **recipe**: a program that makes an APK, told

@@ -46,13 +46,14 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
     private let table = NSTableView()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let pause = NSButton(checkboxWithTitle: "Pause the agent", target: nil, action: nil)
+    private let recordSwitch = NSButton(checkboxWithTitle: "Record the agent's screen in this repository", target: nil, action: nil)
+    private let recordStatus = NSTextField(wrappingLabelWithString: "")
+    private let showRecording = NSButton(title: "Show Recording", target: nil, action: nil)
+    private var recordedFile: URL?
     private let time: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
 
     /// The command that connects Claude Code to this copy of Greenroom.
-    static var setupCommand: String {
-        let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
-        return "claude mcp add greenroom -- \"\(exe)\" --mcp"
-    }
+    static var setupCommand: String { ClaudeConnect.displayCommand() }
 
     init(activity: AgentActivity, tools: AgentTools, selected: @escaping () -> (path: String, label: String)? = { nil }) {
         self.activity = activity
@@ -86,17 +87,25 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
         copy.bezelStyle = .rounded
         copy.toolTip = AgentPanel.setupCommand
         let buttons = NSStackView(views: [pause, NSView(), copy])
+        recordSwitch.target = self
+        recordSwitch.action = #selector(toggleRecording)
+        recordStatus.font = .systemFont(ofSize: 12)
+        recordStatus.textColor = .secondaryLabelColor
+        showRecording.target = self
+        showRecording.action = #selector(revealRecording)
+        showRecording.bezelStyle = .rounded
+        let recordRow = NSStackView(views: [recordSwitch, NSView(), showRecording])
         scope.target = self
         scope.action = #selector(scopeChanged)
         let feed = NSStackView(views: [NSTextField(labelWithString: "Showing"), scope])
 
-        let stack = NSStackView(views: [status, feed, scroll, buttons])
+        let stack = NSStackView(views: [status, feed, scroll, recordRow, recordStatus, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
-        for v in [status, scroll, buttons] as [NSView] { v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28).isActive = true }
-        stack.frame = NSRect(x: 0, y: 0, width: 520, height: 380)
+        for v in [status, scroll, recordRow, recordStatus, buttons] as [NSView] { v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28).isActive = true }
+        stack.frame = NSRect(x: 0, y: 0, width: 520, height: 430)
         view = stack
         preferredContentSize = stack.frame.size
         refresh()
@@ -124,8 +133,44 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
         case "none": shown = activity.entries(session: nil, all: false)
         default: shown = activity.entries(session: current?.path, all: false)
         }
+        refreshRecording(current)
         table.reloadData()
         if !shown.isEmpty { table.scrollRowToVisible(shown.count - 1) }
+    }
+
+    /// The agent's recording of the selected session: the workspace switch, and whether one is running or the last file.
+    private func refreshRecording(_ current: (path: String, label: String)?) {
+        let session = current.flatMap { c in tools.workbench?.sessions.sessions.first { $0.worktree.path == c.path } }
+        recordSwitch.isHidden = session == nil
+        recordStatus.isHidden = session == nil
+        recordedFile = nil
+        showRecording.isHidden = true
+        guard let session, let sessions = tools.workbench?.sessions else { return }
+        let on = sessions.recordsAgent(session)
+        recordSwitch.state = on ? .on : .off
+        if let r = tools.recording.recording(for: session.worktree.path) {
+            recordedFile = r.file
+            showRecording.isHidden = false
+            recordStatus.stringValue = (r.live ? "Recording the agent's screen now: " : "Last recording: ") + r.file.lastPathComponent
+                + ". Kept on this Mac under this build's evidence."
+        } else {
+            recordStatus.stringValue = on ? "The agent's screen is recorded while it drives this session's simulator (one file per run, kept on this Mac under the build's evidence)."
+                                          : "Recording the agent is off for this repository."
+        }
+    }
+
+    @objc private func toggleRecording() {
+        guard let c = selected(), let session = tools.workbench?.sessions.sessions.first(where: { $0.worktree.path == c.path }) else { return }
+        tools.workbench?.sessions.setRecordsAgent(recordSwitch.state == .on, for: session)
+        refresh()
+    }
+
+    @objc private func revealRecording() {
+        guard let f = recordedFile else { return }
+        let part = URL(fileURLWithPath: f.path + ".part")
+        let there = [f, part].first { FileManager.default.fileExists(atPath: $0.path) }
+        if let there { NSWorkspace.shared.activateFileViewerSelecting([there]) }
+        else { NSWorkspace.shared.open(f.deletingLastPathComponent()) }
     }
 
     @objc private func scopeChanged() { refresh() }
