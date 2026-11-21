@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks the agent interface as an agent uses it: `Greenroom --mcp` on stdin/stdout, against the bundled test app.
 Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK
-Starts Greenroom if it is not running (and quits the copy it started)."""
+Starts Greenroom (its executable, in the background) if it is not running, and quits the copy it started."""
 import json, os, signal, subprocess, sys, time
 
 exe, apk = sys.argv[1], sys.argv[2]
@@ -14,6 +14,17 @@ def running_pid():
     except Exception:
         return None
 was_running = running_pid()
+started = None
+if not was_running:
+    # Started here rather than by the shim (which uses LaunchServices: on CI's runners the app it opened never served
+    # its endpoint within the shim's 15 s), and given a minute: a cold first launch on a runner is slow.
+    started = subprocess.Popen([exe, "--background"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(600):
+        if running_pid():
+            break
+        time.sleep(0.1)
+    else:
+        sys.exit("mcp-check: Greenroom did not start its agent endpoint within 60 s")
 p = subprocess.Popen([exe, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 n, failures = [0], []
 
@@ -109,6 +120,11 @@ finally:
     if pid and pid != was_running:
         os.kill(pid, signal.SIGTERM)
         time.sleep(1)
+    if started:
+        try:
+            started.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            started.kill()
 
 print(f"mcp-check: {len(failures)} failed" if failures else "mcp-check: all passed")
 sys.exit(1 if failures else 0)
