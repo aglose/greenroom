@@ -18,7 +18,7 @@ final class AgentActivity {
         if feed.count > 500 { feed.removeFirst(feed.count - 500) }
         feeds[key] = feed
         onChange?()
-        if ProcessInfo.processInfo.environment["GREENROOM_CHECK_FEEDS"] != nil { dumpForCheck() }
+        if Engine.agentCheck, ProcessInfo.processInfo.environment["GREENROOM_CHECK_FEEDS"] != nil { dumpForCheck() }   // --agent-check only
     }
 
     /// For scripts/mcp-check.py --sessions: the feeds as JSON in the state folder (only when the check asks).
@@ -114,7 +114,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
         let choice = scope.selectedItem?.representedObject as? String ?? "selected"
         let current = selected()
         scope.removeAllItems()
-        for (title, key) in [("This session" + (current.map { " (\($0.label))" } ?? ""), "selected"), ("All sessions", "all"), ("No session", "none")] {
+        for (title, key) in [(current.map { "This session (\($0.label))" } ?? "This simulator (in no session)", "selected"), ("All sessions", "all"), ("No session", "none")] {
             scope.addItem(withTitle: title)
             scope.lastItem?.representedObject = key
         }

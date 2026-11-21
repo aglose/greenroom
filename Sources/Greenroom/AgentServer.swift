@@ -143,6 +143,8 @@ final class AgentServer {
         var c = AgentTools.Connection(cwd: hint.cwd, parent: hint.parent)
         let key = "\(hint.parent.map(String.init) ?? "-")|\(hint.cwd?.path ?? "-")"
         knownLock.lock(); defer { knownLock.unlock() }
+        // Agents that have exited are forgotten.
+        known = known.filter { $0.value.parent.map { kill($0, 0) == 0 || errno == EPERM } ?? true }
         if let old = known[key] { c.session = old.session }
         known[key] = c
         return c

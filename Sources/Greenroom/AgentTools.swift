@@ -18,8 +18,6 @@ final class AgentTools {
         var session: Session?
     }
 
-    /// The session each simulator an agent opened was opened for (also when it runs with `fresh` data).
-    private var owners: [ObjectIdentifier: String] = [:]
     /// The person at the Mac paused the agent: actions are refused until it is lifted.
     var paused = false
 
@@ -64,7 +62,7 @@ final class AgentTools {
             "device": ["type": "string", "enum": devices],
             "appearance": ["type": "string", "enum": ["light", "dark"]],
             "locale": str, "font_scale": ["type": "number"],
-            "fresh": ["type": "boolean", "description": "empty the app's data first (and do not use the worktree's data)"],
+            "fresh": ["type": "boolean", "description": "start with empty app data. In a worktree it runs beside the session's simulator on a separate data slot: the session's own data is never emptied"],
         ], sim: false)),
         ("simulators", "List running simulators and recently opened APKs.", schema(sim: false)),
         ("close", "Stop a simulator.", schema()),
@@ -249,40 +247,70 @@ final class AgentTools {
         let name: String
         let opened: Simulator?
         var note = ""
+        var mark = true   // the simulator is the session's (not so for another app's APK)
+        /// A simulator beside the session's, on a data slot of its own that nothing else uses.
+        func throwaway(_ apk: URL) -> Simulator? {
+            let slot = "grx" + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+            note = " (fresh data on a separate slot, beside the session's simulator; the session's own data is untouched)"
+            return DispatchQueue.main.sync { self.workbench?.open(apk, remember: true, options: ["--data-slots", slot] + options, fromAgent: true) }
+        }
+        /// The session's slot is held until an old simulator on it has exited.
+        func waitForSlot(_ session: Session) {
+            let end = Date().addingTimeInterval(30)
+            while Date() < end, let holder = DispatchQueue.main.sync(execute: { self.workbench?.sessions.holder(of: session.slot) }) {
+                holder.waitUntilExit()
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
         if let path = args["apk"] as? String {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             guard url.pathExtension.lowercased() == "apk", FileManager.default.isReadableFile(atPath: url.path) else {
                 throw Failure(message: "\(path) is not a readable .apk file")
             }
             name = url.lastPathComponent
-            var opts = options
-            if let session, !fresh {
-                // The session's own data, as a click on its row has: one simulator on a slot, so its old one gives way.
-                opts = ["--data-slots", session.slot] + options
+            // Only the session's own build is the session's app: any other APK is not run on its data, nor in its place.
+            let own: Bool = session.map { s in DispatchQueue.main.sync {
+                let mine = [s.outputs?.apk, s.build?.apk, self.workbench?.sessions.newestAPK(for: s)].compactMap { $0?.resolvingSymlinksInPath().path }
+                return mine.contains(url.resolvingSymlinksInPath().path)
+            } } ?? false
+            if let session, own, fresh {
+                opened = throwaway(url)
+            } else if let session, own {
                 DispatchQueue.main.sync {
-                    if let old = self.workbench?.sessions.simulator(for: session) { Engine.shared.close(old); note = " (replaced the session's running simulator)" }
+                    if let old = self.workbench?.sessions.simulator(for: session) { Engine.shared.close(old); note = " (replaced the session's running simulator; its data is kept)" }
                 }
+                waitForSlot(session)
+                opened = DispatchQueue.main.sync { self.workbench?.sessions.startForAgent(session, from: url, options: options) }
+            } else {
+                mark = false
+                opened = DispatchQueue.main.sync { self.workbench?.open(url, remember: true, options: options, fromAgent: true) }
             }
-            opened = DispatchQueue.main.sync { self.workbench?.open(url, remember: true, options: opts, fromAgent: true) }
         } else {
             guard let session else {
                 throw Failure(message: "this folder is not a worktree of a repository added to Greenroom: pass apk")
             }
             let label = session.branch ?? session.shortHead
-            let result: (Simulator?, String?) = DispatchQueue.main.sync {
-                guard let sessions = self.workbench?.sessions else { return (nil, "Greenroom's window is not ready") }
-                if let alive = sessions.simulator(for: session) { sessions.activate(session); return (alive, "selected") }
-                guard let apk = sessions.apk(for: session) else { return (nil, "no build yet for \(label)") }
-                return (sessions.start(session, options: options, fromAgent: true), apk.lastPathComponent)
+            let found: (alive: Simulator?, apk: URL?) = DispatchQueue.main.sync {
+                (self.workbench?.sessions.simulator(for: session), self.workbench?.sessions.newestAPK(for: session))
             }
-            if let why = result.1, result.0 == nil { throw Failure(message: why) }
-            guard let sim = result.0 else { throw Failure(message: "Greenroom could not start the simulator for \(label)") }
-            opened = sim
-            name = result.1 == "selected" ? "the session's running simulator" : (result.1 ?? "build")
-            if result.1 == "selected" { note = " (already running; device and other options not applied)" }
+            if let alive = found.alive, !fresh {
+                DispatchQueue.main.sync { _ = self.workbench?.sessions.activate(session) }
+                opened = alive
+                name = "the session's running simulator"
+                note = " (already running; device and other options not applied)"
+            } else {
+                guard let apk = found.apk else { throw Failure(message: "no build yet for \(label)") }
+                name = apk.lastPathComponent
+                if fresh { opened = throwaway(apk) }
+                else {
+                    waitForSlot(session)
+                    opened = DispatchQueue.main.sync { self.workbench?.sessions.startForAgent(session, from: apk, options: options) }
+                }
+            }
         }
         guard let sim = opened else { throw Failure(message: "Greenroom could not start \(name)") }
-        if let session { owners[ObjectIdentifier(sim)] = session.worktree.path }
+        // Marked as the session's, on whatever slot it runs.
+        if let session, mark { DispatchQueue.main.sync { sim.agentSession = session.worktree.path } }
         let deadline = Date().addingTimeInterval(150)
         while Date() < deadline {
             let state = DispatchQueue.main.sync { sim.state }
@@ -304,7 +332,7 @@ final class AgentTools {
     private func sessionOf(_ sim: Simulator) -> Session? {
         DispatchQueue.main.sync {
             guard let sessions = workbench?.sessions else { return nil }
-            if let path = owners[ObjectIdentifier(sim)], let s = sessions.sessions.first(where: { $0.worktree.path == path }) { return s }
+            if let path = sim.agentSession, let s = sessions.sessions.first(where: { $0.worktree.path == path }) { return s }
             return sessions.session(forSimulator: sim)
         }
     }

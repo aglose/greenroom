@@ -4,6 +4,8 @@ import Foundation
 /// Greenroom never reads an APK itself; it hands the path to the engine, which runs it locally.
 final class Engine {
     static let shared = Engine()
+    /// Launched by scripts/mcp-check.py: its GREENROOM_STATE, GREENROOM_ADD_REPOSITORY and GREENROOM_CHECK_FEEDS count.
+    static let agentCheck = CommandLine.arguments.contains("--agent-check")
 
     /// The engine's folder: `Contents/Resources/engine` in the app, or `GREENROOM_ENGINE` for a development run.
     let root: URL
@@ -40,8 +42,9 @@ final class Engine {
             root = (Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent("engine")
         }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        // GREENROOM_STATE: another state folder, for checks that must not touch (or meet) the person's own.
-        if let other = ProcessInfo.processInfo.environment["GREENROOM_STATE"], other.hasPrefix("/") {
+        // GREENROOM_STATE: another state folder, for checks that must not touch (or meet) the person's own. Only
+        // with --agent-check on the command line (scripts/mcp-check.py passes it): never from the environment alone.
+        if Engine.agentCheck, let other = ProcessInfo.processInfo.environment["GREENROOM_STATE"], other.hasPrefix("/") {
             state = URL(fileURLWithPath: other, isDirectory: true)
         } else {
             state = support.appendingPathComponent("Greenroom", isDirectory: true)

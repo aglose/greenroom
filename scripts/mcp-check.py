@@ -31,7 +31,7 @@ def sessions_mode():
         trees[name] = wt
     env = dict(os.environ, GREENROOM_STATE=state_dir, GREENROOM_ADD_REPOSITORY=repo, GREENROOM_CHECK_FEEDS="1")
     app_log = open(root + "/app.log", "w")
-    app = subprocess.Popen([exe, "--background"], stdout=app_log, stderr=subprocess.STDOUT, env=env)
+    app = subprocess.Popen([exe, "--background", "--agent-check"], stdout=app_log, stderr=subprocess.STDOUT, env=env)
     failures, shims = [], []
     def expect(what, ok, got=""):
         print(("ok   " if ok else "FAIL ") + what + ("" if ok else "\n     got: " + str(got)[:400].replace("\n", "\n          ")))
@@ -39,7 +39,7 @@ def sessions_mode():
             failures.append(what)
     class Shim:
         def __init__(self, cwd):
-            self.p = subprocess.Popen([exe, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, cwd=cwd, env=env)
+            self.p = subprocess.Popen([exe, "--mcp", "--agent-check"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, cwd=cwd, env=env)
             self.n = 0
             shims.append(self)
             self.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp-check", "version": "1"}})
@@ -109,10 +109,35 @@ def sessions_mode():
         expect("... and still works with an apk", not err and "launched" in t and "for feat" not in t, t)
         sims, _ = away.call("simulators")
         expect("its simulator belongs to no session", any("(session" not in l and "s3" in l.split()[0:1] for l in sims.split("\n") if l.startswith("s")) , sims)
-        t, err = b.call("launch", apk=apk)
-        expect("an apk given inside a session still gets the session's data slot", not err and "replaced the session's running simulator" in t, t)
+        # Data: a marker in a session's slot folder must survive a fresh launch and a replacement.
+        marker = "mcp-check-marker"
+        def slot_dirs(sl):
+            return [d for d in glob.glob(state_dir + f"/engine/cache/data/*/{sl}-*") if not d.endswith(".device") and os.path.isdir(d)]
+        def has_marker(sl):
+            return any(os.path.exists(d + "/" + marker) for d in slot_dirs(sl))
+        for who in "ab":
+            wait(lambda: slot_dirs(slot(trees[who])), 30)
+            for d in slot_dirs(slot(trees[who])):
+                open(d + "/" + marker, "w").write("kept")
+        expect("a marker is written in each session's data", has_marker(slot(trees["a"])) and has_marker(slot(trees["b"])), str(glob.glob(state_dir + "/engine/cache/data/*/*")))
+        t, err = a.call("launch", fresh=True)
+        expect("fresh inside a session runs beside it on a separate slot, and says so", not err and "separate slot" in t and "untouched" in t, t)
+        sims, _ = a.call("simulators")
+        expect("... marked as the session's, the session's own simulator still on its slot",
+               sims.count("(session feat-a)") == 2 and sims.count(f"--data-slots {slot(trees['a'])} ") == 1 and "--fresh" in sims, sims)
+        expect("... and the session's data is still there", has_marker(slot(trees["a"])))
+        own = trees["b"] + "/app/build/outputs/apk/debug/app-debug.apk"
+        before = len(slot_dirs(slot(trees["b"])))
+        t, err = b.call("launch", apk=own)
+        expect("the session's own build given as apk replaces its simulator", not err and "replaced the session's running simulator" in t, t)
         sims, _ = b.call("simulators")
-        expect("... as the simulators list shows", f"--data-slots {slot(trees['b'])}" in sims and sims.count("(session feat-b)") == 1, sims)
+        expect("... on the session's slot, once", sims.count(f"--data-slots {slot(trees['b'])} ") == 1 and sims.count("(session feat-b)") == 1, sims)
+        expect("... with its data kept, in the same slot folder (no empty second slot)", has_marker(slot(trees["b"])) and len(slot_dirs(slot(trees["b"]))) == before,
+               f"{before} folders before, {len(slot_dirs(slot(trees['b'])))} after")
+        t, err = b.call("launch", apk=apk)
+        sims, _ = b.call("simulators")
+        expect("another APK from the worktree starts a separate simulator and leaves the session's alone",
+               not err and "replaced" not in t and sims.count(f"--data-slots {slot(trees['b'])} ") == 1 and has_marker(slot(trees["b"])), t + "\n" + sims)
         # A request with no headers: what an older shim sends.
         info = json.load(open(agent))
         def raw(name, **args):
@@ -137,7 +162,7 @@ def sessions_mode():
         none = by.get("", [])
         expect("each session has its own feed, and entries say which", len(by) == 3 and len(feed_a) >= 3 and len(feed_b) >= 3 and {e["label"] for e in feed_a} == {"feat-a"}, json.dumps(by)[:600])
         expect("feat-a's feed has its subfolder shim's call, feat-b's has none of a's",
-               sum(e["tool"] == "launch" for e in feed_a) == 2 and sum(e["tool"] == "launch" for e in feed_b) == 2 and not any(e["tool"] == "tap" for e in feed_b), json.dumps(by)[:600])
+               sum(e["tool"] == "launch" for e in feed_a) == 3 and sum(e["tool"] == "launch" for e in feed_b) == 3 and not any(e["tool"] == "tap" for e in feed_b), json.dumps(by)[:600])
         expect("calls from no session are a feed of their own", len(none) >= 4 and all(e["label"] == "" for e in none), json.dumps(none)[:400])
     finally:
         for s in shims:
@@ -173,14 +198,14 @@ if not was_running:
     # its endpoint within the shim's 15 s), and given a minute: a cold first launch on a runner is slow.
     import tempfile
     app_log = tempfile.NamedTemporaryFile(prefix="greenroom-mcp-check-", suffix=".log", delete=False)
-    started = subprocess.Popen([exe, "--background"], stdout=app_log, stderr=subprocess.STDOUT)
+    started = subprocess.Popen([exe, "--background", "--agent-check"], stdout=app_log, stderr=subprocess.STDOUT)
     for _ in range(600):
         if running_pid():
             break
         time.sleep(0.1)
     else:
         sys.exit("mcp-check: Greenroom did not start its agent endpoint within 60 s")
-p = subprocess.Popen([exe, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+p = subprocess.Popen([exe, "--mcp", "--agent-check"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 n, failures = [0], []
 
 def rpc(method, params=None):

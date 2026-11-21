@@ -73,8 +73,11 @@ Older shims send neither header and everything works as before.
   data and as a click on its row does; if that simulator is already running it is selected (device and other
   options are not applied to a running one). Without a session it answers `this folder is not a worktree of a
   repository added to Greenroom: pass apk`; with a session that has no build, `no build yet for <branch>`.
-- `launch` **with `apk`** inside a session also uses the session's data, unless `fresh` is true. It replaces the
-  session's running simulator, if any: one simulator per data slot.
+- `launch` **with `apk`** that is the session's own build (its newest output or stored build) runs on the session's
+  data and replaces the session's running simulator, if any: one simulator per data slot, and the old one exits
+  first so its data is kept. Any other APK starts a simulator of its own, on the default data, beside the session's.
+- `launch` with **`fresh: true`** inside a session never touches the session's data: the build starts beside the
+  session's simulator on a separate, empty data slot, and the answer says so.
 - `simulators` lists each simulator with its session's branch: `(session feat-login)`.
 
 The headers are hints from a local program that already holds the token. They select a row and grant nothing: no
