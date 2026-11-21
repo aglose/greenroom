@@ -121,6 +121,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
             let progress: ((CrawlRun.Event) -> Void)?
         }
         var waiters: [Waiter] = []
+        /// A comparison's own start (a deep link) and engine options for the base's launches (a check's changed build).
+        var start: String?
+        var baseOption = ""
         /// Where it is made and where it ends up, fixed when the job is made (the store may change meanwhile).
         let part: URL
         let final: URL
@@ -252,7 +255,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     /// callers asking for the same pair share it: a token's cancel removes only its own caller, and the run ends
     /// when none is left. No data slot is used: the crawler cannot keep data across two builds.
     @discardableResult
-    func changes(head: Build, base: Build, progress: ((CrawlRun.Event) -> Void)? = nil,
+    func changes(head: Build, base: Build, start: String? = nil, baseOption: String = "", progress: ((CrawlRun.Event) -> Void)? = nil,
                  completion: @escaping (Result<ChangesResult, Failure>) -> Void) -> Token {
         let token = Token()
         let folder = changesFolder(head: head.key, base: base.key)
@@ -267,6 +270,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         else {
             job = Job(owner: owner, build: head, kind: .changes(base: base),
                       part: changesFolder.appendingPathComponent("\(head.key)-\(base.key).part", isDirectory: true), final: folder)
+            job.start = start
+            job.baseOption = baseOption
             queue.append(job)
         }
         let waiter = Job.Waiter(completion: completion, progress: progress)
@@ -335,7 +340,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         s.jobs = budget.jobs
         s.appearances = ["light"]
         s.background = true   // evidence walks yield to everything the person is doing
-        if case .changes(let base) = job.kind { s.base = base.apk }
+        if case .changes(let base) = job.kind { s.base = base.apk; s.start = job.start; s.baseOption = job.baseOption }
         // The clone, and the rest of the set-up, off the main thread (a copy fallback of a big slot takes a while).
         let root = dataRoot
         var slotName: String?
