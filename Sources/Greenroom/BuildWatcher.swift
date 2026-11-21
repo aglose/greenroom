@@ -4,7 +4,9 @@ import Foundation
 /// Notices a changed `.apk` under a folder (a Gradle outputs folder) through FSEvents: no polling. A change is
 /// reported once the file has stopped changing (a build writes it in pieces), a second after the last event.
 final class BuildWatcher {
-    let folder: URL
+    /// The folders watched: one for a build folder, a worktree each for Sessions (one stream covers them all).
+    let folders: [URL]
+    var folder: URL { folders[0] }
     /// Only this file name counts; nil for any `.apk`.
     let name: String?
     /// A finished build, on the main thread.
@@ -16,8 +18,10 @@ final class BuildWatcher {
     private static let debounce: TimeInterval = 1.0
     private static let sizeCheck: TimeInterval = 0.5
 
-    init(folder: URL, name: String?) {
-        self.folder = folder
+    convenience init(folder: URL, name: String?) { self.init(folders: [folder], name: name) }
+
+    init(folders: [URL], name: String?) {
+        self.folders = folders
         self.name = name
     }
 
@@ -27,14 +31,17 @@ final class BuildWatcher {
     func start() -> Bool {
         guard stream == nil else { return true }
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, info, count, paths, _, _ in
+        let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
             let me = Unmanaged<BuildWatcher>.fromOpaque(info).takeUnretainedValue()
             let list = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
-            me.changed(Array(list.prefix(count)))
+            // Only a file made, written or moved into place is a build: a change of its attributes alone (the system
+            // marks a file an engine has just read) is not.
+            let content = FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemRenamed)
+            me.changed(list.prefix(count).enumerated().compactMap { i, path in flags[i] & content != 0 ? path : nil })
         }
         let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagNoDefer)
-        guard let s = FSEventStreamCreate(nil, callback, &context, [folder.path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3, flags) else { return false }
+        guard let s = FSEventStreamCreate(nil, callback, &context, folders.map { $0.resolvingSymlinksInPath().path } as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3, flags) else { return false }
         FSEventStreamSetDispatchQueue(s, queue)
         guard FSEventStreamStart(s) else { FSEventStreamInvalidate(s); FSEventStreamRelease(s); return false }
         stream = s
