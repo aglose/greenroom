@@ -486,10 +486,12 @@ final class SessionsController {
         let name = NSTextField(labelWithString: s.title)
         name.font = .systemFont(ofSize: 13)
         name.lineBreakMode = .byTruncatingMiddle
-        var detail = [s.shortHead]
-        if s.claude?.title != nil, let b = s.branch { detail.insert(b, at: 0) }   // the title took the branch's place
-        if let built = s.builtAt { detail.append(Self.age(built)) }
-        if s.ahead > 0 { detail.append("\(s.ahead) ahead") }
+        // What tells rows apart, first: the pull request, then the branch when a title took its place. The head's
+        // hash and the commits ahead were noise here; they are in the row's tooltip.
+        var detail: [String] = []
+        if let pr = s.claude?.pullRequest, let n = Int(pr.lastPathComponent) { detail.append("#\(n)") }
+        if s.claude?.title != nil, let b = s.branch { detail.append(b) }
+        if let built = s.builtAt { detail.append(Self.age(built)) } else { detail.append("not built") }
         if s.dirty { detail.append("edited") }
         if workspace(of: s)?.defaultRecipeName == "ci", let behind = CIBehind.note(for: s, store: store, then: { [weak self] in self?.onChange?() }) { detail.append(behind) }
         let build = buildAccessories(for: s)
@@ -505,10 +507,10 @@ final class SessionsController {
         var views: [NSView] = [icon, text]
         if let dot = ClaudeUI.dot(for: s.claude) { views.append(dot) }
         if let walk = evidence.badge(for: s) { views.append(walk) }   // "walking…", "N screens" (Evidence.swift)
-        if s.builtAt == nil || s.isStale {
-            let badge = NSTextField(labelWithString: s.builtAt == nil ? "no build" : "stale")
+        if s.builtAt != nil && s.isStale {   // "not built" is on the second line; the hammer offers the build
+            let badge = NSTextField(labelWithString: "stale")
             badge.font = .systemFont(ofSize: 9, weight: .semibold)
-            badge.textColor = s.builtAt == nil ? .secondaryLabelColor : .systemOrange
+            badge.textColor = .systemOrange
             badge.setContentHuggingPriority(.required, for: .horizontal)
             badge.setContentCompressionResistancePriority(.required, for: .horizontal)
             views.append(badge)
@@ -517,6 +519,9 @@ final class SessionsController {
         let stack = NSStackView(views: views)
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
+        var tip = [s.branch ?? "detached", s.shortHead + (s.ahead > 0 ? ", \(s.ahead) ahead" : ""), (s.worktree.path as NSString).abbreviatingWithTildeInPath]
+        if let pr = s.claude?.pullRequest { tip.append(pr.absoluteString) }
+        stack.toolTip = tip.joined(separator: "\n")
         return stack
     }
 
