@@ -21,11 +21,11 @@ program() { # APP: its executable, if it is there
 }
 
 first_installed() { # paths of apps on stdin: the program of the first that has one
-  # Spotlight may list several copies. One that macOS runs from a temporary place (App Translocation) is skipped:
-  # that path stops existing.
+  # Spotlight may list several copies. Skipped: one macOS runs from a temporary place (App Translocation), one on
+  # a mounted disk image, one in the Trash. Those paths stop existing.
   while IFS= read -r app; do
     case "$app" in
-      */AppTranslocation/*) continue ;;
+      */AppTranslocation/* | /Volumes/* | */.Trash/*) continue ;;
     esac
     program "$app" && return 0
   done

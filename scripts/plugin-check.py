@@ -42,8 +42,11 @@ expect("the plugin's files name no home folder", not any(re.search(r"/Users/|/ho
 skill = open(plugin + "/skills/verify/SKILL.md").read()
 front = skill.split("---")[1] if skill.startswith("---") else ""
 expect("the skill has a name and a description", re.search(r"^name: verify$", front, re.M) and re.search(r"^description: \S", front, re.M), front)
-missing = [t for t in ("session", "build", "changes", "launch", "tap", "type", "check", "screenshot", "compare") if f"`{t}`" not in skill]
+loop = ("session", "build", "changes", "launch", "tap", "type", "check", "screenshot", "compare")
+missing = [t for t in loop if f"`{t}`" not in skill]
 expect("the skill names the loop's tools", not missing, missing)
+# Every tool the skill names (held against the app's own list further down).
+named = set(loop) | {t for t in ("simulators", "screen", "wait_for", "logs", "set") if f"`{t}`" in skill}
 for words in ("paused", "consent", "what changed"):
     expect(f"the skill says: {words}", words in skill.lower())
 
@@ -62,7 +65,12 @@ if not os.path.exists("/Applications/Greenroom.app"):
     r = launch({"PATH": fake + ":/usr/bin:/bin", "HOME": empty})
     expect("with no app installed it says where it looked and how to install", r.returncode == 1 and "was not found" in r.stderr and "releases" in r.stderr and r.stdout == "", r.stderr)
     # Spotlight's answer is used: a stand-in mdfind names this app (and, first, one that macOS translocated).
-    open(fake + "/mdfind", "w").write(f"#!/bin/sh\necho /private/var/folders/x/T/AppTranslocation/A/d/Greenroom.app\necho '{app}'\n")
+    # (The stand-ins for a translocated copy and a disk image's are real folders with a program, so only the rule skips it.)
+    decoys = [empty + "/T/AppTranslocation/A/d/Greenroom.app"]
+    for d in decoys:
+        os.makedirs(d + "/Contents/MacOS")
+        shutil.copy("/usr/bin/true", d + "/Contents/MacOS/Greenroom")
+    open(fake + "/mdfind", "w").write("#!/bin/sh\n" + "".join(f"echo '{d}'\n" for d in decoys + [app]))
     found = True
 else:
     print("skip the not-installed and Spotlight cases: /Applications/Greenroom.app exists on this Mac")
@@ -92,6 +100,8 @@ try:
         except Exception:
             names = set()
         expect(f"the launcher serves MCP {how}", {"session", "build", "changes", "launch", "check", "compare"} <= names, (r.returncode, r.stdout[:300], r.stderr[:300]))
+        if names:
+            expect("... and every tool the skill names is one of the app's", named <= names, sorted(named - names))
     served(dict(plain, GREENROOM_APP=app, GREENROOM_MCP_ARGS="--agent-check", GREENROOM_STATE=state), "from GREENROOM_APP")
     if found:
         served({"PATH": fake + ":/usr/bin:/bin", "HOME": empty, "GREENROOM_MCP_ARGS": "--agent-check", "GREENROOM_STATE": state}, "from the app Spotlight names, past a translocated copy")

@@ -27,8 +27,9 @@ session, with its own build, simulator and app data.
 3. **`changes`**: the new build against the base, screen by screen. `+ Name (new) [s4]` and `- Name (gone) [s9]` are
    screens the change added or removed; `~ Name: 4,812 px differ [s3]` is a screen that looks different.
    `screenshot` with `screen: "s3"` and `side: "diff"` (or `head`, `base`) shows where. Screens you did not mean to
-   change are the finding. A last line `not finished: ...` means the walk of the app stopped early: the lines above
-   it stand, calling again gives the same answer, so cover the screens you care about yourself in steps 4 to 6.
+   change are the finding. A `not finished: ...` line means the walk of the app stopped early, and
+   `? Name (not reached: ...)` is a screen it did not get to: the other lines stand, calling again gives the same
+   answer, so cover the screens you care about yourself in steps 4 to 6.
 4. **`launch`** with no `apk`: the session's simulator, on its newest build, with its data kept.
 5. **`tap`** and **`type`** to reach the screens the change touched.
 6. **`check`**: texts that must be on screen (`visible`) and must not (`absent`), answered `PASS` or
@@ -59,8 +60,8 @@ that screen. `set` changes appearance, locale, font scale, rotation and more on 
 ## What you cannot do, and what to do instead
 
 - **Paused.** The person can pause the agent in Greenroom. While paused every action is refused (`build`,
-  `changes`, `launch`, `tap`, `type`...); only reading works (`session`, `screen`, `screenshot`, `logs`). Do not
-  retry: tell the person that Greenroom's Agent button (✦) has the switch, and wait.
+  `changes`, `launch`, `tap`, `type`, `set`...); only reading works (`session`, `simulators`, `screen`, `check`,
+  `wait_for`, `compare`, `screenshot`, `logs`). Do not retry an action: tell the person that Greenroom's Agent button (✦) has the switch, and wait.
 - **`remote` builds need the person's consent.** The `remote` recipe uploads source code to the person's own
   account, so it runs only after they allowed it for that repository in Greenroom. You cannot give that yes: if
   `build` says so, ask them to allow it in the app, or use another recipe.

@@ -303,7 +303,7 @@ struct ClaudeConnectView: View {
             Text(ClaudeConnect.pluginMarketplaceCommand + "\n" + ClaudeConnect.pluginInstallCommand)
                 .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 .foregroundStyle(.secondary)
-            Text("The plugin starts the Greenroom in Applications. Use one or the other: with both, Claude Code lists the simulators\u{2019} tools twice. The state above is about Connect only.")
+            Text("The plugin starts the Greenroom installed on this Mac (Applications first, then the copy Spotlight finds). Use one or the other: with both, Claude Code lists the simulators\u{2019} tools twice. The state above is about Connect only.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear { look() }
