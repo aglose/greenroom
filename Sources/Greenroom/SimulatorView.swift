@@ -58,6 +58,17 @@ final class SimulatorView: NSView {
     var onPoint: ((Int, Int) -> Void)?
     /// Extra text at the end of the caption (the Diagnostics pane's live fps); empty for none.
     var captionExtra = "" { didSet { if captionExtra != oldValue { updateCaption() } } }
+    /// On a side-by-side canvas: the body and caption move the device, the grip at its bottom right resizes it, and
+    /// the button at its top left closes it. The grid does the moving and sizing; the view reports the gesture.
+    var arrangeable = false { didSet { if arrangeable != oldValue { updateTracking(); updateChips() } } }
+    weak var arranger: SimulatorGrid?
+    private let closeChip = NSButton()
+    private let gripChip = ChipImage()
+    private var gripRect = CGRect.zero
+    /// Whether the pointer is over this device and no device in front of it (set by the grid, which knows the order).
+    var hovering = false { didSet { if hovering != oldValue { updateChips() } } }
+    private enum Arranging { case move, resize }
+    private var arranging: Arranging?
     private let outlineLayer = CAShapeLayer()
     private var tracking: NSTrackingArea?
     private let boxLayer = CAShapeLayer()
@@ -125,6 +136,26 @@ final class SimulatorView: NSView {
         caption.alignment = .center
         caption.lineBreakMode = .byTruncatingMiddle
         addSubview(caption)
+        for chip in [closeChip, gripChip] as [NSView] {
+            chip.wantsLayer = true
+            chip.layer?.backgroundColor = NSColor(srgbRed: 0.16, green: 0.17, blue: 0.19, alpha: 0.96).cgColor
+            chip.layer?.cornerRadius = Self.chip / 2
+            chip.layer?.borderWidth = 1
+            chip.layer?.borderColor = NSColor(white: 1, alpha: 0.16).cgColor
+            chip.alphaValue = 0
+            chip.isHidden = true
+            addSubview(chip)
+        }
+        let small = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+        closeChip.isBordered = false
+        closeChip.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")?.withSymbolConfiguration(small)
+        closeChip.contentTintColor = Design.ink
+        closeChip.target = self
+        closeChip.action = #selector(closeClicked)
+        closeChip.setAccessibilityLabel("Close this simulator")
+        gripChip.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Resize")?.withSymbolConfiguration(small)
+        gripChip.contentTintColor = Design.ink
+        gripChip.imageScaling = .scaleNone
         areaLayer.fillColor = NSColor.systemPink.withAlphaComponent(0.28).cgColor
         boxLayer.fillColor = NSColor.systemOrange.withAlphaComponent(0.12).cgColor
         boxLayer.strokeColor = NSColor.systemOrange.cgColor
@@ -404,7 +435,93 @@ final class SimulatorView: NSView {
         CATransaction.commit()
         caption.frame = CGRect(x: 8, y: rimRect.maxY + 12, width: bounds.width - 16, height: 18)
         caption.isHidden = !hasDevice
+        // The chips sit on the body's corners, where the rounded rim passes 45 degrees.
+        let corner = rimLayer.cornerRadius * 0.29
+        closeChip.frame = CGRect(x: rimRect.minX + corner - Self.chip / 2, y: rimRect.minY + corner - Self.chip / 2, width: Self.chip, height: Self.chip)
+        gripChip.frame = CGRect(x: rimRect.maxX - corner - Self.chip / 2, y: rimRect.maxY - corner - Self.chip / 2, width: Self.chip, height: Self.chip)
+        gripRect = gripChip.frame.insetBy(dx: -6, dy: -6)
         updateOutline()
+    }
+
+    private static let chip: CGFloat = 22
+
+    /// The close and resize chips: shown while the pointer is over an arrangeable device, or it is being arranged.
+    private func updateChips() {
+        let on = arrangeable && simulator != nil && (hovering || arranging != nil)
+        closeChip.toolTip = simulator.map { "Close \($0.name)" }
+        gripChip.toolTip = "Drag to resize"
+        for chip in [closeChip, gripChip] as [NSView] {
+            if on { chip.isHidden = false }
+            Design.animate(Design.snap, { chip.animator().alphaValue = on ? 1 : 0 }, done: { if !(self.arrangeable && (self.hovering || self.arranging != nil)) { chip.isHidden = true } })
+        }
+    }
+
+    @objc private func closeClicked() {
+        if let sim = simulator { arranger?.close(sim) }
+    }
+
+    @objc private func tidyClicked() { arranger?.tidy() }
+
+    // MARK: Arranging on the canvas
+
+    /// The view's size that holds a picture with this long side exactly, and where the picture's top left then is:
+    /// the inverse of `pictureRect`, so the canvas can size a device by its picture.
+    func cell(longSide: CGFloat) -> (size: CGSize, picture: CGPoint) {
+        let s = effectiveSize
+        let long = max(s.width, s.height)
+        guard long > 0 else { return (CGSize(width: longSide * 0.46 + 80, height: longSide + 102), CGPoint(x: 40, y: 36)) }
+        let pw = s.width * longSide / long, ph = s.height * longSide / long
+        let edge = 2 * (bezel(forShortSide: min(pw, ph)) + 3)
+        return (CGSize(width: (pw + edge + 56).rounded(.up), height: (ph + edge + 48 + 30).rounded(.up)), CGPoint(x: 28 + edge / 2, y: 24 + edge / 2))
+    }
+
+    /// The picture's long side as drawn now, and its place in this view.
+    var pictureLongSide: CGFloat { let r = pictureRect; return max(r.width, r.height) }
+    var pictureFrame: CGRect { pictureRect }
+
+    /// The smallest a picture may be made on the canvas: big enough to read the app and hit its controls, a
+    /// short side of at least 110 points and a long side of at least 240.
+    var minimumLongSide: CGFloat {
+        let s = effectiveSize
+        guard s.width > 0, s.height > 0 else { return 240 }
+        return max(240, 110 * max(s.width, s.height) / min(s.width, s.height))
+    }
+
+    private func cursor(at p: CGPoint) -> NSCursor {
+        guard arrangeable, !inspecting, simulator != nil else { return .arrow }
+        if arranging == .move { return .closedHand }
+        if arranging == .resize || gripRect.contains(p) {
+            if #available(macOS 15, *) { return .frameResize(position: .bottomRight, directions: .all) }
+            return .crosshair
+        }
+        if closeChip.frame.contains(p) || pictureRect.contains(p) { return .arrow }
+        return .openHand
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        cursor(at: convert(event.locationInWindow, from: nil)).set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover?(self, true)
+        arranger?.refreshHover()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover?(self, false)
+        arranger?.refreshHover()
+        if arranging == nil { NSCursor.arrow.set() }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard arrangeable, let sim = simulator, !pictureRect.contains(convert(event.locationInWindow, from: nil)) else { return nil }
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Close \(sim.name)", action: #selector(closeClicked), keyEquivalent: "").target = self
+        if arranger?.isArranged == true {
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Tidy Up", action: #selector(tidyClicked), keyEquivalent: "").target = self
+        }
+        return menu
     }
 
     /// The event's position as a fraction of the picture, clamped to it.
@@ -422,39 +539,63 @@ final class SimulatorView: NSView {
 
     private func updateTracking() {
         if let tracking { removeTrackingArea(tracking) }
-        // Entering and leaving always (the matrix wall runs the cell under the pointer at full rate); moves only
-        // while inspecting.
+        // Entering and leaving always (the matrix wall runs the cell under the pointer at full rate); moves and the
+        // cursor while inspecting or arranging.
         var options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect]
-        if inspecting { options.insert(.mouseMoved) } else { outlined = nil }
+        if inspecting || arrangeable { options.formUnion([.mouseMoved, .cursorUpdate]) }
         let t = NSTrackingArea(rect: .zero, options: options, owner: self)
         addTrackingArea(t)
         tracking = t
+        if !inspecting { outlined = nil }
+        if !arrangeable { hovering = false }
     }
 
     /// The pointer came onto the view (true) or left it (false).
     var onHover: ((SimulatorView, Bool) -> Void)?
-    override func mouseEntered(with event: NSEvent) { onHover?(self, true) }
-    override func mouseExited(with event: NSEvent) { onHover?(self, false) }
 
     private func point(_ event: NSEvent) {
         guard let f = fraction(event), let size = simulator?.deviceSize, pictureRect.contains(convert(event.locationInWindow, from: nil)) else { return }
         onPoint?(Int(f.x * size.width), Int(f.y * size.height))
     }
 
-    override func mouseMoved(with event: NSEvent) { if inspecting { point(event) } }
+    override func mouseMoved(with event: NSEvent) {
+        if inspecting { point(event); return }
+        if arrangeable {
+            if !hovering { arranger?.refreshHover() }
+            cursor(at: convert(event.locationInWindow, from: nil)).set()
+        }
+    }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         onSelect?(self)
         if inspecting { point(event); return }
-        guard pictureRect.contains(convert(event.locationInWindow, from: nil)) else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        if arrangeable { arranger?.raise(self) }
+        if arrangeable, let arranger, gripRect.contains(p) || !pictureRect.contains(p) {
+            arranging = gripRect.contains(p) ? .resize : .move
+            cursor(at: p).set()
+            arranger.beginArranging(self, at: event, resizing: arranging == .resize)
+            return
+        }
+        guard pictureRect.contains(p) else { return }
         touching = true
         touch("down", event)
     }
 
-    override func mouseDragged(with event: NSEvent) { if touching { touch("move", event) } }
+    override func mouseDragged(with event: NSEvent) {
+        if arranging != nil { arranger?.continueArranging(self, at: event); return }
+        if touching { touch("move", event) }
+    }
 
     override func mouseUp(with event: NSEvent) {
+        if arranging != nil {
+            arranging = nil
+            arranger?.endArranging(self)
+            cursor(at: convert(event.locationInWindow, from: nil)).set()
+            updateChips()
+            return
+        }
         if touching { touch("up", event); touching = false }
     }
 
@@ -492,4 +633,9 @@ final class SimulatorView: NSView {
     @objc func paste(_ sender: Any?) {
         if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty { emit(.text(text)) }
     }
+}
+
+/// An image that lets clicks through to the view under it (the resize grip: the device's view handles the drag).
+final class ChipImage: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

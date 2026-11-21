@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
+        arrangeCheckIfAsked()
         PrivacyCheck.runIfAsked(self)   // scripts/network-check.sh
         matrixCheckIfAsked()
         PerfCheck.runIfAsked(self)   // `--snapshots-check`, SnapshotCheck.swift
@@ -601,6 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(to(workbench: #selector(Workbench.appearance(_:)), "Switch Light and Dark", "A", [.command, .shift]))
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.toggleSideBySide(_:)), "Side by Side", "\\"))
+        device.addItem(to(workbench: #selector(Workbench.tidyUp(_:)), "Tidy Up Simulators", "\\", [.command, .option]))
         device.addItem(to(workbench: #selector(Workbench.toggleMirror(_:)), "Mirror Input", "M", [.command, .shift]))
         device.addItem(to(workbench: #selector(Workbench.toggleCompare(_:)), "Compare", "D", [.command, .shift]))
         device.addItem(to(workbench: #selector(Workbench.showMatrix(_:)), "Matrix Wall…", "x", [.command, .option]))
