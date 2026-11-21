@@ -1,6 +1,7 @@
 # Sessions: worktrees, builds and what changed
 
-A plan (2026-11-20). Nothing here is built yet.
+A plan (2026-11-20). W0 (the model and store, git, the sidebar section, switching, data slots, warm simulators,
+reload on a new build) is built; everything else here is not yet.
 
 ## Goal
 
@@ -89,7 +90,8 @@ under a size cap in Settings (default 5 GB), oldest first.
   and restarts; "Copy data from..." clones another session's slot (sign in once, branch from there).
 - **Staying warm**: the last 3 sessions' simulators stay alive (a setting; the memory figure from `Memory` shown
   beside it), the least recently used quits beyond that. Switching between warm ones is a selection, nothing more.
-- **Keyboard**: ⌃1-9 for the first nine, ⌃Tab for the last used, all rows in the ⌘K palette.
+- **Keyboard**: ⌘1-9 for the first nine, ⌥⌘Tab for the last used, all rows in the ⌘K palette. Command keys are never
+  sent to the device, so the keys the app under test may use (⌃1, ⌃Tab...) stay its own.
 - **A new build** of a session reloads its simulator in place (`DevHooks.relaunch`: same options, same data),
   whether or not it is the selected one. One FSEvents stream watches every session's outputs folder.
   This is one call site (the watcher's callback), where hot swap's swap -> recreate -> relaunch ladder plugs in when
