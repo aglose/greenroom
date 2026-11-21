@@ -2,8 +2,8 @@ import AppKit
 
 /// Which copy of Greenroom this is: the release, or the debug build that `scripts/bundle.sh --variant debug` makes to
 /// install beside it (Info.plist's `GreenroomVariant`). The debug copy has its own name, an orange icon and an orange
-/// line along the window's top, and its own state folder, so both can run at once without meeting: simulators, app data, recordings and the
-/// agent endpoint stay apart.
+/// line along the window's top, and its own state folder, so both can run at once without meeting: simulators, app
+/// data, recordings and the agent endpoint stay apart.
 enum Variant {
     static let isDebug = (Bundle.main.object(forInfoDictionaryKey: "GreenroomVariant") as? String) == "debug"
     /// The app's name in its menus and window.
