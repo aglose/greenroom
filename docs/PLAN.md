@@ -11,7 +11,7 @@ usable by an LLM agent as by a person. The app is **Greenroom**, in its own publ
 | 0. Spikes | S0 hardened runtime | S1 shared surfaces, S2 hot swap |
 | 1. App in a DMG | The app, icon, document types, bundling and signing of every binary, notarized and stapled images (0.1.0, 0.3.0, locally), CI, a release workflow, Sparkle updates (consent first, an appcast per release, `scripts/update-check.sh`) | A published GitHub release (the workflow's secrets are unset, so it has never run), training progress shown at first run, Install Command Line Tool |
 | 2. Workbench | Simulators in the app's window (on the H.264 stream), input, sidebar, toolbar, inspector (node list, pick by pointing), log panel, screenshot | Most device controls (see UI-PLAN.md), command palette, Gradle-folder watching, capture with a skin, the accessibility audit, hosted window mode and JSON/events in the engine (the stream and polling serve instead) |
-| 3. Agents | MCP served by the app behind a token, the stdio shim, 16 tools with stable references and change reports, annotated screenshots, checks, waits, logs, compare, a feed popover; a scripted session passes locally and in CI | A session with a real agent client, verification bundles, the matrix tool, network and gaps tools, a pause button, one-click setup |
+| 3. Agents | MCP served by the app behind a token, the stdio shim, 16 tools with stable references and change reports, annotated screenshots, checks, waits, logs, compare, a feed popover; a scripted session passes locally and in CI, a session with a real agent (Claude Code, Sonnet: 13 turns, 27 s, docs/AGENT-SESSION.md) | Verification bundles, the matrix tool, network and gaps tools, a pause button, one-click setup |
 | 4. Many at once | Side by side, mirrored input, Compare (content and pixels, in the window and as a tool) | Matrix wall, network and frame-timing differences, the HTML report, snapshot review, scenes |
 | 5. Time and tests | Recorder on/off, save a recording, open one in the engine's trace viewer | In-window timeline, network inspector, replay and bisect, test runner, crawl map |
 | 6. Hot swap, polish | | All of it |
@@ -19,7 +19,7 @@ usable by an LLM agent as by a person. The app is **Greenroom**, in its own publ
 
 The core that every later piece stands on (a signed app that runs APKs in its own window, drives them, and lets an
 agent do the same, privately) is in place. What is still owed to call the core complete: the engine with the control
-token bundled and released, the no-connections check, one real agent session, and a public release. The interface
+token bundled and released, the no-connections check and a public release. The interface
 is the next large piece: docs/UI-PLAN.md.
 
 Found on the way, in apksim: two launches started together (a first launch and the background training it starts)

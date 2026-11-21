@@ -203,7 +203,9 @@ final class AgentTools {
         first += " | \(now)"
         if let before, before != now { first += " (was \(before))" }
         let lines = change.lines()
-        return ([first] + (lines.isEmpty ? ["no change"] : lines)).joined(separator: "\n")
+        // Only the nodes are compared: a change of colours, pictures or layout alone (dark mode, say) is not text, and
+        // "no change" alone read as "it did not work" in a real agent session.
+        return ([first] + (lines.isEmpty ? ["no change in the screen's text (colours and pictures are not compared: screenshot shows them)"] : lines)).joined(separator: "\n")
     }
 
     private func act(_ sim: Simulator, _ commandLine: String, head: String) throws -> String {
