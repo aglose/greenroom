@@ -53,6 +53,18 @@ and that agent; Greenroom sends it nothing by itself.
 
 This file changes in the same commit as any change to what the app sends.
 
+## Claude Code's sessions
+
+If you turn on "Show my Claude Code sessions" in Settings (it is off until you do), Greenroom reads, on this Mac and
+only reads, Claude Code's own session files: `~/.claude/sessions`, the Claude app's `claude-code-sessions` folder, and
+the transcripts in `~/.claude/projects` touched in the last 30 days. A long transcript is read at its start and its
+last 32 KB only; a small one (64 KB or less) is read whole, into memory, and not kept. It checks whether the process
+named in a session file still exists (a signal-0 probe and its start time, nothing more). For a session whose folder
+is not in a repository you added, it runs `git` in that folder (read-only) to find the repository, and the
+repository's folder name is shown in the sidebar so you can add it. Titles and names are shown in the window and go
+nowhere: not into crash reports, engine reports or usage counts. With the switch off, none of those folders is
+opened and no process is probed.
+
 ## What stays on your Mac
 
 `~/Library/Application Support/Greenroom`, readable only by your user: the engine's caches, the data of the apps you

@@ -1,7 +1,7 @@
 import Foundation
 
 // The model of docs/SESSIONS-PLAN.md ("The model"). Later workstreams fill in what is stubbed here: `Recipe` (W2),
-// `Auto` (W3) and `ClaudeSession` (W1).
+// `Auto` (W3); `ClaudeSession` is in ClaudeSessions.swift (W1).
 
 /// A repository the person added.
 struct Workspace: Codable, Equatable {
@@ -41,13 +41,6 @@ struct Recipe: Codable, Equatable {
 
 enum Auto: String, Codable {
     case off, onBuild, onTurnEnd
-}
-
-/// What W1 reads of a Claude Code session. Every field is optional to the reader.
-struct ClaudeSession: Equatable {
-    var title: String?
-    var status: String?
-    var pullRequest: URL?
 }
 
 /// One row: a worktree of a workspace.

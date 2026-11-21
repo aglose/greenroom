@@ -58,7 +58,17 @@ final class SessionsController {
             self?.refresh()   // edits made elsewhere (dirty files) are not watched; looking again when the app is shown is enough
         }
         installBuilds()
+        let claude = ClaudeSessions.shared   // W1: Claude Code's sessions, behind the switch in Settings
+        claude.workspaceRoots = { [weak self] in self?.workspaces.map(\.root) ?? [] }
+        claude.onChange = { [weak self] in self?.applyClaude() }
+        claude.changedSwitch()
         refresh()
+    }
+
+    /// Hands every row its Claude session (or takes it away) without asking git again.
+    func applyClaude() {
+        sessions = ClaudeSessions.shared.attach(sessions)
+        onChange?()
     }
 
     /// Uses another store (the check's own, so a check never touches the person's workspaces).
@@ -157,7 +167,7 @@ final class SessionsController {
                 }
             }
             guard mine == self.generation else { return }
-            self.sessions = all
+            self.sessions = ClaudeSessions.shared.attach(all)
             self.watch(all)
             self.onChange?()
             if complete {
@@ -404,6 +414,7 @@ final class SessionsController {
         name.font = .systemFont(ofSize: 13)
         name.lineBreakMode = .byTruncatingMiddle
         var detail = [s.shortHead]
+        if s.claude?.title != nil, let b = s.branch { detail.insert(b, at: 0) }   // the title took the branch's place
         if let built = s.builtAt { detail.append(Self.age(built)) }
         if s.ahead > 0 { detail.append("\(s.ahead) ahead") }
         if s.dirty { detail.append("edited") }
@@ -418,6 +429,7 @@ final class SessionsController {
         text.spacing = 0
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         var views: [NSView] = [icon, text]
+        if let dot = ClaudeUI.dot(for: s.claude) { views.append(dot) }
         if s.builtAt == nil || s.isStale {
             let badge = NSTextField(labelWithString: s.builtAt == nil ? "no build" : "stale")
             badge.font = .systemFont(ofSize: 9, weight: .semibold)
