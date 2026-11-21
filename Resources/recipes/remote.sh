@@ -180,7 +180,9 @@ rm -rf src
 mkdir src
 tar -xf src.tar -C src
 if [ -s changes.patch ]; then
-  (cd src && git apply --whitespace=nowarn ../changes.patch)
+  # The ceiling keeps git from finding a repository around src (a home folder kept in git): inside one, git apply
+  # takes the patch's paths from that repository's top and silently skips every file.
+  (cd src && GIT_CEILING_DIRECTORIES="$(cd .. && pwd -P)" git apply --whitespace=nowarn ../changes.patch)
   echo "applied the uncommitted changes"
 fi
 if [ -f untracked.tar ]; then
