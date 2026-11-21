@@ -130,11 +130,12 @@ Each phase ends in something shippable. Sizes are rough working days for one foc
   CPU 22-26% against 29-32%. Use Mach rights (or IOSurfaceCreateXPCObject), not global IDs, which any process of the
   user can look up. A real version needs a release/ack before a surface is reused, nothing that can block the raster
   thread, a resend for a late host, a windowed instance sharing its own surfaces, and a check of the sender.
-  On the host's screen (`surfaceshow`: a window whose display link blits the newest frame's IOSurface into a
-  CAMetalLayer, timed to the drawable's `presentedTime`), the shared frame reaches the glass 0.5-1 refresh sooner than
-  H.264 (p50 59.8 against 68-77 ms); the display ran at 60 Hz, not 120 (ProMotion's choice with the Mac unattended),
-  so repeat it at 120 Hz. The other ~40 ms is the window's own commit-to-glass (2 drawables and WindowServer's
-  compositing), the same for both paths: the host's presentation is the next latency to work on.
+  On the host's screen (`surfaceshow`), with each IOSurface shown as a plain `CALayer`'s contents at the window's
+  display link (as apksim's own window does; no copy, no GPU work in the host), every frame is committed at 120 Hz
+  and lands in the refresh 4.3-4.4 ms after the instance presents it, against 13-20 ms (one to two refreshes later)
+  for H.264, at 1.7% host CPU against 3.8-4.9%. Shown through a `CAMetalLayer` the window stayed at 60 Hz with ~40 ms
+  of its own to the glass, so the host's view should be a plain layer, not Metal. Feeding the host's vsync back to the
+  instance would take most of the remaining 4 ms (half a refresh of phase).
 - **S2 hot swap: done 2026-11-20 (apksim draft pull request 586, `docs/spike-s2-hot-swap.md` there).** JVMTI
   RedefineClasses from inside the instance (capability requested at the first swap, so warm launches work). JDK 24
   verifies redefined classes, and translated classes have no stack map frames: computing them with ASM fixes it
