@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<!-- Greenroom's icon: a phone on stage in a beam of light, connected from the wings to a terminal (Claude Code).
+     Drawn on a 180-unit plate placed on Apple's icon grid (824 inside 1024). scripts/make-icon.swift renders it. -->
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0e2c21"/><stop offset="1" stop-color="#030f09"/></linearGradient>
+<linearGradient id="cone" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff6d6" stop-opacity=".6"/><stop offset="1" stop-color="#fff6d6" stop-opacity=".05"/></linearGradient>
+<radialGradient id="pool" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffefb8" stop-opacity=".8"/><stop offset="1" stop-color="#ffefb8" stop-opacity="0"/></radialGradient>
+<linearGradient id="scr" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c9f7da"/><stop offset="1" stop-color="#5fcf8f"/></linearGradient>
+<linearGradient id="wire" gradientUnits="userSpaceOnUse" x1="40" y1="0" x2="66" y2="0"><stop offset="0" stop-color="#ff9d5c"/><stop offset="1" stop-color="#ffd2a8"/></linearGradient>
+<filter id="blur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="3"/></filter>
+<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.4"/></filter>
+<filter id="shadow" x="-10%" y="-10%" width="120%" height="125%"><feDropShadow dx="0" dy="2.2" stdDeviation="2.6" flood-color="#000" flood-opacity=".3"/></filter>
+<clipPath id="plate"><rect width="180" height="180" rx="40"/></clipPath>
+</defs>
+<g transform="translate(100 100) scale(4.5778)">
+<rect width="180" height="180" rx="40" fill="#030f09" filter="url(#shadow)"/>
+<g clip-path="url(#plate)">
+<rect width="180" height="180" fill="url(#bg)"/>
+<path d="M0 140 H180 V180 H0Z" fill="#0b1d16"/>
+<path d="M0 148 H180 M0 158 H180 M0 170 H180" stroke="#132b21" stroke-width="1"/>
+<polygon points="74,-12 106,-12 152,150 28,150" fill="url(#cone)" filter="url(#blur)"/>
+<g stroke="#fff6d6" stroke-linecap="round" filter="url(#glow)">
+<path d="M84 -8 L52.8 150" stroke-width="3" opacity=".22"/>
+<path d="M90 -8 L90 150" stroke-width="4" opacity=".18"/>
+<path d="M96 -8 L127.2 150" stroke-width="3" opacity=".22"/>
+</g>
+<ellipse cx="90" cy="-2" rx="30" ry="10" fill="#fffbe8" opacity=".55" filter="url(#blur)"/>
+<ellipse cx="90" cy="150" rx="62" ry="13" fill="url(#pool)"/>
+<rect x="67" y="62" width="46" height="86" rx="9" fill="#050807" stroke="#3b4441" stroke-width="1"/>
+<rect x="71" y="66" width="38" height="78" rx="6" fill="url(#scr)"/>
+<path d="M71 72 Q71 66 77 66 L100 66 L76 120 L71 120Z" fill="#fff" opacity=".18"/>
+<ellipse cx="90" cy="149" rx="26" ry="3" fill="#000" opacity=".5"/>
+<rect x="10" y="94" width="30" height="22" rx="4" fill="#1b1f1e" stroke="#ff9d5c" stroke-width="1.2"/>
+<path d="M16 101 L21 105 L16 109" fill="none" stroke="#ffb27a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M24 110 H32" stroke="#ffb27a" stroke-width="2" stroke-linecap="round"/>
+<path d="M40 105 C52 105 54 104 66 104" fill="none" stroke="#ff8a4c" stroke-width="6" opacity=".55" filter="url(#glow)"/>
+<path d="M40 105 C52 105 54 104 66 104" fill="none" stroke="url(#wire)" stroke-width="2.2" stroke-linecap="round"/>
+<rect x="62" y="100" width="6" height="8" rx="1.5" fill="#ffb27a"/>
+</g>
+</g>
+</svg>
