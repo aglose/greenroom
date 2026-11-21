@@ -21,20 +21,29 @@ final class Recorder {
     struct Chapter: Codable { let t: Double; let title: String }
 
     let simulator: Simulator
-    private(set) var isRecording = false
+    /// Called on the main thread when the recording ended by itself: the engine quit, the disk failed. `reason` says
+    /// why; the files are those that were finished. Not called after an ordinary `stop`.
+    var onEnded: (([URL], String) -> Void)?
     /// Called on the main thread when recording starts or ends.
     static let didChange = Notification.Name("GreenroomRecorderDidChange")
 
+    private let lock = NSLock()
+    private var recording = false
+    var isRecording: Bool { lock.lock(); defer { lock.unlock() }; return recording }
+    private func setRecording(_ on: Bool) { lock.lock(); recording = on; lock.unlock() }
+
+    // Everything below is touched on `queue` only.
     private let queue = DispatchQueue(label: "greenroom-recorder")
-    private var live: Segment?              // queue only
-    private var finished: [URL] = []        // queue only
-    private var chapters: [(title: String, at: Double)] = []   // queue only; `at` is seconds into the whole recording
-    private var base: URL?                  // the requested file, without .mp4
+    private var stopped = true              // set by stop and by a failure; `take` ignores samples once it is
+    private var live: Segment?
+    private var finished: [URL] = []
+    private var chapters: [(title: String, at: Double)] = []   // `at` is seconds into the whole recording
+    private var base: URL?
     private var segmentNumber = 0
     private var lastPTS: CMTime = .invalid  // stream time of the newest sample
     private var lastArrival: Double = 0     // uptime when it arrived
     private var originPTS: CMTime = .invalid // stream time of the first sample of the whole recording
-    private var wantKeyframe: DispatchSourceTimer?
+    private var keyTimer: DispatchSourceTimer?
 
     init(simulator: Simulator) { self.simulator = simulator }
 
@@ -56,25 +65,27 @@ final class Recorder {
     func start(to url: URL) -> Bool {
         guard !isRecording else { return false }
         do { try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true) } catch { return false }
-        isRecording = true
+        setRecording(true)
         queue.sync {
             base = url.deletingPathExtension()
             live = nil; finished = []; chapters = []; segmentNumber = 0
             lastPTS = .invalid; originPTS = .invalid
+            stopped = false
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now(), repeating: 0.5)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                // Until the first keyframe is in, keep asking.
+                if self.live != nil { self.keyTimer?.cancel(); self.keyTimer = nil }
+                else if !self.stopped { DispatchQueue.main.async { self.streamMustBeOn() } }
+            }
+            keyTimer = timer
+            timer.resume()
         }
         simulator.sampleTap = { [weak self] sample in
             let arrival = ProcessInfo.processInfo.systemUptime
             self?.queue.async { self?.take(sample, arrival: arrival) }
         }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: 0.5)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            // Until the first keyframe is in, keep asking.
-            if self.live == nil { DispatchQueue.main.async { self.streamMustBeOn() } } else { self.wantKeyframe?.cancel(); self.wantKeyframe = nil }
-        }
-        wantKeyframe = timer
-        timer.resume()
         NotificationCenter.default.post(name: Self.didChange, object: simulator)
         return true
     }
@@ -90,18 +101,43 @@ final class Recorder {
     /// ever arrived).
     func stop(completion: @escaping ([URL]) -> Void) {
         guard isRecording else { completion([]); return }
-        isRecording = false
-        simulator.sampleTap = nil
-        wantKeyframe?.cancel(); wantKeyframe = nil
         let now = ProcessInfo.processInfo.systemUptime
         queue.async { [self] in
-            let end = streamTime(at: now)
-            closeSegment(at: end, last: true)
-            let files = finished
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: Self.didChange, object: self.simulator)
-                completion(files)
-            }
+            let files = finish(at: now)
+            DispatchQueue.main.async { self.announceEnd(); completion(files) }
+        }
+    }
+
+    /// The same, answering when it is done, without the main queue (the app is quitting or closing the simulator).
+    /// Never from the recorder's own queue.
+    @discardableResult
+    func stopAndWait() -> [URL] {
+        guard isRecording else { return [] }
+        let now = ProcessInfo.processInfo.systemUptime
+        let files = queue.sync { finish(at: now) }
+        if Thread.isMainThread { announceEnd() } else { DispatchQueue.main.async { self.announceEnd() } }
+        return files
+    }
+
+    private func announceEnd() { NotificationCenter.default.post(name: Self.didChange, object: simulator) }
+
+    /// On the queue: stop taking samples, hold the last picture to `uptime`, close the file.
+    private func finish(at uptime: Double) -> [URL] {
+        stopped = true
+        setRecording(false)
+        simulator.sampleTap = nil
+        keyTimer?.cancel(); keyTimer = nil
+        closeSegment(at: streamTime(at: uptime), last: true)
+        return finished
+    }
+
+    /// On the queue: the recording cannot go on (the disk failed, a file would not open). What was written stays.
+    private func fail(_ reason: String) {
+        guard !stopped else { return }
+        let files = finish(at: ProcessInfo.processInfo.systemUptime)
+        DispatchQueue.main.async { [self] in
+            announceEnd()
+            onEnded?(files, reason)
         }
     }
 
@@ -122,7 +158,7 @@ final class Recorder {
     // MARK: Samples (queue)
 
     private func take(_ sample: CMSampleBuffer, arrival: Double) {
-        guard let desc = CMSampleBufferGetFormatDescription(sample) else { return }
+        guard !stopped, let desc = CMSampleBufferGetFormatDescription(sample) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         guard pts.isValid else { return }
         let isKey = Self.isSync(sample)
@@ -134,14 +170,15 @@ final class Recorder {
                 // A new size: only a keyframe may begin the continuation. The old file holds its last picture to here.
                 guard isKey else { simulatorAsksKey(); return }
                 closeSegment(at: pts)
-                openSegment(first: sample, desc: desc, pts: pts)
+                guard openSegment(first: sample, desc: desc, pts: pts) else { return }
             } else {
                 seg.append(sample, pts: pts)
+                if let why = seg.failure { return fail(why) }
             }
         } else {
             guard isKey else { return }   // wait for a keyframe
             if !originPTS.isValid { originPTS = pts }
-            openSegment(first: sample, desc: desc, pts: pts)
+            guard openSegment(first: sample, desc: desc, pts: pts) else { return }
         }
         lastPTS = pts
         lastArrival = arrival
@@ -149,14 +186,19 @@ final class Recorder {
 
     private func simulatorAsksKey() { DispatchQueue.main.async { self.streamMustBeOn() } }
 
-    private func openSegment(first: CMSampleBuffer, desc: CMFormatDescription, pts: CMTime) {
-        guard let base else { return }
+    @discardableResult
+    private func openSegment(first: CMSampleBuffer, desc: CMFormatDescription, pts: CMTime) -> Bool {
+        guard let base else { return false }
         segmentNumber += 1
         let name = segmentNumber == 1 ? base : URL(fileURLWithPath: base.path + "-\(segmentNumber)")
         guard let seg = Segment(target: name.appendingPathExtension("mp4"), desc: desc, firstPTS: pts,
-                                offset: originPTS.isValid ? CMTimeSubtract(pts, originPTS).seconds : 0) else { return }
+                                offset: originPTS.isValid ? CMTimeSubtract(pts, originPTS).seconds : 0) else {
+            fail("The video file could not be started in \(name.deletingLastPathComponent().lastPathComponent)")
+            return false
+        }
         live = seg
         seg.append(first, pts: pts)
+        return true
     }
 
     /// Ends the open file with its last picture held up to `end` (stream time), and writes its chapters.
@@ -196,6 +238,8 @@ final class Recorder {
         private var backlog: [CMSampleBuffer] = []   // the writer was not ready: waiting, in order
         private(set) var lastPTS: CMTime
         private(set) var count = 0
+        /// Why the writer failed (the disk is full, the folder went), or the backlog grew past what a disk keeps up with.
+        private(set) var failure: String?
 
         init?(target: URL, desc: CMFormatDescription, firstPTS: CMTime, offset: Double) {
             self.target = target
@@ -232,6 +276,12 @@ final class Recorder {
         }
 
         private func drain() {
+            if writer.status == .failed {
+                backlog.removeAll()
+                failure = failure ?? (writer.error?.localizedDescription ?? "The video file could not be written")
+                return
+            }
+            if backlog.count > 900 { backlog.removeAll(); failure = "The disk could not keep up with the video"; return }
             while let next = backlog.first, input.isReadyForMoreMediaData, writer.status == .writing {
                 input.append(next)
                 backlog.removeFirst()
@@ -241,6 +291,11 @@ final class Recorder {
 
         /// Writes the held picture up to `end`, finishes and renames the file. Nil when nothing was written.
         func finish(endingAt end: CMTime) -> URL? {
+            guard failure == nil, writer.status == .writing else {
+                if writer.status == .writing { writer.cancelWriting() }
+                try? FileManager.default.removeItem(at: part)
+                return nil
+            }
             if let h = held {
                 let tail = CMTimeSubtract(end.isValid ? end : h.pts, h.pts)
                 write(h.sample, pts: h.pts, duration: CMTimeMaximum(tail, CMTime(value: 1, timescale: 30)))
@@ -249,6 +304,11 @@ final class Recorder {
             // The writer takes what it can; wait (bounded) for the rest.
             let deadline = Date().addingTimeInterval(5)
             while !backlog.isEmpty, Date() < deadline { drain(); if !backlog.isEmpty { Thread.sleep(forTimeInterval: 0.01) } }
+            guard failure == nil, writer.status == .writing else {
+                writer.cancelWriting()
+                try? FileManager.default.removeItem(at: part)
+                return nil
+            }
             input.markAsFinished()
             writer.endSession(atSourceTime: CMTimeSubtract(CMTimeMaximum(end.isValid ? end : lastPTS, lastPTS), firstPTS))
             let done = DispatchSemaphore(value: 0)
@@ -267,10 +327,22 @@ final class Recorder {
 
 // MARK: - In the app: File > Record Screen
 
-/// The recorders the person started, one per simulator, and where their files go.
+/// The recorders the person started, one per simulator, and where their files go. Main thread only.
 final class ScreenRecording {
     static let shared = ScreenRecording()
     private var running: [ObjectIdentifier: Recorder] = [:]
+    private var counter = 0
+    /// Told (main thread) when a recording ended by itself: the simulator quit, the disk failed.
+    var onEndedByItself: ((Simulator, [URL], String) -> Void)?
+
+    private init() {
+        // The engine ending: the recording stops there, its last picture held only to that moment.
+        NotificationCenter.default.addObserver(forName: Simulator.stateChanged, object: nil, queue: .main) { [weak self] note in
+            guard let self, let sim = note.object as? Simulator, !sim.isAlive,
+                  let r = self.running.removeValue(forKey: ObjectIdentifier(sim)) else { return }
+            r.stop { files in self.onEndedByItself?(sim, files, "The simulator quit, so the recording ended there") }
+        }
+    }
 
     func recorder(for sim: Simulator) -> Recorder? { running[ObjectIdentifier(sim)] }
 
@@ -283,19 +355,33 @@ final class ScreenRecording {
         return store.root.appendingPathComponent("recordings-video", isDirectory: true)
     }
 
+    /// A file name that no other recording of the same second can have (two simulators of one build share a
+    /// folder): a counter, and a check against what is on disk.
     func newFile(for sim: Simulator, in wb: Workbench, prefix: String = "screen") -> URL {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
         f.locale = Locale(identifier: "en_US_POSIX")
-        return folder(for: sim, in: wb).appendingPathComponent("\(prefix)-\(f.string(from: Date())).mp4")
+        let dir = folder(for: sim, in: wb)
+        while true {
+            counter += 1
+            let url = dir.appendingPathComponent("\(prefix)-\(f.string(from: Date()))-\(counter).mp4")
+            let taken = [url.path, url.path + ".part"].contains { FileManager.default.fileExists(atPath: $0) }
+            if !taken { return url }
+        }
     }
 
     @discardableResult
     func start(_ sim: Simulator, to url: URL) -> Recorder? {
         guard running[ObjectIdentifier(sim)] == nil else { return nil }
         let r = Recorder(simulator: sim)
+        let key = ObjectIdentifier(sim)
+        r.onEnded = { [weak self, weak r] files, reason in
+            guard let self, self.running[key] === r else { return }
+            self.running[key] = nil
+            self.onEndedByItself?(sim, files, reason)
+        }
         guard r.start(to: url) else { return nil }
-        running[ObjectIdentifier(sim)] = r
+        running[key] = r
         return r
     }
 
@@ -304,11 +390,17 @@ final class ScreenRecording {
         r.stop(completion: completion)
     }
 
-    /// Finishes every recording (the app is quitting).
+    /// Finishes a simulator's recording and waits for the file (the simulator is being closed).
+    func finishSync(_ sim: Simulator) {
+        guard let r = running.removeValue(forKey: ObjectIdentifier(sim)) else { return }
+        r.stopAndWait()
+    }
+
+    /// Finishes every recording and waits (the app is quitting). Never waits on the main queue.
     func stopAll() {
         let all = Array(running.values)
         running.removeAll()
-        for r in all { let s = DispatchSemaphore(value: 0); r.stop { _ in s.signal() }; _ = s.wait(timeout: .now() + 10) }
+        for r in all { r.stopAndWait() }
     }
 }
 
@@ -317,6 +409,11 @@ extension Workbench {
     @objc func toggleScreenRecording(_ sender: Any?) {
         guard let sim = selected else { toast.show("Open a simulator to record it", problem: true); return }
         let rec = ScreenRecording.shared
+        rec.onEndedByItself = { [weak self] sim, files, reason in
+            guard let self else { return }
+            if files.isEmpty { self.toast.show(reason, problem: true) }
+            else { self.toast.show(reason, action: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(files) } }
+        }
         if rec.recorder(for: sim) != nil {
             rec.stop(sim) { [weak self] files in
                 guard let self else { return }

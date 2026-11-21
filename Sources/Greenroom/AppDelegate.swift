@@ -569,6 +569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TestRun.terminateAll()
         workbench.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
         ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
+        ScreenRecording.shared.stopAll()   // recordings end as finished files
         Engine.shared.stopAll()
     }
 
@@ -677,6 +678,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         i.target = self
         i.representedObject = NSStringFromSelector(action)
         return i
+    }
+
+    /// The Record Screen item reads "Stop Recording" while the selected simulator is being recorded.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.representedObject as? String == "toggleScreenRecording:" {
+            item.title = Recorder.isRecording(workbench.selected) ? "Stop Recording Screen" : "Record Screen"
+        }
+        return true
     }
 
     @objc private func forward(_ sender: NSMenuItem) {

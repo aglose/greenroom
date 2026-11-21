@@ -94,9 +94,12 @@ final class SimulatorView: NSView {
     private var morphOnce = false
     private var lastSize = CGSize.zero
 
+    private var recorderObserver: NSObjectProtocol?
+    deinit { if let o = recorderObserver { NotificationCenter.default.removeObserver(o) } }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
-        NotificationCenter.default.addObserver(forName: Recorder.didChange, object: nil, queue: .main) { [weak self] _ in self?.updateCaption() }
+        recorderObserver = NotificationCenter.default.addObserver(forName: Recorder.didChange, object: nil, queue: .main) { [weak self] _ in self?.updateCaption() }
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         display.videoGravity = .resizeAspect

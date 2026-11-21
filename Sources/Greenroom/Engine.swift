@@ -150,6 +150,7 @@ final class Engine {
     private(set) var closing: [Simulator] = []
 
     func close(_ sim: Simulator) {
+        ScreenRecording.shared.finishSync(sim)   // a recording of it ends here, as a finished file
         sim.quit()
         simulators.removeAll { $0 === sim }
         closing.append(sim)
