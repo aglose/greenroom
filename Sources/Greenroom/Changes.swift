@@ -439,6 +439,22 @@ final class ChangeTour {
     /// Quits every running tour's simulators and removes their data slots and logs (the app is quitting). Bounded.
     static func quitAll() {
         for t in active { t.cancelled = true; t.teardown(wait: true) }
+        pendingLock.lock(); let left = pendingLogs; pendingLogs = []; pendingLock.unlock()
+        for f in left { try? FileManager.default.removeItem(at: f) }   // a finished tour's cleanup the quit overtook
+    }
+
+    /// Logs of simulators that were quit and whose process has not yet been seen to exit: removed then, or at quit.
+    private static var pendingLogs: Set<URL> = []
+    private static let pendingLock = NSLock()
+
+    /// Removes tour logs nothing owns: a crash or a quit that overtook a cleanup left them (older than ten minutes, not a running tour's).
+    static func sweepLogs() {
+        let mine = Set(active.flatMap(\.logs))
+        let dir = Engine.shared.logs
+        for f in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] where f.lastPathComponent.hasPrefix("tour-") && !mine.contains(f) {
+            let d = (try? f.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            if Date().timeIntervalSince(d) > 600 { try? FileManager.default.removeItem(at: f) }
+        }
     }
 
     /// The screens a tour visits, the first 12 that are new or changed.
@@ -458,6 +474,7 @@ final class ChangeTour {
         isRunning = true
         cancelled = false
         _ = Self.quitObserver
+        Self.sweepLogs()
         Self.active.append(self)
         Task { @MainActor in
             let outcome = await self.run(set: set, head: head, base: base, baseOptions: baseOptions, progress: progress)
@@ -494,11 +511,13 @@ final class ChangeTour {
     private func teardown(wait: Bool = false) {
         let all = sims, names = slots, files = logs, root = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
         sims = []; slots = []; logs = []
+        Self.pendingLock.lock(); files.forEach { Self.pendingLogs.insert($0) }; Self.pendingLock.unlock()
         for s in all { s.quit() }
         let finish = {
             for s in all { s.waitUntilExit() }
             for n in names { SlotClone.remove(n, in: root) }
             for f in files { try? FileManager.default.removeItem(at: f) }
+            Self.pendingLock.lock(); files.forEach { Self.pendingLogs.remove($0) }; Self.pendingLock.unlock()
         }
         if wait {
             finish()   // the app is quitting: Simulator.quit ends a process that ignores "quit" after 3 s

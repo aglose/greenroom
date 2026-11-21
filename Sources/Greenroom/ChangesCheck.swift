@@ -86,6 +86,8 @@ enum ChangesCheck {
                 try? fm.removeItem(at: old)
             }
             try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+            // The engine's state folder is kept between runs: logs an earlier run left are not this run's to count.
+            for f in (try? fm.contentsOfDirectory(at: Engine.shared.logs, includingPropertiesForKeys: nil)) ?? [] where f.lastPathComponent.hasPrefix("tour-") { try? fm.removeItem(at: f) }
             expect(Engine.shared.state.path.hasPrefix(base.path + "/"), "the check runs on a state folder of its own (\(Engine.shared.state.lastPathComponent))")
 
             // A repository with a worktree on its own branch, one commit ahead of main.
@@ -294,6 +296,8 @@ enum ChangesCheck {
                 expect(reset, "reopening after a rebuild drops the old comparison and compares the new build (\(sheet.stateTitleText))")
             } else { expect(false, "a third build could be filed") }
 
+            let lastLogs = await wait("the last tour's logs to go", 20) { ((try? fm.contentsOfDirectory(atPath: Engine.shared.logs.path)) ?? []).allSatisfy { !$0.hasPrefix("tour-") } }
+            expect(lastLogs, "the last tour's logs are gone too, so none is left for the next run")
             let leftovers = hidden()
             expect(leftovers == 0 && crawlers() == 0, "no hidden simulator or crawler is left running (\(leftovers))")
             finish()
