@@ -158,7 +158,7 @@ def sessions_mode():
 
 if "--sessions" in sys.argv:
     sessions_mode()
-state = os.path.expanduser("~/Library/Application Support/Greenroom/agent.json")
+state = (os.environ.get("GREENROOM_STATE") or os.path.expanduser("~/Library/Application Support/Greenroom")) + "/agent.json"   # GREENROOM_STATE: a state folder of its own
 def running_pid():
     try:
         pid = json.load(open(state))["pid"]
