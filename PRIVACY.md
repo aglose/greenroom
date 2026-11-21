@@ -19,8 +19,26 @@ would: your IP address, and which Greenroom version asked. An update it download
 signed with the project's update key, or by the same developer as the copy you have (Sparkle accepts either). Settings > Updates turns the
 checks off.
 
-There is no analytics and no crash reporting in this version, and the engine's one download (a test app it trains its
-startup cache with) ships inside the app instead.
+**Crash reports and usage statistics, if you turn them on.** Both are off until you choose: Greenroom asks once,
+shortly after its first launch, and closing the question leaves them off. Settings > Privacy turns each on or off and
+shows, word for word, every report waiting to be sent. A report holds only:
+
+- Greenroom's version and build, the engine's version, macOS's version and the day (no time of day, no identifier of
+  your Mac or of you);
+- a crash report: the signal and the addresses in Greenroom's own code where it crashed (no system or app frames,
+  no memory);
+- an engine report: the exit status of a simulator's engine when it ends in a way that points at the engine (never
+  when the Android app itself crashes, and never its log or stack, which would name the app's code);
+- usage: a count per day of how often each Greenroom feature was used (opened the network pane, took a screenshot),
+  from a fixed list of Greenroom's features.
+
+Never anything from an APK: its file name or path, package name, classes, resources, screens, recordings, logs or
+traffic cannot enter a report, because a report has no field that could hold them. Reports are sent with no cookies
+and no stored credentials. This version has no address to send them to: turned on, they wait in
+`~/Library/Application Support/Greenroom/reports` (50 at most), and this file will say where they go before any
+version sends them.
+
+The engine's one download (a test app it trains its startup cache with) ships inside the app instead.
 
 Network traffic you will see otherwise comes from the Android app you are running, which reaches the network as it
 would on a phone.
@@ -31,13 +49,6 @@ If you connect a coding agent ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.
 of the apps you run and acts on them, on this Mac, through a connection only programs running as you can open (a
 token in a file only you can read; web pages are refused). What the agent's own provider receives is between you
 and that agent; Greenroom sends it nothing by itself.
-
-## What will be added, and how
-
-- **Crash reports and usage analytics**, opt-in: off until you turn them on, asked once, changeable in Settings.
-  A report will hold Greenroom's own state only (app and macOS version, a stack trace cut to Greenroom's and the
-  engine's own code, which feature was in use) and never anything from an APK, as listed above. Settings will show
-  the exact report before the first one is sent.
 
 This file changes in the same commit as any change to what the app sends.
 
@@ -57,3 +68,5 @@ CI checks it on every change: `scripts/network-check.sh` captures every packet l
 process that sent it (or asked for the DNS lookup), while the app launches the engine, trains its startup cache,
 streams a simulator, serves an agent and shows every pane, with updates not yet agreed to, and fails if one came from
 Greenroom or its engine. You can run it yourself (`sudo -v && scripts/network-check.sh`).
+
+`scripts/reports-check.sh` shows every kind of report and checks what it holds.

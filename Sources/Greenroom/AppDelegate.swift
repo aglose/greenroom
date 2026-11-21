@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Updates.shared.start()
+        Reports.shared.start()
         buildMenus()
         workbench = Workbench()
         workbench.window.makeKeyAndOrderFront(nil)
@@ -17,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         term.setEventHandler { NSApp.terminate(nil) }
         term.resume()
         termSource = term
+        ReportsCheck.runIfAsked()
+        askAboutReportsIfDue()
         windowShotIfAsked()
         compareCheckIfAsked()
         inspectCheckIfAsked()
@@ -523,6 +526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        Reports.shared.saveUsage()
         agent.stop()
         TestRun.terminateAll()
         ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
@@ -637,6 +641,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings(_ sender: Any?) { SettingsWindow.shared.show() }
+
+
+    /// Asked once, a few seconds after the first ordinary launch; dismissed, everything stays off.
+    private func askAboutReportsIfDue() {
+        let args = CommandLine.arguments
+        guard !Reports.shared.asked, !args.contains(where: { $0.hasPrefix("--") }) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [self] in
+            guard !Reports.shared.asked else { return }
+            let window: NSWindow = workbench.window
+            Reports.shared.asked = true
+            let alert = NSAlert()
+            alert.messageText = "Help improve Greenroom?"
+            alert.informativeText = """
+                Greenroom can send crash reports of its own and a daily count of which of its features you used. \
+                Never anything from your APKs: no names, paths, screens, logs or traffic. Off unless you choose it; \
+                Settings > Privacy shows each report before it goes and turns this off again.
+                """
+            alert.addButton(withTitle: "Send Crash Reports and Usage")
+            alert.addButton(withTitle: "Crash Reports Only")
+            alert.addButton(withTitle: "Don't Send")
+            alert.beginSheetModal(for: window) { answer in
+                Reports.shared.crashes = answer == .alertFirstButtonReturn || answer == .alertSecondButtonReturn
+                Reports.shared.usage = answer == .alertFirstButtonReturn
+            }
+        }
+    }
 
     private func item(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
