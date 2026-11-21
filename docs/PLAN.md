@@ -8,10 +8,10 @@ usable by an LLM agent as by a person. The app is **Greenroom**, in its own publ
 
 | Phase | Done | Not done |
 | --- | --- | --- |
-| 0. Spikes | S0 hardened runtime | S1 shared surfaces, S2 hot swap |
+| 0. Spikes | S0 hardened runtime, S1 shared surfaces and S2 hot swap (results below; prototypes in apksim draft pull requests 585 and 586) | |
 | 1. App in a DMG | The app, icon, document types, bundling and signing of every binary, notarized and stapled images (0.1.0, 0.3.0, locally), CI, a release workflow, Sparkle updates (consent first, an appcast per release, `scripts/update-check.sh`) | A published GitHub release (the workflow's secrets are unset, so it has never run), training progress shown at first run, Install Command Line Tool |
 | 2. Workbench | Simulators in the app's window (on the H.264 stream), input, sidebar, toolbar, inspector (node list, pick by pointing), log panel, screenshot | Most device controls (see UI-PLAN.md), command palette, Gradle-folder watching, capture with a skin, the accessibility audit, hosted window mode and JSON/events in the engine (the stream and polling serve instead) |
-| 3. Agents | MCP served by the app behind a token, the stdio shim, 16 tools with stable references and change reports, annotated screenshots, checks, waits, logs, compare, a feed popover; a scripted session passes locally and in CI | A session with a real agent client, verification bundles, the matrix tool, network and gaps tools, a pause button, one-click setup |
+| 3. Agents | MCP served by the app behind a token, the stdio shim, 16 tools with stable references and change reports, annotated screenshots, checks, waits, logs, compare, a feed popover; a scripted session passes locally and in CI, a session with a real agent (Claude Code, Sonnet: 13 turns, 27 s, docs/AGENT-SESSION.md) | Verification bundles, the matrix tool, network and gaps tools, a pause button, one-click setup |
 | 4. Many at once | Side by side, mirrored input, Compare (content and pixels, in the window and as a tool) | Matrix wall, network and frame-timing differences, the HTML report, snapshot review, scenes |
 | 5. Time and tests | Recorder on/off, save a recording, open one in the engine's trace viewer | In-window timeline, network inspector, replay and bisect, test runner, crawl map |
 | 6. Hot swap, polish | | All of it |
@@ -19,7 +19,7 @@ usable by an LLM agent as by a person. The app is **Greenroom**, in its own publ
 
 The core that every later piece stands on (a signed app that runs APKs in its own window, drives them, and lets an
 agent do the same, privately) is in place. What is still owed to call the core complete: the engine with the control
-token bundled and released, the no-connections check, one real agent session, and a public release. The interface
+token bundled and released, the no-connections check and a public release. The interface
 is the next large piece: docs/UI-PLAN.md.
 
 Found on the way, in apksim: two launches started together (a first launch and the background training it starts)
@@ -121,10 +121,22 @@ Each phase ends in something shippable. Sizes are rough working days for one foc
   that anyway. Warm launches through a standby time the same on the re-signed and the original tree. Not tested:
   a Developer ID identity (the Mac has only a development one; the kernel's rules are the same), beam's sandbox, the
   AOT cache trained on a re-signed tree, the owner's app, allow-jit dropped.
-- **S1 shared surface.** 200-line prototype: headless instance exports its surfaces, a stub app shows them; measure
-  present-to-screen latency against the H.264 path at 120 Hz.
-- **S2 hot swap.** On the bundled JDK: retranslate one changed class from a rebuilt APK and `RedefineClasses` it
-  (stock HotSpot: method bodies only). Measure, and list what falls back to `recreate` or a 0.3 s relaunch.
+- **S1 shared surface: done 2026-11-20 (apksim draft pull request 585, `docs/spike-s1-shared-surfaces.md` there).**
+  An opt-in `surfacewatch` control command copies each presented frame into a ring of three BGRA IOSurfaces and hands
+  them to the host as Mach send rights (or global IDs) with one `f SEQ INDEX PRESENT_US` line per frame. Both ways
+  work under today's default and beam sandbox profiles with no change. Shader tab, 120 fps, M4 Pro: present to host
+  p50 0.21-0.24 ms (a 0.16 ms copy in the instance) against 6.7-7.4 ms for the H.264 stream (5-6 ms encode), instance
+  CPU 22-26% against 29-32%. Use Mach rights (or IOSurfaceCreateXPCObject), not global IDs, which any process of the
+  user can look up. A real version needs a release/ack before a surface is reused, nothing that can block the raster
+  thread, a resend for a late host, a windowed instance sharing its own surfaces, and a check of the sender.
+- **S2 hot swap: done 2026-11-20 (apksim draft pull request 586, `docs/spike-s2-hot-swap.md` there).** JVMTI
+  RedefineClasses from inside the instance (capability requested at the first swap, so warm launches work). JDK 24
+  verifies redefined classes, and translated classes have no stack map frames: computing them with ASM fixes it
+  (4,016 of 4,031 loaded classes redefined in a self-test; 15 library refusals from two translator habits). A changed
+  string or lambda body is on screen 150-290 ms after the command with state kept (Compose invalidate-all; `recreate`
+  for Views); the incremental Gradle build, 1.4-1.8 s, dominates the loop. Adding an `item { }` (D8 renumbers the
+  file's synthetic lambdas) or a composable function needs a relaunch; matching renamed synthetic lambdas by content
+  is the largest gain left.
 
 ### Phase 1: a real Mac app in a DMG (4-6 days)
 The current simulator, properly packaged; no new UI yet.
