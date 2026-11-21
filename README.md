@@ -38,6 +38,17 @@ version of it and adds the workbench.
   the commit out as a worktree, and you build it from its row. Closing the sheet does not stop a comparison that
   is running; reopen it to see the result. A tour is recorded on this Mac by two hidden simulators and kept with
   the comparison; nothing leaves the Mac.
+- **App data per device**: an app opened plainly keeps its data (sign-ins, databases, settings) per device kind, so
+  sign in once on a phone and every later phone of that app is signed in, across restarts of the simulator and of
+  Greenroom; a tablet has its own. A second copy on the same device while the first runs starts from a copy of the
+  first one's data, dropped when it closes. A fresh launch never touches it. A session's simulator keeps its own.
+- **Variables and scripts** for sign-ins and test set-up: add variables (LOGIN_EMAIL, LOGIN_PASSWORD...) in Settings,
+  kept in your login Keychain, secret ones masked as `••••` in any output; Device > Run Script (or ⌘K) runs a script
+  of yours on the chosen simulator with them in its environment and `gr` on its PATH to drive it
+  (`gr tap-text "Sign in"`, `gr type "$LOGIN_PASSWORD"`, `gr wait "Welcome"`). Scripts live in
+  `~/Library/Application Support/Greenroom/scripts` (and a session's `.greenroom/scripts`); New Script… writes an
+  example. Build recipes get the variables too. An agent can run a script you have switched on for agents in
+  Settings, as it was then, and never sees a value.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
 - **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.

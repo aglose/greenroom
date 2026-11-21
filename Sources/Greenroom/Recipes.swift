@@ -279,6 +279,8 @@ final class RecipeRun {
     private(set) var dropped = 0
     private var cancelled = false
     private var reaped = false
+    /// Secret variables' values, taken out of every line (under `lock`).
+    private var secrets: [String] = []
     private static let keep = 20000
 
     init(recipe: Recipe, job: RecipeJob) {
@@ -328,9 +330,10 @@ final class RecipeRun {
         if killpg(p, 0) == 0 { killpg(p, SIGKILL) }
     }
 
-    private func add(_ new: [String]) {
-        guard !new.isEmpty else { return }
+    private func add(_ raw: [String]) {
+        guard !raw.isEmpty else { return }
         lock.lock()
+        let new = secrets.isEmpty ? raw : raw.map { Variables.mask($0, secrets) }   // a secret never reaches the log
         _lines.append(contentsOf: new)
         if _lines.count > Self.keep { dropped += _lines.count - Self.keep; _lines.removeFirst(_lines.count - Self.keep) }
         lock.unlock()
@@ -342,6 +345,10 @@ final class RecipeRun {
         try? FileManager.default.removeItem(at: job.out)
         let (base, note) = LoginEnvironment.resolve()
         var env = base
+        // The person's variables (Variables: the Keychain), then the recipe's own contract, which they cannot replace.
+        let vars = Variables.shared.all()   // one read of the Keychain
+        for v in vars { env[v.name] = v.value }
+        lock.lock(); secrets = Variables.secrets(of: vars); lock.unlock()
         for (k, v) in job.environment { env[k] = v }
         if let note { add([note]) }
 

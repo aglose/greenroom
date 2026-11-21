@@ -3,6 +3,8 @@ import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var workbench: Workbench!
+    /// Device > Run Script's items (made before the workbench, so it asks for it when the menu opens).
+    private lazy var scriptsMenu = ScriptsMenu { [weak self] in self?.workbench }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Updates.shared.start()
@@ -10,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenus()
         workbench = Workbench()
         workbench.window.makeKeyAndOrderFront(nil)
+        let early = openedEarly; openedEarly = []
+        if !early.isEmpty { application(NSApp, open: early) }
         if !CommandLine.arguments.contains("--background") { NSApp.activate() }
         startAgentServer()
         // `kill` (and a script that started the app) quits it as the menu would: simulators stopped, nothing left behind.
@@ -33,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         extrasCheckIfAsked()
         devHooksCheckIfAsked()
         sessionsCheckIfAsked()
+        scriptsCheckIfAsked()
         buildsCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
@@ -475,6 +480,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DevHooksCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2])) { [self] in captureWindow(to: $0) }
     }
 
+    /// `Greenroom --scripts-check DIR APK`: see ScriptsCheck.
+    private func scriptsCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--scripts-check"), i + 2 < args.count else { return }
+        ScriptsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
     /// `Greenroom --sessions-check DIR APK`: see SessionsCheck.
     private func sessionsCheckIfAsked() {
         let args = CommandLine.arguments
@@ -564,14 +576,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Files and links macOS asks the app to open before the workbench exists (an APK double-clicked to launch it,
+    /// or documents reopened at launch): opened once it does.
+    private var openedEarly: [URL] = []
+
     func application(_ application: NSApplication, open urls: [URL]) {
+        guard workbench != nil else { openedEarly += urls; return }
         for url in urls {
             if url.pathExtension.lowercased() == "apkrec" { workbench.view(recording: url) } else { workbench.open(url) }
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows { workbench.window.makeKeyAndOrderFront(nil) }
+        if !hasVisibleWindows { workbench?.window.makeKeyAndOrderFront(nil) }
         return true
     }
 
@@ -579,7 +596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Reports.shared.saveUsage()
         agent.stop()
         TestRun.terminateAll()
-        workbench.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
+        workbench?.sessions.buildQueue.terminateAll()   // a running recipe is not left behind
         ReplayRunner.shared.cancelAll(wait: true)   // replays started from the recordings pane
         ScreenRecording.shared.stopAll()   // recordings end as finished files
         Engine.shared.stopAll()
@@ -660,6 +677,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(to(workbench: #selector(Workbench.showChanges(_:)), "Changes…", "d"))
         device.addItem(to(workbench: #selector(Workbench.showMatrix(_:)), "Matrix Wall…", "x", [.command, .option]))
         device.addItem(to(workbench: #selector(Workbench.closeMatrix(_:)), "Close Matrix Wall", ""))
+        device.addItem(.separator())
+        let scripts = NSMenuItem(title: "Run Script", action: nil, keyEquivalent: "")
+        scripts.submenu = NSMenu(title: "Run Script")
+        scripts.submenu?.delegate = scriptsMenu
+        device.addItem(scripts)
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.screenshot(_:)), "Save Screenshot", "s"))
         device.addItem(to(workbench: #selector(Workbench.restart(_:)), "Restart App", "R", [.command, .shift]))

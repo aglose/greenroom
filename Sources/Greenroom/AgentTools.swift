@@ -40,7 +40,8 @@ final class AgentTools {
         + "launch an APK, then tap/type/key/swipe: each action answers with the nodes that changed (+ added, - removed, "
         + "~ changed; refs like e3 stay the same while a node is on screen), so call screen or screenshot only when you "
         + "need all of it. check verifies texts in one call. APKs and their data stay on this Mac. "
-        + "Sign-ins are the owner's: never ask for or type passwords."
+        + "Sign-ins are the owner's: never ask for or type passwords. To sign in, run_script a script the owner allowed "
+        + "(scripts lists them): it types their stored credentials, which you never see."
 
     // MARK: Schemas
 
@@ -66,12 +67,12 @@ final class AgentTools {
     ]
 
     /// The tools that act on a simulator and so are recorded (launch is noted when it has made one).
-    static let driving: Set<String> = ["tap", "type", "key", "swipe", "back", "open_url", "set", "screen", "check", "wait_for", "screenshot", "logs"]
+    static let driving: Set<String> = ["tap", "type", "key", "swipe", "back", "open_url", "set", "screen", "check", "wait_for", "screenshot", "logs", "run_script"]
 
     /// Tools that wait for builds and walks: they run on their own queue so the others still answer meanwhile.
     static let slow: Set<String> = ["build", "changes"]
 
-    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session"]
+    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session", "scripts"]
 
     static let tools: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
@@ -125,6 +126,12 @@ final class AgentTools {
             + "screenshot's screen. An unbuilt base is answered as text saying what would build it; nothing is started.",
          schema(["base": ["type": "string", "description": "default: the workspace's base branch. Or session:BRANCH, pr:NUMBER, a branch/tag/commit, or the path of an .apk"],
                  "timeout_s": ["type": "integer", "description": "how long this call waits, 10-200 s (default 200); the walk goes on, and calling changes again joins it"]], sim: false)),
+        ("scripts", "The owner's scripts (sign in, seed data, reach a screen) and whether you may run each, and the names of their "
+            + "variables. Values are never shown.", schema(sim: false)),
+        ("run_script", "Run a script the owner allowed on a simulator and wait for it: answers its exit status, its last output lines "
+            + "(secret values as ••••) and what changed on screen. Use it to sign in instead of typing credentials.",
+         schema(["name": ["type": "string", "description": "the script's file name, from scripts"],
+                 "timeout_s": ["type": "integer", "description": "10-300 s (default 120); the script is stopped after it"]], required: ["name"])),
         ("logs", "The app's log lines since the last call (android.util.Log and the engine's own).",
          schema(["filter": ["type": "string", "description": "keep lines containing this"], "lines": int])),
     ]
@@ -174,6 +181,8 @@ final class AgentTools {
             case "wait_for": content = text(try waitFor(args))
             case "screenshot": content = args["screen"] != nil ? try changePicture(args, connection) : try screenshot(args)
             case "logs": content = text(try logs(args))
+            case "scripts": content = text(scriptsList())
+            case "run_script": content = text(try runScript(args))
             case "compare": content = try compare(args)
             default: throw Failure(message: "unknown tool \(name)")
             }
@@ -187,6 +196,52 @@ final class AgentTools {
             report(name, f.message, failed: true, connection)
             throw f
         }
+    }
+
+    // MARK: Scripts
+
+    private func scriptsList() -> String {
+        let all = Scripts.list(in: Scripts.folder)
+        var out: [String] = []
+        if all.isEmpty { out.append("no scripts: the owner adds them in Greenroom (Device > Run Script > New Script…)") }
+        for s in all {
+            switch Scripts.approval(s) {
+            case .yes: out.append("\(s.name): you may run it")
+            case .no: out.append("\(s.name): not allowed for agents (the owner can allow it in Greenroom > Settings > Scripts)")
+            case .changed: out.append("\(s.name): changed since the owner allowed it, so not allowed until they allow it again")
+            }
+        }
+        let names = Variables.shared.names().map(\.name)
+        out.append("variables: " + (names.isEmpty ? "none" : names.joined(separator: ", ")) + " (values are never shown)")
+        return out.joined(separator: "\n")
+    }
+
+    private func runScript(_ args: [String: Any]) throws -> String {
+        guard let name = args["name"] as? String, !name.isEmpty else { throw Failure(message: "run_script needs name: call scripts") }
+        let s = try sim(args)
+        guard let script = Scripts.list(in: Scripts.folder).first(where: { $0.name == name }) else {
+            throw Failure(message: "no script \(name): call scripts")
+        }
+        switch Scripts.approval(script) {
+        case .yes: break
+        case .no: throw Failure(message: "\(name) is not allowed for agents. Ask the owner to allow it in Greenroom > Settings > Scripts, or to run it themselves.")
+        case .changed: throw Failure(message: "\(name) has changed since the owner allowed it. Ask them to allow it again in Greenroom > Settings > Scripts.")
+        }
+        let timeout = TimeInterval(min(300, max(10, args["timeout_s"] as? Int ?? 120)))
+        let made: ScriptRun? = DispatchQueue.main.sync {
+            ScriptRun(script: script, sim: s, worktree: self.workbench?.worktree(of: s))
+        }
+        guard let run = made else { throw Failure(message: "\(id(s)) is still starting: try again in a moment") }
+        let before = activity(s)
+        let o = run.runSync(timeout: timeout)
+        if let f = o.failure { throw Failure(message: f) }
+        let tail = o.output.suffix(40)
+        var head = "ran \(name)"
+        if o.timedOut { head += ": stopped after \(Int(timeout)) s" }
+        else if let c = o.code { head += c == 0 ? ": exit 0" : ": FAILED, exit \(c)" }
+        let screen = answer(s, head: head, before: before)
+        let output = tail.isEmpty ? "(no output)" : (o.output.count > tail.count ? "[…]\n" : "") + tail.joined(separator: "\n")
+        return screen + "\n--- output\n" + output
     }
 
     private func report(_ tool: String, _ summary: String, failed: Bool, _ connection: Connection) {

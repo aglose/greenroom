@@ -228,7 +228,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     func open(_ apk: URL, remember: Bool = true, options: [String] = [], fromAgent: Bool = false) -> Simulator? {
         Reports.shared.count(.apkOpened)
         do {
-            let sim = try Engine.shared.open(apk: apk, options: options)
+            // Plain launches keep their app data per device (DeviceData); a session's, or any naming a slot, keep theirs.
+            let engine = Engine.shared
+            let others = engine.simulators.filter(\.isAlive) + engine.closing
+            let slotted = DeviceData.options(for: apk, options, others: others, root: engine.engineState.appendingPathComponent("cache/data", isDirectory: true))
+            let sim = try engine.open(apk: apk, options: slotted)
             if remember {
                 Recents.add(apk)
                 NSDocumentController.shared.noteNewRecentDocumentURL(apk)
@@ -238,7 +242,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 switch state {
                 case .starting: break
                 case .running: self.grid.view(for: sim)?.setMessage("")
-                case .ended(let code): self.grid.view(for: sim)?.setMessage(Self.ended(sim, code))
+                case .ended(let code):
+                    self.grid.view(for: sim)?.setMessage(Self.ended(sim, code))
+                    DeviceData.release(sim)   // a clone or fresh slot goes once nothing uses it
                 }
                 self.reload()
             }
@@ -735,6 +741,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             let kind = sim.options.firstIndex(of: "--device").flatMap { i in i + 1 < sim.options.count ? Self.title(sim.options[i + 1]) : nil } ?? "Phone"
             add("switch." + String(UInt(bitPattern: ObjectIdentifier(sim).hashValue)), "Go to \(sim.name) on \(kind)", "Running", "iphone") { [weak self] in self?.select(sim) }
         }
+        if let sim = live {
+            for script in Scripts.available(for: worktree(of: sim)) {
+                add("script." + script.url.path, "Run script: \(script.name)", "Scripts", "terminal", keywords: "script sign in login test setup") { [weak self] in
+                    self?.runScript(at: script.url)
+                }
+            }
+        }
+        add("script.new", "New script…", "Scripts", "plus.rectangle.on.folder", keywords: "script sign in login automate") { [weak self] in self?.newScript(nil) }
+        add("variables", "Variables (sign-ins for scripts)…", "Scripts", "key", keywords: "env environment secret password credentials keychain") { [weak self] in self?.showVariables(nil) }
         if live != nil {
             add("back", "Back", "Device", "chevron.backward", "⌘[") { [weak self] in self?.back(nil) }
             add("home", "Home", "Device", "house", "⇧⌘H") { [weak self] in self?.home(nil) }
@@ -1584,7 +1599,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let keep = selected
         var options: [String] = []
         var rest = ArraySlice(keep?.options ?? [])
-        while let o = rest.popFirst() { if o == "--device" { _ = rest.popFirst() } else { options.append(o) } }
+        while let o = rest.popFirst() {
+            if o == "--device" { _ = rest.popFirst(); continue }
+            // The new device picks its own data (DeviceData); a session's slot stays with it.
+            if o == "--data-slots", DeviceData.isOurs(rest.first) { _ = rest.popFirst(); continue }
+            if o == "--fresh" { continue }
+            options.append(o)
+        }
         let sim = open(apk, remember: false, options: options + ["--device", device])
         sideBySide = true
         if let keep { selected = keep; window.subtitle = keep.name }

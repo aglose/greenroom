@@ -100,8 +100,13 @@ opened and no process is probed.
 ## What stays on your Mac
 
 `~/Library/Application Support/Greenroom`, readable only by your user: the engine's caches, the data of the apps you
-ran (as a phone would keep it), and logs. The recent-APKs list is in the app's preferences. Deleting that folder
-removes all of it.
+ran (as a phone would keep it, one copy per device kind), your scripts, and logs. The recent-APKs list is in the
+app's preferences. Deleting that folder removes all of it.
+
+Variables you add in Settings (sign-ins for your scripts) are in your login Keychain, under
+`<bundle id>.variables`, never in a file of Greenroom's; which scripts agents may run is there too, under
+`<bundle id>.scripts`. Keychain Access shows and deletes them. Their values go only into the environment of the
+scripts and build recipes you run on this Mac; secret ones are replaced by `••••` in the output Greenroom shows.
 
 ## Checking this yourself
 

@@ -105,7 +105,8 @@ Older shims send neither header and everything works as before.
   repository added to Greenroom: pass apk`; with a session that has no build, `no build yet for <branch>`.
 - `launch` **with `apk`** that is the session's own build (its newest output or stored build) runs on the session's
   data and replaces the session's running simulator, if any: one simulator per data slot, and the old one exits
-  first so its data is kept. Any other APK starts a simulator of its own, on the default data, beside the session's.
+  first so its data is kept. Any other APK starts a simulator of its own, on its device's data (as a person's plain
+  launch: see the README's "App data per device"), beside the session's.
 - `launch` with **`fresh: true`** inside a session never touches the session's data: the build starts beside the
   session's simulator on a separate, empty data slot, and the answer says so.
 - `simulators` lists each simulator with its session's branch: `(session feat-login)`.
@@ -174,6 +175,21 @@ beside them: `session`, `screen` and the rest answer while one of those waits, b
 up the other ordinary calls, another agent's too. One `build` or `changes` call waits at most 200 s in all (resolving the base included), then says it is still going; calling again joins the
 same build, base fetch or walk instead of starting another.
 
+## Signing in: scripts
+
+An agent never types a password (the instructions say so). The owner keeps sign-ins as variables in Greenroom's
+Settings (in their login Keychain) and writes a script that types them (Device > Run Script > New Script…); once they
+switch the script on for agents in Settings > Scripts, an agent can run it:
+
+- `scripts` lists the scripts in Greenroom's scripts folder, whether the agent may run each, and the variables' names.
+  No value is ever answered.
+- `run_script` runs one on a simulator and waits (10-300 s, 120 by default): it answers the exit status, the last 40
+  lines of output with every secret value as `••••`, and what changed on screen, as an action does.
+
+The approval is the script's SHA-256, kept in the Keychain: a script that has changed since it was allowed is refused
+until the owner allows it again, so an agent cannot edit an allowed script into one that prints a password. Scripts
+in a worktree's `.greenroom/scripts` are the person's to run, never an agent's.
+
 ## What an agent cannot do
 
 - Name a file for the engine to read or write. `screenshot` and `logs` answer with their content; nothing else
@@ -182,6 +198,7 @@ same build, base fetch or walk instead of starting another.
 - Act while paused. The Agent popover's switch refuses every action, `build` and `changes` included, until it is
   lifted; reading (`session`, `screen`, `screenshot`, `logs`...) still works.
 - Allow the remote recipe, or start a CI workflow, or build a base: see above.
+- Read a variable, or run a script the owner has not allowed as it is now: see "Signing in: scripts".
 
 ## Who can reach it
 

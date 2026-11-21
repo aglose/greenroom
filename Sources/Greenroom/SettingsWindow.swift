@@ -1,13 +1,13 @@
 import AppKit
 import SwiftUI
 
-/// Greenroom > Settings… (⌘,): what the app may send, in one place.
+/// Greenroom > Settings… (⌘,): what the app may send, and the variables and scripts for sign-ins, in one place.
 final class SettingsWindow: NSWindowController {
     static let shared = SettingsWindow()
 
     private init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Settings"
         window.contentView = NSHostingView(rootView: SettingsView())
         window.center()
@@ -53,6 +53,8 @@ struct SettingsView: View {
                     Text("Updates are off in this build (not a packaged app).").foregroundStyle(.secondary)
                 }
             }
+            VariablesSection()
+            ScriptsSection()
             Section("Claude Code") {
                 Toggle("Show my Claude Code sessions", isOn: $claudeSessions)
                     .onChange(of: claudeSessions) { _, on in ClaudeSessions.shared.enabled = on }
@@ -85,8 +87,7 @@ struct SettingsView: View {
         }
         .onAppear(perform: refresh)
         .formStyle(.grouped)
-        .frame(width: 480)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(minWidth: 480, minHeight: 420)
     }
 
     private var lastChecked: String {
