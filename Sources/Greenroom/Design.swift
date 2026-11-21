@@ -111,11 +111,18 @@ final class GlassButtonCell: NSButtonCell {
     }
 
     override var cellSize: NSSize {
-        if title.isEmpty { return Self.iconOnly }
+        if title.isEmpty {
+            // No symbol either: a container whose content is subviews, sized by its constraints.
+            return iconSize.width > 0 ? Self.iconOnly : NSSize(width: NSView.noIntrinsicMetric, height: Self.iconOnly.height)
+        }
         return NSSize(width: ceil(groupWidth + 2 * Self.inset), height: Self.iconOnly.height)
     }
 
-    private func groupOrigin(in bounds: NSRect) -> CGFloat { bounds.minX + floor((bounds.width - groupWidth) / 2) }
+    /// Centred when it fits; squeezed, the group starts at the inset and the title is cut with an ellipsis.
+    private func groupOrigin(in bounds: NSRect) -> CGFloat {
+        let free = bounds.width - groupWidth
+        return bounds.minX + (free >= 2 * Self.inset ? floor(free / 2) : min(Self.inset, max(0, floor(free / 2))))
+    }
 
     override func imageRect(forBounds rect: NSRect) -> NSRect {
         let s = iconSize
@@ -128,7 +135,8 @@ final class GlassButtonCell: NSButtonCell {
         guard s.width > 0 else { return .zero }
         let i = iconSize.width
         let x = groupOrigin(in: rect) + (i > 0 ? i + Self.gap : 0)
-        return NSRect(x: x, y: rect.minY + floor((rect.height - s.height) / 2), width: ceil(s.width), height: ceil(s.height))
+        let room = max(0, rect.maxX - x - (rect.width - groupWidth >= 2 * Self.inset ? 0 : Self.inset))
+        return NSRect(x: x, y: rect.minY + floor((rect.height - s.height) / 2), width: min(ceil(s.width), room), height: ceil(s.height))
     }
 
     override func drawImage(_ image: NSImage, withFrame frame: NSRect, in view: NSView) {
@@ -137,7 +145,11 @@ final class GlassButtonCell: NSButtonCell {
 
     override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in view: NSView) -> NSRect {
         let r = titleRect(forBounds: view.bounds)
-        title.draw(in: r)
+        let cut = NSMutableAttributedString(attributedString: title)
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        cut.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: cut.length))
+        cut.draw(with: r, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
         return r
     }
 }
@@ -158,7 +170,6 @@ final class GlassButton: NSButton {
         self.title = title
         if let symbol { image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) }
-        imagePosition = symbol == nil ? .noImage : (title.isEmpty ? .imageOnly : .imageLeading)
         toolTip = label
         setAccessibilityLabel(label)
         self.target = target
@@ -171,19 +182,37 @@ final class GlassButton: NSButton {
         layer?.cornerCurve = .continuous
         font = .systemFont(ofSize: 13, weight: .medium)
         translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 30).isActive = true
-        if title.isEmpty { widthAnchor.constraint(equalToConstant: 32).isActive = true }
+        // 30 pt unless a caller asks for another height (a 38 pt recents row, a 28 pt pane button): just under
+        // required, so theirs wins instead of the two conflicting.
+        let height = heightAnchor.constraint(equalToConstant: GlassButtonCell.iconOnly.height)
+        height.priority = .init(999)
+        height.isActive = true
+        hasSymbol = symbol != nil
+        iconWidth = widthAnchor.constraint(equalToConstant: GlassButtonCell.iconOnly.width)
+        fitContent()
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
         refresh()
     }
 
     override var intrinsicContentSize: NSSize { cell?.cellSize ?? super.intrinsicContentSize }
+
+    private var hasSymbol = false
+    private var iconWidth: NSLayoutConstraint?
+
+    /// Icon only while there is no title: a chip given a title later (the screen map's crash count) shows it.
+    private func fitContent() {
+        imagePosition = !hasSymbol ? .noImage : (title.isEmpty ? .imageOnly : .imageLeading)
+        iconWidth?.isActive = hasSymbol && title.isEmpty
+        invalidateIntrinsicContentSize()
+    }
     // AppKit gives a button its symbol's alignment insets (doc.on.doc has some), so constraints then sized an inner
     // rectangle: "Copy route" came out 33 pt tall and 1.5 pt higher than "Go there" beside it. The well is the button.
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
 
     // A new title or symbol keeps the button's colours and re-measures it (the Walk/Stop and count buttons).
-    override var title: String { didSet { if title != oldValue { refresh(); invalidateIntrinsicContentSize() } } }
+    // AppKit resets the attributed title on every set, even of the same text, so this always refreshes.
+    override var title: String { didSet { refresh(); fitContent() } }
+    override var font: NSFont? { didSet { refresh(); invalidateIntrinsicContentSize() } }
     override var image: NSImage? { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
 
     override var isHighlighted: Bool { didSet { refresh() } }
