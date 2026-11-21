@@ -83,6 +83,7 @@ final class DevHooks {
                     defer { done() }
                     guard let new = wb.open(apk ?? old.apk, remember: false, options: options) else { then?(nil); return }
                     Engine.shared.replace(old, with: new)
+                    wb.matrixReplaced(old, with: new)
                     wb.select(wasChosen ? new : (chosen.map { c in Engine.shared.simulators.contains(where: { $0 === c }) ? c : new } ?? new))
                     self.adopt(new)
                     then?(new)

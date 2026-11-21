@@ -13,6 +13,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var mirror = false
     /// The matrix wall's simulators (MatrixWall.swift), empty when none runs.
     var matrixSims: [Simulator] = []
+    /// Bumped by every run and close of the matrix, so a run's delayed start stands down once it is stale.
+    var matrixGeneration = 0
+    /// Side by side and mirroring as they were before the matrix took them over, put back when it closes.
+    var beforeMatrix: (sideBySide: Bool, mirror: Bool)?
 
     /// A click at a fraction of the chosen simulator's screen, routed as the mouse's would be (mirrored when on). Checks.
     func clickForCheck(_ f: CGPoint) {

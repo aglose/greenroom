@@ -113,32 +113,46 @@ extension Workbench {
     /// install folder start together (apksim's class-path link), and one of them dies.
     func runMatrix(_ matrix: Matrix, apk: URL, done: (([Simulator]) -> Void)? = nil) {
         closeMatrix(nil)
-        var started: [Simulator] = []
+        matrixGeneration += 1
+        let generation = matrixGeneration
         func start(_ cell: Matrix.Cell) {
             guard let sim = open(apk, remember: false, options: cell.options, fromAgent: true) else { return }
             sim.cellLabel = cell.label
-            started.append(sim)
-            matrixSims = started
+            matrixSims.append(sim)
         }
         let cells = matrix.cells
         guard let first = cells.first else { done?([]); return }
+        beforeMatrix = (sideBySide, mirror)
         start(first)
-        if let sim = started.first { select(sim) }
+        if let sim = matrixSims.first { select(sim) }
         setSideBySide(true)
         setMirror(true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard self != nil else { return }
+            // Closed, or run again, meanwhile: the rest of this run's cells are not wanted.
+            guard let self, self.matrixGeneration == generation else { return }
             for cell in cells.dropFirst() { start(cell) }
-            done?(started)
+            done?(self.matrixSims)
         }
     }
 
-    /// Quits the matrix's simulators.
+    /// Quits the matrix's simulators (ended ones too, so their tiles go), and puts side by side and mirroring back.
     @objc func closeMatrix(_ sender: Any?) {
+        matrixGeneration += 1
         let sims = matrixSims
         matrixSims = []
-        for sim in sims where sim.isAlive { Engine.shared.close(sim) }
-        if !sims.isEmpty { setMirror(false) }
+        for sim in sims { Engine.shared.close(sim) }
+        if let before = beforeMatrix {
+            beforeMatrix = nil
+            setMirror(before.mirror)
+            setSideBySide(before.sideBySide)
+        }
+    }
+
+    /// A cell relaunched (adb, the debugger, a network recording turned on) keeps its place, caption and rate.
+    func matrixReplaced(_ old: Simulator, with new: Simulator) {
+        guard let i = matrixSims.firstIndex(where: { $0 === old }) else { return }
+        new.cellLabel = old.cellLabel
+        matrixSims[i] = new
     }
 
     /// The pointer came onto (or left) a matrix cell: that one draws at full rate meanwhile.
