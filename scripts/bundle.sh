@@ -84,4 +84,6 @@ if [[ -n "$CHECK" ]]; then
   "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
   # The agent interface, as an agent uses it.
   "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk"
+  # The agent tied to its worktree's session: two worktrees, a state folder of its own.
+  "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk" --sessions
 fi

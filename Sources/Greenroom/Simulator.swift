@@ -44,6 +44,8 @@ final class Simulator {
     var logOffset: UInt64 = 0
     /// The launch options this simulator was started with (shown to agents).
     private(set) var options: [String] = []
+    /// The worktree of the session an agent opened this simulator for (main thread only), whatever data it runs on.
+    var agentSession: String?
 
     var name: String { apk.deletingPathExtension().lastPathComponent }
     /// A matrix wall cell's combination ("Dark · German"), shown under its picture instead of the APK's name.

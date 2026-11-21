@@ -524,12 +524,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startAgentServer() {
         agent.tools.workbench = workbench
         workbench.agentTools = agent.tools
-        agent.tools.onActivity = { [weak self] tool, summary, failed in
-            self?.workbench.agentActivity.add(tool, summary, failed: failed)
+        agent.tools.onActivity = { [weak self] tool, summary, failed, session in
+            self?.workbench.agentActivity.add(tool, summary, failed: failed, session: session)
         }
         agent.onClient = { [weak self] name in self?.workbench.agentActivity.connected(name) }
         workbench.agentActivity.onChange = { [weak self] in self?.workbench.agentChanged() }
         do { try agent.start() } catch { NSLog("Greenroom: the agent interface could not start: \(error)") }
+        // Checks (--agent-check only): repositories to add to Sessions at launch (GREENROOM_ADD_REPOSITORY, one per line).
+        for folder in (Engine.agentCheck ? ProcessInfo.processInfo.environment["GREENROOM_ADD_REPOSITORY"] ?? "" : "").split(separator: "\n") {
+            workbench.sessions.addRepository(URL(fileURLWithPath: String(folder), isDirectory: true))
+        }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

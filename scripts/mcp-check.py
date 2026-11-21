@@ -1,11 +1,189 @@
 #!/usr/bin/env python3
 """Checks the agent interface as an agent uses it: `Greenroom --mcp` on stdin/stdout, against the bundled test app.
-Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK
+Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK [--sessions]
+--sessions: the agent tied to its worktree's session (a temporary git repository with two worktrees, a state folder
+of its own); without it, the interface itself against the person's own state folder.
 Starts Greenroom (its executable, in the background) if it is not running, and quits the copy it started."""
-import glob, json, os, signal, subprocess, sys, time
+import glob, hashlib, json, os, signal, subprocess, sys, tempfile, time, urllib.request
 
 exe, apk = sys.argv[1], sys.argv[2]
-state = os.path.expanduser("~/Library/Application Support/Greenroom/agent.json")
+
+def sessions_mode():
+    """Two worktrees of a temporary repository, each with the test app as its build; the repository is added to a
+    fresh state folder (GREENROOM_STATE, GREENROOM_ADD_REPOSITORY); a shim is run from inside each worktree."""
+    root = os.path.realpath(tempfile.mkdtemp(prefix="grmcp-", dir="/tmp"))   # short: the engine's sockets live under it
+    repo, state_dir, other = root + "/repo", root + "/state", root + "/elsewhere"
+    def git(*a, cwd=repo):
+        subprocess.run(["/usr/bin/git", "-c", "user.name=Check", "-c", "user.email=check@example.invalid", "-c", "commit.gpgsign=false", *a],
+                       cwd=cwd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.makedirs(repo); os.makedirs(other); os.makedirs(state_dir)
+    open(repo + "/README.md", "w").write("hello\n")
+    open(repo + "/.gitignore", "w").write("build/\n")
+    git("init", "-q", "-b", "main"); git("add", "."); git("commit", "-q", "-m", "first")
+    trees = {}
+    for name in ("a", "b"):
+        wt = f"{root}/wt-{name}"
+        git("worktree", "add", "-q", "-b", "feat-" + name, wt)
+        out = wt + "/app/build/outputs/apk/debug"
+        os.makedirs(out)
+        subprocess.run(["cp", apk, out + "/app-debug.apk"], check=True)
+        os.makedirs(wt + "/app/src/deeper")
+        trees[name] = wt
+    env = dict(os.environ, GREENROOM_STATE=state_dir, GREENROOM_ADD_REPOSITORY=repo, GREENROOM_CHECK_FEEDS="1")
+    app_log = open(root + "/app.log", "w")
+    app = subprocess.Popen([exe, "--background", "--agent-check"], stdout=app_log, stderr=subprocess.STDOUT, env=env)
+    failures, shims = [], []
+    def expect(what, ok, got=""):
+        print(("ok   " if ok else "FAIL ") + what + ("" if ok else "\n     got: " + str(got)[:400].replace("\n", "\n          ")))
+        if not ok:
+            failures.append(what)
+    class Shim:
+        def __init__(self, cwd):
+            self.p = subprocess.Popen([exe, "--mcp", "--agent-check"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, cwd=cwd, env=env)
+            self.n = 0
+            shims.append(self)
+            self.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp-check", "version": "1"}})
+        def rpc(self, method, params=None):
+            self.n += 1
+            self.p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params or {}}) + "\n")
+            self.p.stdin.flush()
+            line = self.p.stdout.readline()
+            if not line:
+                raise SystemExit("mcp-check: the shim closed its output")
+            return json.loads(line)
+        def call(self, name, **args):
+            r = self.rpc("tools/call", {"name": name, "arguments": args}).get("result", {})
+            return "\n".join(c["text"] for c in r.get("content", []) if c["type"] == "text"), bool(r.get("isError"))
+    def slot(path):
+        path = path[len("/private"):] if path.startswith(("/private/tmp", "/private/var", "/private/etc")) else path   # as Foundation resolves it
+        return "gr" + hashlib.sha256(path.encode()).hexdigest()[:8]
+    def feeds():
+        try:
+            return json.load(open(state_dir + "/agent-feeds-check.json"))
+        except Exception:
+            return {}
+    def wait(cond, seconds=30):
+        end = time.time() + seconds
+        while time.time() < end:
+            v = cond()
+            if v:
+                return v
+            time.sleep(0.2)
+        return None
+    try:
+        agent = state_dir + "/agent.json"
+        def up():
+            try:
+                os.kill(json.load(open(agent))["pid"], 0); return True
+            except Exception:
+                return False
+        if not wait(up, 60):
+            sys.exit("mcp-check: Greenroom did not start its agent endpoint within 60 s\n" + open(root + "/app.log", errors="replace").read()[-2000:])
+        a, b, sub, away = Shim(trees["a"]), Shim(trees["b"]), Shim(trees["a"] + "/app/src/deeper"), Shim(other)
+        # The repository is added by the app at launch, and its rows are read from git a moment later.
+        t, err = "", True
+        end = time.time() + 60
+        while time.time() < end:
+            t, err = a.call("launch")
+            if not err or "not a worktree" not in t:
+                break
+            time.sleep(0.5)
+        expect("launch without apk in a worktree starts that worktree's simulator", not err and "launched app-debug.apk for feat-a" in t, t)
+        sims, _ = a.call("simulators")
+        expect("simulators lists it with its session's branch and data slot",
+               "(session feat-a)" in sims and f"--data-slots {slot(trees['a'])}" in sims, sims)
+        t, err = b.call("launch")
+        expect("the other worktree gets a simulator of its own", not err and "for feat-b" in t, t)
+        sims, _ = b.call("simulators")
+        expect("with its own data slot", f"--data-slots {slot(trees['b'])}" in sims and slot(trees["a"]) != slot(trees["b"]), sims)
+        t, err = a.call("tap", sim=next((l.split()[0] for l in sims.split("\n") if "feat-a" in l), "s1"), text="Add")
+        expect("an action reaches the simulator that was named", not err and "FAB clicks" in t, t)
+        t, err = sub.call("launch")
+        expect("a subfolder of a worktree is tied to that worktree (its simulator is selected, not started twice)",
+               not err and "for feat-a" in t or "the session's running simulator" in t, t)
+        expect("... and says it was already running", "already running" in t, t)
+        t, err = away.call("launch")
+        expect("a folder outside every added worktree gets the clear failure",
+               err and t == "this folder is not a worktree of a repository added to Greenroom: pass apk", t)
+        t, err = away.call("launch", apk=apk, fresh=True)
+        expect("... and still works with an apk", not err and "launched" in t and "for feat" not in t, t)
+        sims, _ = away.call("simulators")
+        expect("its simulator belongs to no session", any("(session" not in l and "s3" in l.split()[0:1] for l in sims.split("\n") if l.startswith("s")) , sims)
+        # Data: a marker in a session's slot folder must survive a fresh launch and a replacement.
+        marker = "mcp-check-marker"
+        def slot_dirs(sl):
+            return [d for d in glob.glob(state_dir + f"/engine/cache/data/*/{sl}-*") if not d.endswith(".device") and os.path.isdir(d)]
+        def has_marker(sl):
+            return any(os.path.exists(d + "/" + marker) for d in slot_dirs(sl))
+        for who in "ab":
+            wait(lambda: slot_dirs(slot(trees[who])), 30)
+            for d in slot_dirs(slot(trees[who])):
+                open(d + "/" + marker, "w").write("kept")
+        expect("a marker is written in each session's data", has_marker(slot(trees["a"])) and has_marker(slot(trees["b"])), str(glob.glob(state_dir + "/engine/cache/data/*/*")))
+        t, err = a.call("launch", fresh=True)
+        expect("fresh inside a session runs beside it on a separate slot, and says so", not err and "separate slot" in t and "untouched" in t, t)
+        sims, _ = a.call("simulators")
+        expect("... marked as the session's, the session's own simulator still on its slot",
+               sims.count("(session feat-a)") == 2 and sims.count(f"--data-slots {slot(trees['a'])} ") == 1 and "--fresh" in sims, sims)
+        expect("... and the session's data is still there", has_marker(slot(trees["a"])))
+        own = trees["b"] + "/app/build/outputs/apk/debug/app-debug.apk"
+        before = len(slot_dirs(slot(trees["b"])))
+        t, err = b.call("launch", apk=own)
+        expect("the session's own build given as apk replaces its simulator", not err and "replaced the session's running simulator" in t, t)
+        sims, _ = b.call("simulators")
+        expect("... on the session's slot, once", sims.count(f"--data-slots {slot(trees['b'])} ") == 1 and sims.count("(session feat-b)") == 1, sims)
+        expect("... with its data kept, in the same slot folder (no empty second slot)", has_marker(slot(trees["b"])) and len(slot_dirs(slot(trees["b"]))) == before,
+               f"{before} folders before, {len(slot_dirs(slot(trees['b'])))} after")
+        t, err = b.call("launch", apk=apk)
+        sims, _ = b.call("simulators")
+        expect("another APK from the worktree starts a separate simulator and leaves the session's alone",
+               not err and "replaced" not in t and sims.count(f"--data-slots {slot(trees['b'])} ") == 1 and has_marker(slot(trees["b"])), t + "\n" + sims)
+        # A request with no headers: what an older shim sends.
+        info = json.load(open(agent))
+        def raw(name, **args):
+            req = urllib.request.Request(f"http://127.0.0.1:{info['port']}/mcp", method="POST",
+                data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}).encode(),
+                headers={"Authorization": "Bearer " + info["token"], "Content-Type": "application/json"})
+            r = json.load(urllib.request.urlopen(req, timeout=200))["result"]
+            return "\n".join(c["text"] for c in r["content"] if c["type"] == "text"), bool(r.get("isError"))
+        t, err = raw("simulators")
+        expect("a request with no headers works as before", not err and "app-debug.apk" in t, t)
+        t, err = raw("launch")
+        expect("... and has no session to launch for", err and "pass apk" in t, t)
+        t, err = raw("launch", apk=apk, fresh=True)
+        expect("... and launches an apk", not err and "launched" in t and "for feat" not in t, t)
+        # The feeds, one per session.
+        feeds_seen = wait(lambda: (lambda f: f if sum(len(v) for v in f.values()) >= 12 else None)(feeds()), 10) or feeds()
+        by = {}
+        for key, entries in feeds_seen.items():
+            by[key] = entries
+        feed_a = [e for k, v in by.items() for e in v if e["label"] == "feat-a"]
+        feed_b = [e for k, v in by.items() for e in v if e["label"] == "feat-b"]
+        none = by.get("", [])
+        expect("each session has its own feed, and entries say which", len(by) == 3 and len(feed_a) >= 3 and len(feed_b) >= 3 and {e["label"] for e in feed_a} == {"feat-a"}, json.dumps(by)[:600])
+        expect("feat-a's feed has its subfolder shim's call, feat-b's has none of a's",
+               sum(e["tool"] == "launch" for e in feed_a) == 3 and sum(e["tool"] == "launch" for e in feed_b) == 3 and not any(e["tool"] == "tap" for e in feed_b), json.dumps(by)[:600])
+        expect("calls from no session are a feed of their own", len(none) >= 4 and all(e["label"] == "" for e in none), json.dumps(none)[:400])
+    finally:
+        for s in shims:
+            try:
+                s.p.stdin.close(); s.p.wait(timeout=10)
+            except Exception:
+                s.p.kill()
+        app.terminate()
+        try:
+            app.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            app.kill()
+        if failures:
+            print("the app's output:\n" + open(root + "/app.log", errors="replace").read()[-3000:])
+        subprocess.run(["rm", "-rf", root])
+    print(f"mcp-check --sessions: {len(failures)} failed" if failures else "mcp-check --sessions: all passed")
+    sys.exit(1 if failures else 0)
+
+if "--sessions" in sys.argv:
+    sessions_mode()
+state = (os.environ.get("GREENROOM_STATE") or os.path.expanduser("~/Library/Application Support/Greenroom")) + "/agent.json"   # GREENROOM_STATE: a state folder of its own
 def running_pid():
     try:
         pid = json.load(open(state))["pid"]
@@ -20,14 +198,14 @@ if not was_running:
     # its endpoint within the shim's 15 s), and given a minute: a cold first launch on a runner is slow.
     import tempfile
     app_log = tempfile.NamedTemporaryFile(prefix="greenroom-mcp-check-", suffix=".log", delete=False)
-    started = subprocess.Popen([exe, "--background"], stdout=app_log, stderr=subprocess.STDOUT)
+    started = subprocess.Popen([exe, "--background", "--agent-check"], stdout=app_log, stderr=subprocess.STDOUT)
     for _ in range(600):
         if running_pid():
             break
         time.sleep(0.1)
     else:
         sys.exit("mcp-check: Greenroom did not start its agent endpoint within 60 s")
-p = subprocess.Popen([exe, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+p = subprocess.Popen([exe, "--mcp", "--agent-check"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 n, failures = [0], []
 
 def rpc(method, params=None):

@@ -202,12 +202,7 @@ final class SessionsController {
             noteUsed(session.worktree.path)
             return true
         }
-        // The newest of the worktree's Gradle output and the stored builds (a recipe's), that is still there
-        // (`gradle clean` deletes an output without an event).
-        let fm = FileManager.default
-        let candidates: [(URL, Date)] = [session.outputs.map { ($0.apk, $0.date) }, session.build.map { ($0.apk, $0.date) },
-                                         builds[session.worktree.path].map { ($0.apk, $0.date) }].compactMap { $0 }
-        guard let apk = candidates.filter({ fm.fileExists(atPath: $0.0.path) }).max(by: { $0.1 < $1.1 })?.0 else {
+        guard let apk = newestAPK(for: session) else {
             wb.toast.show("\(session.title) has no build yet. Build it, and it appears here.", problem: true)
             refresh()
             return false
@@ -215,7 +210,7 @@ final class SessionsController {
         for stale in Engine.shared.simulators where !stale.isAlive && Self.slot(of: stale) == session.slot { Engine.shared.close(stale) }
         noteUsed(session.worktree.path)
         // A simulator taken off the stage a moment ago may still hold the slot; one started now would get another.
-        if let old = Engine.shared.closing.first(where: { Self.slot(of: $0) == session.slot }) {
+        if let old = holder(of: session.slot) {
             guard !starting.contains(session.slot) else { return true }
             starting.insert(session.slot)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -228,16 +223,42 @@ final class SessionsController {
             }
             return true
         }
-        return start(session, from: apk)
+        return start(session, from: apk) != nil
+    }
+
+    /// The newest of the worktree's Gradle output and the stored builds (a recipe's) that is still there
+    /// (`gradle clean` deletes an output without an event).
+    func newestAPK(for session: Session) -> URL? {
+        let fm = FileManager.default
+        let candidates: [(URL, Date)] = [session.outputs.map { ($0.apk, $0.date) }, session.build.map { ($0.apk, $0.date) },
+                                         builds[session.worktree.path].map { ($0.apk, $0.date) }].compactMap { $0 }
+        return candidates.filter { fm.fileExists(atPath: $0.0.path) }.max(by: { $0.1 < $1.1 })?.0
+    }
+
+    /// A simulator taken off the stage that has not yet exited and so still holds the slot's lock.
+    func holder(of slot: String) -> Simulator? { Engine.shared.closing.first { Self.slot(of: $0) == slot } }
+
+    /// For an agent's `launch` (called on the main thread, after it has waited for `holder(of:)` to exit): starts the
+    /// session's simulator from `apk` in its slot, with `options`.
+    func startForAgent(_ session: Session, from apk: URL, options: [String]) -> Simulator? {
+        for stale in Engine.shared.simulators where !stale.isAlive && Self.slot(of: stale) == session.slot { Engine.shared.close(stale) }
+        noteUsed(session.worktree.path)
+        return start(session, from: apk, options: options, fromAgent: true, remember: true)
     }
 
     @discardableResult
-    private func start(_ session: Session, from apk: URL) -> Bool {
-        guard let wb = workbench, wb.open(apk, remember: false, options: ["--data-slots", session.slot]) != nil else { return false }
+    private func start(_ session: Session, from apk: URL, options: [String] = [], fromAgent: Bool = false, remember: Bool = false) -> Simulator? {
+        guard let wb = workbench, let sim = wb.open(apk, remember: remember, options: ["--data-slots", session.slot] + options, fromAgent: fromAgent) else { return nil }
         launched[session.slot] = Self.modified(apk)
         record(apk: apk, for: session)
         enforceWarmLimit(keeping: session.worktree.path)
-        return true
+        return sim
+    }
+
+    /// The session whose worktree is `folder` (a path `git rev-parse --show-toplevel` gave), symlinks resolved.
+    func session(atWorktree folder: URL) -> Session? {
+        let want = folder.resolvingSymlinksInPath().path
+        return sessions.first { $0.worktree.resolvingSymlinksInPath().path == want }
     }
 
     /// ⌃n: the n-th row (0-based) of every repository's sessions, in the order shown.

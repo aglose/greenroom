@@ -45,7 +45,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var compareTimer: Timer?
     /// What agents have done here, and the popover that shows it.
     let agentActivity = AgentActivity()
-    var agentTools: AgentTools? { didSet { agentPanel = agentTools.map { AgentPanel(activity: agentActivity, tools: $0) } } }
+    var agentTools: AgentTools? { didSet { agentPanel = agentTools.map { AgentPanel(activity: agentActivity, tools: $0, selected: { [weak self] in self?.selected.flatMap { self?.sessions.session(forSimulator: $0) }.map { ($0.worktree.path, $0.branch ?? $0.shortHead) } }) } } }
     private var agentPanel: AgentPanel?
     private let agentPopover = NSPopover()
     private let status = NSTextField(labelWithString: "")
