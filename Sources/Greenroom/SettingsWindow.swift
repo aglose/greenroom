@@ -30,7 +30,10 @@ struct SettingsView: View {
     @State private var usage = Reports.shared.usage
     @State private var waiting: [String] = []
 
-    private func refresh() { waiting = Reports.shared.waiting().map(\.1) }
+    private func refresh() {
+        waiting = Reports.shared.waiting().map(\.1)
+        crashes = Reports.shared.crashes; usage = Reports.shared.usage; automatic = Updates.shared.checksAutomatically
+    }
 
     var body: some View {
         Form {

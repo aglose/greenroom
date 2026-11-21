@@ -15,7 +15,7 @@ import MachO
 /// - an unexpected engine exit: its exit status only (no log, no stack: those name the tested app's code). An app's own
 ///   crash (status 10) is the customer's, not ours, and is never reported.
 ///
-/// Reports wait in `STATE/reports/outbox` (JSON, one per file, at most 50). They are sent to the URL in Info.plist's
+/// Reports wait in `STATE/reports/outbox` (JSON, one per file, at most 50), each a day at least. They are sent to the URL in Info.plist's
 /// `GreenroomReportsURL` (or `GREENROOM_REPORTS_URL`, for checks) once a day; with no URL, nothing is sent and they
 /// only wait, readable in Settings.
 final class Reports {
@@ -30,8 +30,15 @@ final class Reports {
     private let defaults = UserDefaults.standard
     private let lock = NSLock()
     private var counts: [Feature: Int] = [:]
-    var crashes: Bool { get { defaults.bool(forKey: "reports.crashes") } set { defaults.set(newValue, forKey: "reports.crashes") } }
-    var usage: Bool { get { defaults.bool(forKey: "reports.usage") } set { defaults.set(newValue, forKey: "reports.usage") } }
+    private var countsDay = Reports.today
+    var crashes: Bool {
+        get { defaults.bool(forKey: "reports.crashes") }
+        set { defaults.set(newValue, forKey: "reports.crashes"); if !newValue { dropWaiting(kind: false) } }
+    }
+    var usage: Bool {
+        get { defaults.bool(forKey: "reports.usage") }
+        set { defaults.set(newValue, forKey: "reports.usage"); if !newValue { dropWaiting(kind: true); lock.lock(); counts = [:]; lock.unlock() } }
+    }
     var asked: Bool { get { defaults.bool(forKey: "reports.asked") } set { defaults.set(newValue, forKey: "reports.asked") } }
 
     var folder: URL { Engine.shared.state.appendingPathComponent("reports", isDirectory: true) }
@@ -60,25 +67,36 @@ final class Reports {
         armCrashHandlers(path: pendingCrash.path)
         send()
         Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
-            self?.saveUsage(); self?.sealUsage(before: Self.today); self?.send()
+            self?.rollOver(); self?.saveUsage(); self?.send()
         }
     }
 
     func count(_ f: Feature) {
         guard usage else { return }
+        rollOver()
         lock.lock(); counts[f, default: 0] += 1; lock.unlock()
+    }
+
+    /// Counts belong to the day they were made: past midnight (UTC), the day's are saved and sealed into a report and
+    /// counting starts again.
+    private func rollOver() {
+        let today = Self.today
+        guard today != countsDay else { return }
+        saveUsage()
+        lock.lock(); counts = [:]; countsDay = today; lock.unlock()
+        sealUsage(before: today)
     }
 
     /// A simulator's engine ended. Only statuses that point at the engine are kept.
     func engineEnded(status: Int32) {
-        guard crashes, ![0, 10, 130, 137, 143, 15, 9].contains(status) else { return }
+        guard crashes, ![0, 2, 10, 130, 137, 143, 15, 9].contains(status) else { return }   // 2: a launch option refused
         write(report(kind: "engine-exit", body: ["status": Int(status)]))
     }
 
     func saveUsage() {
-        lock.lock(); let c = counts; lock.unlock()
+        lock.lock(); let c = counts; let day = countsDay; lock.unlock()
         guard usage, !c.isEmpty else { return }
-        let body: [String: Any] = ["day": Self.today, "counts": Dictionary(uniqueKeysWithValues: c.map { ($0.key.rawValue, $0.value) })]
+        let body: [String: Any] = ["day": day, "counts": Dictionary(uniqueKeysWithValues: c.map { ($0.key.rawValue, $0.value) })]
         if let data = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) { try? data.write(to: usageFile) }
     }
 
@@ -135,17 +153,27 @@ final class Reports {
             .compactMap { f in (try? String(contentsOf: f, encoding: .utf8)).map { (f, $0) } }
     }
 
+    /// A switch turned off: what it had waiting goes at once.
+    func dropWaiting(kind usage: Bool) {
+        for (f, text) in waiting() where text.contains("\"kind\" : \"usage\"") == usage { try? FileManager.default.removeItem(at: f) }
+    }
+
     func discardWaiting() { for (f, _) in waiting() { try? FileManager.default.removeItem(at: f) } }
 
     /// Sends what is waiting, if a kind's switch is on and there is somewhere to send it; a report whose switch was
     /// turned off meanwhile is dropped unsent.
-    func send(done: (() -> Void)? = nil) {
+    /// A report waits a day before it is sent, so Settings > Privacy can show it (and discard it) first.
+    static let holdSeconds: TimeInterval = 24 * 3600
+
+    func send(holdSeconds: TimeInterval = Reports.holdSeconds, done: (() -> Void)? = nil) {
         let all = waiting()
         let group = DispatchGroup()
         for (file, text) in all {
             let kind = (text.contains("\"kind\" : \"usage\"")) ? "usage" : "crash"
             guard kind == "usage" ? usage : crashes else { try? FileManager.default.removeItem(at: file); continue }
             guard let url = endpoint else { continue }
+            let made = (try? file.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
+            guard Date().timeIntervalSince(made) >= holdSeconds else { continue }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -194,6 +222,8 @@ private let frameBuffer = UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocat
 private func armCrashHandlers(path: String) {
     _ = path.withCString { strncpy(&crashPath, $0, crashPath.count - 1) }
     for (i, c) in "0123456789abcdef".utf8.enumerated() { hexDigits[i] = c }
+    // Swift initializes globals lazily, with an allocation: every one the handler uses is touched here, never there.
+    frameBuffer[0] = nil; numberBuffer[0] = 0
     if let header = _dyld_get_image_header(0) {
         var size: UInt = 0
         if let text = getsegmentdata(UnsafeRawPointer(header).assumingMemoryBound(to: mach_header_64.self), "__TEXT", &size) {

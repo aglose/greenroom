@@ -27,14 +27,15 @@ shows, word for word, every report waiting to be sent. A report holds only:
   your Mac or of you);
 - a crash report: the signal and the addresses in Greenroom's own code where it crashed (no system or app frames,
   no memory);
-- an engine report: the exit status of a simulator's engine when it ends in a way that points at the engine (never
-  when the Android app itself crashes, and never its log or stack, which would name the app's code);
+- an engine report: the exit status of a simulator's engine when it ends abnormally (a native crash, for instance:
+  that may be the engine's or a library of the app's, and the number does not say which; never when the Android app
+  itself throws, and never its log or stack, which would name the app's code);
 - usage: a count per day of how often each Greenroom feature was used (opened the network pane, took a screenshot),
   from a fixed list of Greenroom's features.
 
 Never anything from an APK: its file name or path, package name, classes, resources, screens, recordings, logs or
-traffic cannot enter a report, because a report has no field that could hold them. Reports are sent with no cookies
-and no stored credentials. This version has no address to send them to: turned on, they wait in
+traffic cannot enter a report, because a report has no field that could hold them. A report waits a day on your Mac before it
+is sent, so you can read or discard it first. Reports are sent with no cookies and no stored credentials. This version has no address to send them to: turned on, they wait in
 `~/Library/Application Support/Greenroom/reports` (50 at most), and this file will say where they go before any
 version sends them.
 

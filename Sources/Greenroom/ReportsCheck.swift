@@ -5,7 +5,7 @@ import AppKit
 /// - `Greenroom --reports-crash`: arms the crash handlers and crashes, so the next launch finds a crash of Greenroom's own;
 /// - `Greenroom --reports-check APK`: opens the APK, uses a few features, ends an engine as a crash would, seals the
 ///   day's usage, prints every waiting report, checks each holds only the allowed fields and nothing naming the APK,
-///   then sends them and prints how many left the outbox.
+///   then sends them without the usual day's wait and prints how many left the outbox.
 enum ReportsCheck {
     static let allowedKeys: Set<String> = ["kind", "day", "app", "build", "engine", "macos", "counts", "status", "signal", "frames"]
 
@@ -48,7 +48,7 @@ enum ReportsCheck {
             }
             let kinds = waiting.map { $0.1 }.map { t in ["crash", "engine-exit", "usage"].first { t.contains("\"kind\" : \"\($0)\"") } ?? "?" }
             print("[greenroom] reports-check: waiting \(kinds.sorted().joined(separator: ", ")); problems: \(bad.isEmpty ? "none" : bad.joined(separator: ", "))")
-            r.send {
+            r.send(holdSeconds: 0) {
                 print("[greenroom] reports-check: after sending, \(r.waiting().count) left in the outbox")
                 Engine.shared.stopAll()
                 exit(bad.isEmpty ? 0 : 1)
