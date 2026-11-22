@@ -195,6 +195,9 @@ extension AgentTools {
     func changesTool(_ args: [String: Any], _ connection: Connection) throws -> String {
         let (s, ws) = try tied(connection)
         guard let wb = workbench else { throw Failure(message: Self.noSession) }
+        if let a = (args["base"] as? String)?.trimmingCharacters(in: .whitespaces), a.hasPrefix("snapshot:") {
+            return try changesFromSnapshots(String(a.dropFirst(9)), s, ws, wb)
+        }
         guard let head = headBuild(s) else { throw Failure(message: "no build yet for \(label(s)): call build") }
         let timeout = clamp(args["timeout_s"], 10, 200, 200)
         let deadline = Date().addingTimeInterval(timeout)   // one deadline for the whole call, the base's fetch included
@@ -239,6 +242,23 @@ extension AgentTools {
             setLastChanges(set, for: s.worktree.path)
             return AgentChanges.describe(set, header: header)
         }
+        // From history: both builds have a stored map, so nothing is walked.
+        if baseOption.isEmpty {
+            let profile = evidence.changesProfile(start: start), root = evidence.store.root
+            let found: (MapSnapshot, MapSnapshot)? = blocking {
+                guard let h = await History.snapshot(of: head, workspace: ws.root, profile: profile, stateRoot: root),
+                      let b = await History.snapshot(of: base, workspace: ws.root, profile: profile, stateRoot: root) else { return nil }
+                return (h, b)
+            }
+            if let (h, b) = found {
+                let named = (args["base"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? ws.baseRef
+                let note = baselineNote(named, base: b, buildSHA: base.sha, in: ws.root)
+                let set = ChangeSet.fromHistory(head: h, base: b, store: History.store(stateRoot: root, workspace: ws.root),
+                                                folder: evidence.changesFolder(head: head.key, base: base.key), baseline: note)
+                setLastChanges(set, for: s.worktree.path)
+                return AgentChanges.describe(set, header: "changes from history, no walk started: \(headNote) against \(baseNote)")
+            }
+        }
         var result: Result<Evidence.ChangesResult, Evidence.Failure>?
         let done = DispatchSemaphore(value: 0)
         mainSync {
@@ -257,6 +277,156 @@ extension AgentTools {
         }
     }
 
+    // MARK: History
+
+    /// "main at 53ffe80", and how far behind the base build's commit the stored map is when it is not that commit's own.
+    func baselineNote(_ name: String, base: MapSnapshot, buildSHA: String?, in dir: URL) -> String {
+        var note = "\(name) at \(base.commit.prefix(7))"
+        if let sha = buildSHA, !sha.isEmpty, !sha.hasPrefix("-"), !base.commit.hasPrefix(sha) {
+            let commit = base.commit
+            let n: Int? = blocking { await Git.run(["rev-list", "--count", commit + ".." + sha], in: dir).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } }
+            if let n {
+                if n > 0 { note += ", \(n) commit\(n == 1 ? "" : "s") behind the build's \(sha.prefix(7))" }
+            }
+        }
+        return note
+    }
+
+    /// `changes` with base `snapshot:REF`: the stored map of that commit against the head's (the build's commit, else the
+    /// session's own when it is clean). Nothing is built or walked.
+    private func changesFromSnapshots(_ ref: String, _ s: Session, _ ws: Workspace, _ wb: Workbench) throws -> String {
+        guard !ref.isEmpty, !ref.hasPrefix("-") else { throw Failure(message: "base snapshot: takes a commit, branch or tag with a stored map (history lists them)") }
+        let ctx = historyContext(ws, wb)
+        guard let (commit, _) = blocking({ await History.resolve(ref, in: ws.root) }) else { throw Failure(message: "\(ref) is not a commit of this repository") }
+        guard let base = ctx.store.snapshot(profile: ctx.profile.id, commit: commit) else {
+            throw Failure(message: "no stored map of \(commit.prefix(7)) for this workspace and profile: history lists the commits that have one")
+        }
+        let build = headBuild(s)
+        var head: MapSnapshot?
+        if let build, History.fileable(build) { head = blocking { await History.snapshot(of: build, workspace: ws.root, profile: ctx.profile, stateRoot: ctx.root) } }
+        if head == nil, !s.dirty, let (c, t) = blocking({ await History.resolve(s.head, in: ws.root) }) {
+            head = ctx.store.snapshot(profile: ctx.profile.id, commit: c) ?? ctx.store.snapshot(profile: ctx.profile.id, tree: t)
+        }
+        guard let head else {
+            throw Failure(message: "no stored map of \(label(s))'s commit \(s.shortHead)\(s.dirty ? " (it has uncommitted changes, which no map stands for)" : ""): history lists what is stored")
+        }
+        let folder = mainSync { wb.sessions.evidence }.changesFolder(head: "snap-" + head.commit.prefix(12), base: "snap-" + base.commit.prefix(12))
+        let set = ChangeSet.fromHistory(head: head, base: base, store: ctx.store, folder: folder,
+                                        baseline: base.commit.hasPrefix(ref) || ref.count < 8 ? "the stored map of \(base.commit.prefix(7))" : "the stored map of \(ref) at \(base.commit.prefix(7))")
+        setLastChanges(set, for: s.worktree.path)
+        return AgentChanges.describe(set, header: "changes from history, no walk started: \(label(s)) \(head.commit.prefix(7)) (stored map) against \(base.commit.prefix(7)) (stored map)")
+    }
+
+    private func historyContext(_ ws: Workspace, _ wb: Workbench) -> (store: MapStore, profile: MapProfile, root: URL) {
+        let evidence = mainSync { wb.sessions.evidence }
+        let root = evidence.store.root
+        let store = History.store(stateRoot: root, workspace: ws.root)
+        let profile = evidence.changesProfile(start: nil)
+        if Engine.agentCheck { AgentCheckHooks.seedHistory(store: store, profile: profile, workspace: ws.root) }
+        return (store, profile, root)
+    }
+
+    /// The snapshots stored for the session's workspace and profile, oldest first.
+    private func storedSnapshots(_ ctx: (store: MapStore, profile: MapProfile, root: URL)) -> [MapSnapshot] {
+        ctx.store.commits(profile: ctx.profile.id).compactMap { ctx.store.snapshot(profile: ctx.profile.id, commit: $0) }
+            .sorted { ($0.walked, $0.commit) < ($1.walked, $1.commit) }
+    }
+
+    /// `history`: with no argument the stored snapshots, newest first; with `screen` that screen's lineage over time.
+    func historyTool(_ args: [String: Any], _ connection: Connection) throws -> String {
+        let (s, ws) = try tied(connection)
+        guard let wb = workbench else { throw Failure(message: Self.noSession) }
+        let ctx = historyContext(ws, wb)
+        let snaps = storedSnapshots(ctx)
+        let name = ws.root.lastPathComponent
+        guard !snaps.isEmpty else {
+            return "history: no snapshots stored for \(name) (profile \(ctx.profile.id)) yet: a walk of a clean commit files one"
+        }
+        let query = (args["screen"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+        let mine = s.dirty ? nil : s.head
+        func day(_ snap: MapSnapshot) -> String { String(snap.walked.prefix(16)).replacingOccurrences(of: "T", with: " ") }
+        func short(_ snap: MapSnapshot) -> String { String(snap.commit.prefix(7)) + (mine.map { snap.commit.hasPrefix($0) || $0.hasPrefix(snap.commit) } == true ? " (this session)" : "") }
+
+        if query.isEmpty {
+            var lines = ["history: \(snaps.count) snapshot\(snaps.count == 1 ? "" : "s") of \(name), profile \(ctx.profile.id), newest first"]
+            for (i, snap) in snaps.enumerated().reversed() {
+                var line = "\(short(snap))  \(day(snap))  \(snap.screens.count) screens"
+                if i > 0 {
+                    let c = MapPairing.diff(head: snap, base: snaps[i - 1]).counts
+                    line += c.differing == 0 ? "  no change against \(snaps[i - 1].commit.prefix(7))"
+                        : "  +\(c.added) new, ~\(c.modified) changed, -\(c.removed) gone against \(snaps[i - 1].commit.prefix(7))"
+                } else { line += "  the first" }
+                if !snap.incomplete.isEmpty { line += "  (walk did not finish)" }
+                lines.append(line)
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        // One screen: the lineage the query names (an id, a lineage or a title, newest snapshot first), then each commit that changed it.
+        let q = query.lowercased()
+        var lineages: [String] = []
+        for snap in snaps.reversed() {
+            for sc in snap.screens where sc.id == query || sc.lineage == query || sc.title.lowercased() == q || sc.id.lowercased() == q {
+                if !lineages.contains(sc.lineage) { lineages.append(sc.lineage) }
+            }
+            if !lineages.isEmpty { break }
+        }
+        guard let lineage = lineages.first else { throw Failure(message: "no screen \"\(query)\" in the stored maps: give a screen's title or id") }
+        var lines: [String] = []
+        var titleNow = query
+        var changed = 0
+        for (i, snap) in snaps.enumerated() {
+            guard let here = snap.screens.first(where: { $0.lineage == lineage }) else {
+                if i > 0, snaps[i - 1].screens.contains(where: { $0.lineage == lineage }) { lines.append("\(short(snap))  \(day(snap))  gone"); changed += 1 }
+                continue
+            }
+            titleNow = here.title.isEmpty ? here.activity : here.title
+            if i == 0 { lines.append("\(short(snap))  \(day(snap))  first stored (\(here.id))"); changed += 1; continue }
+            let prev = snaps[i - 1]
+            guard prev.screens.contains(where: { $0.lineage == lineage }) else { lines.append("\(short(snap))  \(day(snap))  new (\(here.id))"); changed += 1; continue }
+            let d = MapPairing.diff(head: snap, base: prev)
+            if let ch = d.change(lineage), ch.status == .modified {
+                var parts: [String] = []
+                for r in [MapDiff.Reason.visual, .structure, .routes, .text] where ch.reasons.contains(r) {
+                    switch r {
+                    case .visual: parts.append("visual")
+                    case .structure: parts.append("structure (now \(here.id))")
+                    case .routes:
+                        for st in [MapDiff.EdgeChange.Status.added, .removed, .retargeted] {
+                            let n = d.edges.filter { $0.from == lineage && $0.status == st }.count
+                            if n > 0 { parts.append("\(n) route\(n == 1 ? "" : "s") \(st == .retargeted ? "redirected" : st.rawValue)") }
+                        }
+                    case .text: let n = ch.textAdded.count + ch.textRemoved.count; parts.append("\(n) text\(n == 1 ? "" : "s") changed")
+                    }
+                }
+                lines.append("\(short(snap))  \(day(snap))  " + parts.joined(separator: ", "))
+                changed += 1
+            }
+        }
+        let others = lineages.count > 1 ? "; \(lineages.count - 1) other screen\(lineages.count == 2 ? "" : "s") has that title: pass its id" : ""
+        return (["history of \(titleNow) (\(lineage)): changed in \(changed) of \(snaps.count) snapshots\(others)"] + (lines.isEmpty ? ["never changed"] : lines)).joined(separator: "\n")
+    }
+
+    /// `screenshot` with `screen` and `commit`: the stored capture of a screen at that commit.
+    func historyPicture(_ args: [String: Any], _ connection: Connection) throws -> [[String: Any]] {
+        let (_, ws) = try tied(connection)
+        guard let wb = workbench else { throw Failure(message: Self.noSession) }
+        let ctx = historyContext(ws, wb)
+        let commit = (args["commit"] as? String ?? "").lowercased(), query = (args["screen"] as? String) ?? ""
+        guard commit.count >= 4, commit.allSatisfy({ $0.isHexDigit }) else { throw Failure(message: "commit is a commit's hash (7 digits or more) from history") }
+        let matches = storedSnapshots(ctx).filter { $0.commit.hasPrefix(commit) }
+        guard let snap = matches.first, matches.count == 1 else {
+            throw Failure(message: matches.isEmpty ? "no stored map of \(commit): history lists the commits that have one" : "\(commit) is ambiguous: give more digits")
+        }
+        let q = query.lowercased()
+        guard let sc = snap.screens.first(where: { $0.id == query || $0.lineage == query }) ?? snap.screens.first(where: { $0.title.lowercased() == q }),
+              let combo = sc.captures.keys.sorted().first, let hash = sc.captures[combo] else {
+            throw Failure(message: "\(query) has no stored capture at \(snap.commit.prefix(7)): history with screen names the commits that have it")
+        }
+        guard let file = ctx.store.blobURL(hash) else { throw Failure(message: "the capture is no longer in the store (it was pruned)") }
+        return try Self.scaledPicture(file, maxSize: args["max_size"] as? Int ?? 1000, label: "\(sc.title.isEmpty ? sc.id : sc.title) at \(snap.commit.prefix(7)) \(combo)")
+    }
+
     // MARK: screenshot with a screen id
 
     func changePicture(_ args: [String: Any], _ connection: Connection) throws -> [[String: Any]] {
@@ -268,7 +438,10 @@ extension AgentTools {
         guard let file = AgentChanges.capture(set, screen: screen, side: side) else {
             throw Failure(message: "\(screen) has no \(side) capture in the last comparison (call changes to see the screen ids; new screens have no base, gone ones no head, same ones no diff)")
         }
-        let maxSize = args["max_size"] as? Int ?? 1000
+        return try Self.scaledPicture(file, maxSize: args["max_size"] as? Int ?? 1000, label: "\(screen) \(side)")
+    }
+
+    static func scaledPicture(_ file: URL, maxSize: Int, label: String) throws -> [[String: Any]] {
         guard let rep = NSBitmapImageRep(data: (try? Data(contentsOf: file)) ?? Data()), let cg = rep.cgImage else {
             throw Failure(message: "that capture could not be read: the comparison's folder may have been pruned, call changes again")
         }
@@ -283,8 +456,9 @@ extension AgentTools {
             throw Failure(message: "the capture could not be encoded")
         }
         return [["type": "image", "data": png.base64EncodedString(), "mimeType": "image/png"],
-                ["type": "text", "text": "\(screen) \(side) \(w)x\(h) (capture \(cg.width)x\(cg.height))"]]
+                ["type": "text", "text": "\(label) \(w)x\(h) (capture \(cg.width)x\(cg.height))"]]
     }
+
 
     func finishResolve(_ key: String) { changesLock.lock(); pendingResolves[key] = nil; changesLock.unlock() }
     func setLastChanges(_ set: ChangeSet, for worktree: String) { changesLock.lock(); lastChanges[worktree] = set; changesLock.unlock() }
@@ -321,11 +495,14 @@ extension AgentTools {
 enum AgentChanges {
     static func describe(_ set: ChangeSet, header: String) -> String {
         var lines = [header]
+        if let b = set.baseline, set.diff != nil { lines.append("baseline: " + b) }
         for c in set.screens {
             switch c.status {
             case .new: lines.append("+ \(c.title) (new) [\(c.id)]")
             case .gone: lines.append("- \(c.title) (gone) [\(c.id)]")
-            case .changed: lines.append("~ \(c.title): \(c.detail) [\(c.id)]")
+            case .changed:
+                lines.append("~ \(c.title): \(set.reasons(of: c, tool: true) ?? c.detail) [\(c.id)]")
+                for l in set.controlLines(of: c) where l.hasPrefix(">") { lines.append("> \(c.title): " + l.dropFirst(2)) }
             case .unreached: lines.append("? \(c.title) (not reached: \(c.detail)) [\(c.id)]")
             case .same: break
             }
@@ -333,7 +510,13 @@ enum AgentChanges {
         let n = set.summary
         lines.append("\(n.new) new, \(n.changed) changed, \(n.gone) gone, \(n.same) the same" + (set.unreached > 0 ? ", \(set.unreached) not reached (a walk did not finish)" : ""))
         if set.identical { lines.append("head and base are the same build: nothing was walked") }
-        if set.crashes.isEmpty { lines.append("crashes: none") }
+        if set.diff != nil {
+            let found = set.crashStatus()
+            if found.isEmpty { lines.append("crashes: none") } else {
+                lines.append("crashes: \(found.count)")
+                for c in found.prefix(3) { lines.append("  \(c.status): \(c.detail)") }
+            }
+        } else if set.crashes.isEmpty { lines.append("crashes: none") }
         else {
             lines.append("crashes: \(set.crashes.count)")
             for c in set.crashes.prefix(3) { lines.append("  \(c.side == .base ? "base" : "head"): " + (c.detail.split(separator: "\n").first.map(String.init) ?? "a crash")) }
@@ -354,7 +537,7 @@ enum AgentChanges {
         case "base": url = c.base
         default: url = c.diff
         }
-        guard let url, url.isInside(set.folder), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard let url, url.isInside(set.folder) || set.storeFolder.map({ url.isInside($0) }) == true, FileManager.default.fileExists(atPath: url.path) else { return nil }
         return url
     }
 }
@@ -397,5 +580,35 @@ enum AgentCheckHooks {
         guard Engine.agentCheck else { return (nil, "") }
         let start = env["GREENROOM_CHECK_CRAWL_START"].flatMap { $0.isEmpty ? nil : $0 }
         return (start, differentBuild ? (env["GREENROOM_CHECK_BASE_OPTION"] ?? "") : "")
+    }
+
+    /// `GREENROOM_CHECK_HISTORY_SEED=PAIR:BASE_SHA:HEAD_SHA` (a name from `MapFixtures.golden()` and two commits of the repository):
+    /// the pair's two maps are stored as those commits' snapshots under the app's profile, with small pictures for their
+    /// captures, so `changes` and `history` can be checked with no walk. Once; a store that has them is left alone.
+    static func seedHistory(store: MapStore, profile: MapProfile, workspace: URL) {
+        guard Engine.agentCheck, let spec = env["GREENROOM_CHECK_HISTORY_SEED"] else { return }
+        let parts = spec.split(separator: ":").map(String.init)
+        guard parts.count == 3, let pair = MapFixtures.golden().first(where: { $0.name == parts[0] }) else { return }
+        for (snap, sha, when) in [(pair.base, parts[1], "2026-11-01T10:00:00Z"), (pair.head, parts[2], "2026-11-02T10:00:00Z")] {
+            if store.snapshot(profile: profile.id, commit: sha) != nil { continue }
+            var s = snap
+            s.commit = sha
+            s.tree = "tree-" + sha
+            s.profile = profile
+            s.walked = when
+            for sc in s.screens {
+                for hash in sc.captures.values where store.blobURL(hash) == nil {
+                    let dir = store.folder.appendingPathComponent("blobs", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    let bytes = Array(hash.utf8)
+                    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                               isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+                    let c = NSColor(deviceRed: CGFloat(bytes[0]) / 255, green: CGFloat(bytes[1]) / 255, blue: CGFloat(bytes[2]) / 255, alpha: 1)
+                    for x in 0..<64 { for y in 0..<64 { rep.setColor(c, atX: x, y: y) } }
+                    try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent(hash + ".png"))
+                }
+            }
+            _ = store.save(s)
+        }
     }
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Checks the agent interface as an agent uses it: `Greenroom --mcp` on stdin/stdout, against the bundled test app.
 Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK [--sessions]
+--history: `changes` and `history` from stored maps, with no walk and no simulator (a temporary repository whose store is seeded
+from MapFixtures' golden pair `mixed` by GREENROOM_CHECK_HISTORY_SEED; APK is not used).
 --sessions: the agent tied to its worktree's session (a temporary git repository with two worktrees, a state folder
 of its own), and the session tools: session, build (a stand-in recipe), changes (against the same build and against
 a base that differs through crawl.py's --base-option), screenshot's screen, and the recording of the agent's session;
@@ -363,6 +365,120 @@ def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, 
     t, err = a.call("screenshot", screen="nonesuch")
     expect("an unknown screen id is an error", err and "no head capture" in t, t)
 
+def history_mode():
+    """One worktree of a temporary repository with two commits; the store holds the fixtures' `mixed` base at the first and its
+    head at the second (the session's). `changes` base snapshot:FIRST and `history` answer from it; nothing is walked."""
+    root = os.path.realpath(tempfile.mkdtemp(prefix="grmcp-", dir="/tmp"))
+    repo, state_dir = root + "/repo", root + "/state"
+    def git(*a, cwd=repo, out=False):
+        r = subprocess.run(["/usr/bin/git", "-c", "user.name=Check", "-c", "user.email=check@example.invalid", "-c", "commit.gpgsign=false", *a],
+                           cwd=cwd, check=True, capture_output=True, text=True)
+        return r.stdout.strip()
+    os.makedirs(repo); os.makedirs(state_dir)
+    open(repo + "/README.md", "w").write("hello\n")
+    git("init", "-q", "-b", "main"); git("add", "."); git("commit", "-q", "-m", "first")
+    first = git("rev-parse", "HEAD")
+    git("commit", "-q", "--allow-empty", "-m", "second")
+    second = git("rev-parse", "HEAD")
+    wt = root + "/wt"
+    git("worktree", "add", "-q", "-b", "feat", wt)
+    env = dict(os.environ, GREENROOM_STATE=state_dir, GREENROOM_ADD_REPOSITORY=repo, GREENROOM_CHECK_AUTO="off",
+               GREENROOM_CHECK_HISTORY_SEED=f"mixed:{first}:{second}")
+    app_log = open(root + "/app.log", "w")
+    app = subprocess.Popen([exe, "--background", "--agent-check"], stdout=app_log, stderr=subprocess.STDOUT, env=env)
+    failures = []
+    def expect(what, ok, got=""):
+        print(("ok   " if ok else "FAIL ") + what + ("" if ok else "\n     got: " + str(got)[:600].replace("\n", "\n          ")))
+        if not ok:
+            failures.append(what)
+    shim = None
+    try:
+        agent = state_dir + "/agent.json"
+        def up():
+            try:
+                os.kill(json.load(open(agent))["pid"], 0); return True
+            except Exception:
+                return False
+        end = time.time() + 60
+        while time.time() < end and not up():
+            time.sleep(0.2)
+        if not up():
+            sys.exit("mcp-check: Greenroom did not start its agent endpoint within 60 s\n" + open(root + "/app.log", errors="replace").read()[-2000:])
+        shim = subprocess.Popen([exe, "--mcp", "--agent-check"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, cwd=wt, env=env)
+        n = [0]
+        def rpc(method, params=None):
+            n[0] += 1
+            shim.stdin.write(json.dumps({"jsonrpc": "2.0", "id": n[0], "method": method, "params": params or {}}) + "\n"); shim.stdin.flush()
+            return json.loads(shim.stdout.readline())
+        rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp-check", "version": "1"}})
+        def call(name, **args):
+            r = rpc("tools/call", {"name": name, "arguments": args}).get("result", {})
+            return r, "\n".join(c["text"] for c in r.get("content", []) if c["type"] == "text"), bool(r.get("isError"))
+        # The repository is added by the app at launch, and its rows are read from git a moment later.
+        t, err = "", True
+        end = time.time() + 60
+        while time.time() < end:
+            _, t, err = call("history")
+            if "not a worktree" not in t:
+                break
+            time.sleep(0.5)
+        print("---- history\n" + t + "\n----")
+        lines = t.split("\n")
+        expect("history lists the two stored snapshots, newest first, the session's commit marked",
+               not err and lines[0].startswith("history: 2 snapshots") and lines[1].startswith(second[:7]) and "(this session)" in lines[1] and lines[2].startswith(first[:7]) and "the first" in lines[2], t)
+        expect("... and says what changed against the one before",
+               re.search(r"\+\d+ new, ~\d+ changed, -\d+ gone against " + first[:7], lines[1]) is not None, lines[1])
+        _, c, err = call("changes", base="snapshot:" + first[:7])
+        print("---- changes\n" + c + "\n----")
+        cl = c.split("\n")
+        expect("changes from stored maps says so in its first line and started no walk",
+               not err and cl[0].startswith("changes from history, no walk started:") and not glob.glob(state_dir + "/changes/*/crawl.json"), c)
+        expect("... with the baseline", any(l.startswith("baseline: ") and first[:7] in l for l in cl), c)
+        changed = [l for l in cl if l.startswith("~ ")]
+        expect("... each ~ line keeps its [id] and carries reasons after the colon",
+               changed and all(re.search(r": .+ \[[^\]]+\]$", l) for l in changed) and any(re.search(r"route|text|visual|structure", l) for l in changed), c)
+        expect("... counts, and no crashes", any(re.match(r"\d+ new, \d+ changed, \d+ gone, \d+ the same", l) for l in cl) and "crashes: none" in cl, c)
+        redirected = [l for l in cl if l.startswith("> ")]
+        print("redirected lines:", redirected)
+        shown = [l for l in changed if re.search(r": [1-9][0-9,]* px differ", l)]
+        m = re.search(r"\[([^\]]+)\]$", (shown or changed or [""])[0])
+        for side in ("head", "base", "diff"):
+            r, t2, err = call("screenshot", screen=m.group(1) if m else "x", side=side)
+            images = [x for x in r.get("content", []) if x["type"] == "image"]
+            expect(f"screenshot with a screen id from a history comparison returns the {side} picture", not err and len(images) == 1 and len(images[0]["data"]) > 100, t2)
+        # Lineage of one screen.
+        title = None
+        for l in cl:
+            mt = re.match(r"~ (.+?): ", l)
+            if mt: title = mt.group(1); break
+        _, h, err = call("history", screen=title or "x")
+        print("---- history screen\n" + h + "\n----")
+        expect("history with screen gives that screen's lineage, one line per changing commit",
+               not err and h.startswith(f"history of {title}") and any(l.startswith(second[:7]) for l in h.split("\n")[1:]), h)
+        r, t3, err = call("screenshot", screen=title or "x", commit=first[:7])
+        images = [x for x in r.get("content", []) if x["type"] == "image"]
+        expect("screenshot with screen and commit gives the stored picture", not err and len(images) == 1 and (first[:7] in t3), t3)
+        _, t4, err = call("screenshot", screen="no such screen", commit=first[:7])
+        expect("... and an unknown screen is an error", err and "no stored capture" in t4, t4)
+        _, t5, err = call("history", screen="no such screen")
+        expect("history of an unknown screen is an error", err and "no screen" in t5, t5)
+        _, t6, err = call("changes", base="snapshot:" + "0" * 40)
+        expect("a base commit with no stored map is an error, not a walk", err and ("not a commit" in t6 or "no stored map" in t6), t6)
+    finally:
+        if shim:
+            try: shim.stdin.close(); shim.wait(timeout=10)
+            except Exception: shim.kill()
+        app.terminate()
+        try: app.wait(timeout=20)
+        except subprocess.TimeoutExpired: app.kill()
+        if failures:
+            print("the app's output:\n" + open(root + "/app.log", errors="replace").read()[-3000:])
+        subprocess.run(["rm", "-rf", root])
+    print(f"mcp-check --history: {len(failures)} failed" if failures else "mcp-check --history: all passed")
+    sys.exit(1 if failures else 0)
+
+if "--history" in sys.argv:
+    history_mode()
 if "--sessions" in sys.argv:
     sessions_mode()
 state = (os.environ.get("GREENROOM_STATE") or os.path.expanduser("~/Library/Application Support/Greenroom")) + "/agent.json"   # GREENROOM_STATE: a state folder of its own
