@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mapCheckIfAsked()
         mapSignInCheckIfAsked()
         variablesCheckIfAsked()
+        signInCheckIfAsked()
         arrangeCheckIfAsked()
         PrivacyCheck.runIfAsked(self)   // scripts/network-check.sh
         matrixCheckIfAsked()
@@ -684,6 +685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scripts.submenu = NSMenu(title: "Run Script")
         scripts.submenu?.delegate = scriptsMenu
         device.addItem(scripts)
+        device.addItem(to(workbench: #selector(Workbench.showSecureSignIn(_:)), "Secure Sign In…", "L", [.command, .option]))
         device.addItem(.separator())
         device.addItem(to(workbench: #selector(Workbench.screenshot(_:)), "Save Screenshot", "s"))
         device.addItem(to(workbench: #selector(Workbench.restart(_:)), "Restart App", "R", [.command, .shift]))

@@ -52,6 +52,11 @@ version of it and adds the workbench.
   Keychain (needs `brew install 1password-cli` with 1Password > Settings > Developer > Integrate with 1Password CLI;
   Test in Settings checks a reference). Build recipes get the other variables too. An agent can run a script you have switched on for agents in
   Settings, as it was then, and never sees a value.
+- **Secure sign in**: when the chosen device shows a sign-in screen (a password field), a **Sign in** button appears
+  in the bar (also Device > Secure Sign In…, ⌥⌘L). Its panel runs one of your sign-in scripts, or fills the fields on
+  screen from your variables (plain, secret or 1Password: each field's variable is guessed and then remembered per
+  app) and taps the button you pick, such as Connect. Values are typed into the app and never shown, not even in the
+  panel. Save as Script… writes the same steps as a script, for the Screen Map's signed-in walk or for agents.
 - **Signed-in screen map**: in the Screen Map, pick "Sign in with <script>" and the walk first runs that script on a
   hidden device of its own, then walks the whole app on that device's signed-in data (one device, as the crawler
   walks kept data). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.

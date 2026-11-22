@@ -53,7 +53,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private let header = GlassView()
     private let rail = GlassView()
     private var appChip: GlassButton!
-    private var deviceButton: GlassButton!
+    private(set) var deviceButton: GlassButton!
     private var deviceButtons: [GlassButton] = []
     private var mirrorButton: GlassButton!
     private var layoutButtons: [GlassButton] = []
@@ -97,6 +97,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     let snapshotReview = SnapshotReview(frame: .zero)
     // The screen map (ScreenMap.swift): a full-stage sheet too.
     let screenMap = ScreenMap(frame: .zero)
+    /// Secure sign in (SecureSignIn): the bar's button, shown while the chosen device shows a password field.
+    let signInButton = GlassButton(symbol: "key.horizontal.fill", title: "Sign in", label: "Secure sign in: fill this sign-in screen from your variables or 1Password, or run a sign-in script", style: .accent, target: nil, action: nil)
+    var signInWatch: Timer?
+    var signInAsking = false
+    var signInPopover: NSPopover?
     // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
     let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
@@ -474,7 +479,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), spacer, mirrorButton, group(layoutButtons), shot, recordButton, commands])
+        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), signInButton, spacer, mirrorButton, group(layoutButtons), shot, recordButton, commands])
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -525,6 +530,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         palette.isHidden = true
         installSnapshotReview(in: host)
         installScreenMap(in: host)
+        startSignInWatch()
         installChangesSheet(in: host)
         scrim.onClick = { [weak self] in self?.hidePalette() }
         palette.onClose = { [weak self] in self?.hidePalette() }
