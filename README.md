@@ -49,6 +49,10 @@ version of it and adds the workbench.
   `~/Library/Application Support/Greenroom/scripts` (and a session's `.greenroom/scripts`); New Script… writes an
   example. Build recipes get the variables too. An agent can run a script you have switched on for agents in
   Settings, as it was then, and never sees a value.
+- **Signed-in screen map**: in the Screen Map, pick "Sign in with <script>" and the walk first runs that script on a
+  hidden device of its own, then walks the whole app on that device's signed-in data (one device, as the crawler
+  walks kept data). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.
+  A script that fails stops the walk with its last line.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
 - **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.

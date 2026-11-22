@@ -12,6 +12,14 @@ final class ScreenMap: NSView {
     var defaultAPK: () -> URL? = { nil }
     /// Replays a screen's route on the selected device.
     var onGo: ((MapScreen, ScreenMapData) -> Void)?
+    /// The selected simulator's session worktree, whose `.greenroom/scripts` are offered for signing in too.
+    var worktree: () -> URL? = { nil }
+
+    /// The script that signs in before a walk (MapSignIn), while it runs; the slot it left, while the walk runs.
+    private var signIn: MapSignIn?
+    private var signedInSlot: String?
+    private var signInStatus = ""
+    private var scripts: [Scripts.Script] = []
 
     private(set) var run: CrawlRun?
     private(set) var data: ScreenMapData?
@@ -29,6 +37,7 @@ final class ScreenMap: NSView {
     private let capturePopup = NSPopUpButton()
     private let offline = NSButton(checkboxWithTitle: "Offline", target: nil, action: nil)
     private let startField = NSTextField()
+    private let signInPopup = NSPopUpButton()
     private let walkButton = GlassButton(symbol: "point.3.connected.trianglepath.dotted", title: "Walk the app", label: "Walk every screen the app has", style: .accent, target: nil, action: nil)
     private let summary = NSTextField(labelWithString: "")
     private let crashChip = GlassButton(symbol: "exclamationmark.triangle.fill", title: "", label: "Show where it crashed", style: .record, target: nil, action: nil)
@@ -118,7 +127,12 @@ final class ScreenMap: NSView {
         let safety = label("Never taps delete, buy, send, sign out and the like", size: 11)
         safety.lineBreakMode = .byTruncatingTail
         safety.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        let settings = NSStackView(views: [depthPopup, timePopup, capturePopup, offline, startField, safety])
+        signInPopup.controlSize = .small
+        signInPopup.font = .systemFont(ofSize: 12)
+        signInPopup.target = self; signInPopup.action = #selector(signInChanged)
+        signInPopup.toolTip = "Run one of your scripts (Device > Run Script) on a hidden device first, then walk signed in on its data. Your own devices' data is not touched."
+        signInPopup.setAccessibilityLabel("Sign in before walking")
+        let settings = NSStackView(views: [depthPopup, timePopup, capturePopup, signInPopup, offline, startField, safety])
         settings.spacing = 10
 
         // Status: what the walk is doing, or what the map holds.
@@ -262,7 +276,8 @@ final class ScreenMap: NSView {
         guard !isOpen else { return }
         isOpen = true
         if pythonURL == nil { pythonURL = SnapshotRun.python() }
-        if data == nil, run == nil, let f = lastFolder, let last = ScreenMapData.read(f) { present(last, animated: false) }
+        reloadScripts()
+        if data == nil, !isWalking, let f = lastFolder, let last = ScreenMapData.read(f) { present(last, animated: false) }
         refresh()
         isHidden = false
         alphaValue = 0
@@ -279,7 +294,7 @@ final class ScreenMap: NSView {
     /// has no map or a walk is running here.
     @discardableResult
     func show(folder: URL) -> Bool {
-        guard run?.isRunning != true, let d = ScreenMapData.read(folder) else { return false }
+        guard !isWalking, let d = ScreenMapData.read(folder) else { return false }
         present(d, animated: false)
         return true
     }
@@ -314,10 +329,14 @@ final class ScreenMap: NSView {
     }
 
     /// For checks: depth, time and captures by index into the menus.
-    func configure(depth: Int, time: Int, captures: Int) {
+    func configure(depth: Int, time: Int, captures: Int, start: String? = nil) {
         depthPopup.selectItem(at: depth); timePopup.selectItem(at: time); capturePopup.selectItem(at: captures)
+        if let start { startField.stringValue = start }
         settingChanged()
     }
+
+    /// The status line, for checks.
+    var statusText: String { summary.stringValue }
 
     @objc private func settingChanged() {
         let d = UserDefaults.standard
@@ -326,6 +345,47 @@ final class ScreenMap: NSView {
         d.set(capturePopup.indexOfSelectedItem, forKey: "mapCaptures")
         d.set(offline.state == .on, forKey: "mapOffline")
     }
+
+    // MARK: Signing in
+
+    /// The scripts that can sign in: Greenroom's own, then the selected session's. The choice is kept by name.
+    func reloadScripts() {
+        guard !isWalking else { return }
+        scripts = Scripts.available(for: worktree())
+        let wanted = UserDefaults.standard.string(forKey: "mapSignIn")
+        signInPopup.removeAllItems()
+        signInPopup.addItem(withTitle: "No sign-in")
+        for s in scripts { signInPopup.addItem(withTitle: "Sign in with " + s.name + (s.fromWorktree ? " (session)" : "")) }
+        signInPopup.menu?.addItem(.separator())
+        signInPopup.addItem(withTitle: "New Sign-in Script…")
+        signInPopup.lastItem?.representedObject = "new"
+        let i = scripts.firstIndex { $0.name == wanted }.map { $0 + 1 } ?? 0
+        signInPopup.selectItem(at: i)
+    }
+
+    /// The script chosen in the menu, if any.
+    var signInScript: Scripts.Script? {
+        let i = signInPopup.indexOfSelectedItem - 1
+        return scripts.indices.contains(i) ? scripts[i] : nil
+    }
+
+    /// For checks: the script to sign in with (nil: none), by its file.
+    func chooseSignIn(_ url: URL?) {
+        if let url, !scripts.contains(where: { $0.url == url }) { scripts.append(.init(url: url, fromWorktree: false)); signInPopup.insertItem(withTitle: "Sign in with " + url.lastPathComponent, at: scripts.count) }
+        let i = url.flatMap { u in scripts.firstIndex { $0.url == u } }.map { $0 + 1 } ?? 0
+        signInPopup.selectItem(at: i)
+    }
+
+    @objc private func signInChanged() {
+        if signInPopup.selectedItem?.representedObject as? String == "new" {
+            do { NSWorkspace.shared.open(try Scripts.newScript()) } catch { onSay?("Could not write a new script", true) }
+            reloadScripts()
+            return
+        }
+        UserDefaults.standard.set(signInScript?.name, forKey: "mapSignIn")
+    }
+
+    var isWalking: Bool { signIn != nil || run?.isRunning == true }
 
     @objc private func chooseAPK() {
         let p = NSOpenPanel()
@@ -338,11 +398,11 @@ final class ScreenMap: NSView {
     private func refresh() {
         if let apk = effectiveAPK { appLabel.stringValue = apk.lastPathComponent + (apkURL == nil ? "  ·  the selected device's" : "") }
         else { appLabel.stringValue = "No app: open one, or choose an APK" }
-        let running = run?.isRunning == true
+        let running = isWalking
         walkButton.title = running ? "Stop" : (data == nil ? "Walk the app" : "Walk again")
         walkButton.style = running ? .record : .accent
         walkButton.isEnabled = running || (effectiveAPK != nil && pythonURL != nil)
-        for c in [depthPopup, timePopup, capturePopup, offline, startField] as [NSControl] { c.isEnabled = !running }
+        for c in [depthPopup, timePopup, capturePopup, signInPopup, offline, startField] as [NSControl] { c.isEnabled = !running }
         if pythonURL == nil, !running {
             setSummary("The map needs Python 3, and this Mac has none. Install the command line tools (xcode-select --install in Terminal), then reopen this.", problem: true)
         }
@@ -358,6 +418,7 @@ final class ScreenMap: NSView {
     // MARK: Walking
 
     @objc private func walkPressed() {
+        if let signIn { signIn.cancel(); return }
         if let run, run.isRunning { run.cancel(); return }
         walk()
     }
@@ -365,14 +426,14 @@ final class ScreenMap: NSView {
     /// Starts a walk with the settings shown. False when there is nothing to walk or no Python.
     @discardableResult
     func walk() -> Bool {
-        guard run?.isRunning != true else { return true }
+        guard !isWalking else { return true }
         guard let apk = effectiveAPK, let python = pythonURL ?? SnapshotRun.python() else { refresh(); return false }
         UserDefaults.standard.set(startField.stringValue, forKey: "mapStart")
         let base = Engine.shared.state.appendingPathComponent("maps", isDirectory: true)
         SnapshotRun.prune(base, keep: 5)
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let r = CrawlRun(python: python, apk: apk, out: base.appendingPathComponent("run-" + stamp), settings: settings)
-        run = r
+        let out = base.appendingPathComponent("run-" + stamp)
+        let walkSettings = settings
         data = nil
         reached = (0, 0)
         canvas.clear()
@@ -382,22 +443,56 @@ final class ScreenMap: NSView {
         crashChip.isHidden = true
         comboControl.isHidden = true
         spinner.startAnimation(nil)
-        r.onEvent = { [weak self] e in self?.event(e) }
-        r.onFinish = { [weak self] o in self?.finished(o) }
-        r.start()
         ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        if let script = signInScript {
+            // Sign in first, on a device of its own; the walk then takes that device's data as it is.
+            SlotClone.sweep(in: Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true))
+            let s = MapSignIn(apk: apk, script: script, worktree: worktree())
+            signIn = s
+            signInStatus = "Starting a device to run \(script.name)…"
+            s.onStatus = { [weak self] text in self?.signInStatus = text; self?.tick() }
+            s.start { [weak self] outcome in
+                guard let self else { return }
+                self.signIn = nil
+                switch outcome {
+                case .ready(let slot):
+                    var ws = walkSettings
+                    ws.keepData = true
+                    ws.jobs = 1   // the crawler walks a kept slot with one device
+                    ws.engineOptions = ["--data-slots", slot]
+                    self.signedInSlot = slot
+                    self.startCrawl(python: python, apk: apk, out: out, settings: ws)
+                case .failed(let why): self.finished(.failed("signing in did not work. " + why))
+                case .cancelled: self.finished(.cancelled)
+                }
+            }
+        } else {
+            startCrawl(python: python, apk: apk, out: out, settings: walkSettings)
+        }
         tick()
         refresh()
         return true
     }
 
+    private func startCrawl(python: URL, apk: URL, out: URL, settings: CrawlRun.Settings) {
+        let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
+        run = r
+        r.onEvent = { [weak self] e in self?.event(e) }
+        r.onFinish = { [weak self] o in self?.finished(o) }
+        r.start()
+        tick()
+        refresh()
+    }
+
     private func tick() {
+        if signIn != nil { setSummary(signInStatus); return }
         guard let run, run.isRunning else { return }
         let s = Int(Date().timeIntervalSince(run.startedAt))
         let t = String(format: "%d:%02d", s / 60, s % 60)
-        if reached.known == 0 { setSummary("Starting three hidden devices…  \(t)") }
+        let signedIn = signedInSlot != nil ? ", signed in" : ""
+        if reached.known == 0 { setSummary(signedInSlot != nil ? "Starting the signed-in device…  \(t)" : "Starting three hidden devices…  \(t)") }
         else if reached.depth < 0 { setSummary("Capturing \(reached.known) screens…  \(t)") }
-        else { setSummary("Walking: \(reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"), \(reached.known) screen\(reached.known == 1 ? "" : "s") found  ·  \(t)") }
+        else { setSummary("Walking\(signedIn): \(reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"), \(reached.known) screen\(reached.known == 1 ? "" : "s") found  ·  \(t)") }
     }
 
     private func event(_ e: CrawlRun.Event) {
@@ -417,6 +512,10 @@ final class ScreenMap: NSView {
         ticker?.invalidate()
         ticker = nil
         spinner.stopAnimation(nil)
+        if let slot = signedInSlot {
+            signedInSlot = nil
+            DispatchQueue.global(qos: .utility).async { MapSignIn.discard(slot) }
+        }
         switch outcome {
         case .finished(let map):
             lastFolder = map.folder
