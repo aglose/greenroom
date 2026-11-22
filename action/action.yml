@@ -36,6 +36,14 @@ runs:
           echo "walked=false" >> "$GITHUB_OUTPUT"
         fi
 
+    - name: Refuse a signed-in profile (its captures can show an account)
+      if: steps.has.outputs.walked == 'false'
+      shell: bash
+      run: |
+        if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("signIn") else 1)' "${{ inputs.profile-file }}"; then
+          echo "::error::the profile signs in; this Action walks signed-out profiles only (see action/README.md)"; exit 1
+        fi
+
     - name: Walk the app in the engine's image
       if: steps.has.outputs.walked == 'false'
       shell: bash
