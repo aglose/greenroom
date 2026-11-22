@@ -46,7 +46,7 @@ final class Engine {
         // with --agent-check on the command line (scripts/mcp-check.py passes it): never from the environment alone.
         if Engine.agentCheck, let other = ProcessInfo.processInfo.environment["GREENROOM_STATE"], other.hasPrefix("/") {
             state = URL(fileURLWithPath: other, isDirectory: true)
-        } else if let (flag, i) = ["--evidence-check", "--changes-check", "--scripts-check"].compactMap({ f in CommandLine.arguments.firstIndex(of: f).map { (f, $0) } }).first,
+        } else if let (flag, i) = ["--evidence-check", "--changes-check", "--scripts-check", "--map-impact-check"].compactMap({ f in CommandLine.arguments.firstIndex(of: f).map { (f, $0) } }).first,
                   i + 2 < CommandLine.arguments.count {
             // `--evidence-check DIR APK` (and `--changes-check`, `--scripts-check`) keep their whole state (store, engine, app data) in
             // DIR/evidence-check/engine-state (DIR/changes-check/engine-state).

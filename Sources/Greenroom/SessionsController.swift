@@ -284,6 +284,9 @@ final class SessionsController {
         generation += 1
         let mine = generation
         let spaces = workspaces
+        // Teammates' maps, for the workspaces that share them (at most every ten minutes each; nothing when off).
+        let sharing = spaces.filter(\.shareMaps)
+        if !sharing.isEmpty { let root = store.root; Task.detached(priority: .utility) { for ws in sharing { _ = await History.fetchIfDue(ws, stateRoot: root) } } }
         let known = builds
         let before = sessions
         Task { @MainActor in
@@ -572,6 +575,19 @@ final class SessionsController {
         workspaces[i].walkWithData = on
         store.saveWorkspaces(workspaces)
         onChange?()
+    }
+
+    func sharesMaps(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.shareMaps ?? false }
+    func sharesSignedInMaps(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.shareSignedInMaps ?? false }
+
+    /// "Share screen maps through git" and "Also share maps walked on signed-in data", saved with the workspace.
+    func setShareMaps(_ on: Bool, signedIn: Bool? = nil, for s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        workspaces[i].shareMaps = on
+        if let signedIn { workspaces[i].shareSignedInMaps = signedIn }
+        store.saveWorkspaces(workspaces)
+        onChange?()
+        refresh()
     }
 
     func auto(of s: Session) -> Auto { workspaces.first { $0.root.path == s.workspace.path }?.auto ?? .onBuild }

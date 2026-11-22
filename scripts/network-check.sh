@@ -35,7 +35,8 @@ ASIDE="$SUPPORT.network-check-$$"
 [[ -e "$SUPPORT" ]] && mv "$SUPPORT" "$ASIDE"
 # Processes whose packets count, by name (also tools the engine's scripts may start) and by PID: every process
 # started under this script is recorded while it runs, so a helper with any name counts too.
-OURS='Greenroom|java|apksim-client|sandbox-exec|bash|sh|zsh|env|unzip|zip|shasum|python3|Python|curl|nc|ssh|openssl|perl|ruby|open|osascript'
+# git and its remote helpers too: map sharing (off unless a repository turns it on) is the only thing that starts them.
+OURS='Greenroom|java|apksim-client|sandbox-exec|bash|sh|zsh|env|unzip|zip|shasum|python3|Python|curl|nc|ssh|openssl|perl|ruby|open|osascript|git|git-remote-https|git-remote-http|git-remote-ssh'
 
 sudo -n /usr/sbin/tcpdump -i pktap,all -k -n -l -q 'not (host 127.0.0.1 or ip6 host ::1)' > "$CAP" 2> "$WORK/tcpdump.err" &
 DUMP=$!

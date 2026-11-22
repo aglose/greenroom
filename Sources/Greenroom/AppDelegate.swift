@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recipesCheckIfAsked()
         evidenceCheckIfAsked()
         changesCheckIfAsked()
+        historyLiveIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
@@ -552,7 +553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ctx.setFillColor(Design.stage.cgColor)
             ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
             ctx.scaleBy(x: scale, y: scale)
-            root.render(in: ctx)
+            view.effectiveAppearance.performAsCurrentDrawingAppearance { root.render(in: ctx) }   // the window's own (dark) appearance, not the system's
             if let image = ctx.makeImage() { try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file) }
             print("[greenroom] the screen is locked: \(file.lastPathComponent) is Core Animation's drawing, without the video or blur")
         }

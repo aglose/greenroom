@@ -36,6 +36,28 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var status: Status
         /// How the walk was made ("on a copy of this session's data", "fresh: ...").
         var note: String?
+        /// Whether the walk redid everything or only what a change could touch, and what keeping it honest found.
+        var impact: ImpactNote? = nil
+        /// What sharing the map through git did, or what went wrong, in words (nil when the workspace does not share).
+        var share: String? = nil
+    }
+
+    /// A walk's plan and what came of it (packages I1, I2), kept beside its map as `greenroom-impact.json`. Absent for a
+    /// walk the engine gave no choice about (the released engine walks everything, as before).
+    struct ImpactNote: Codable, Equatable {
+        /// Walked everything; `reason` says why.
+        var full: Bool
+        var reason: String?
+        /// Screens walked, and in all (the rest carried from `base`).
+        var walked: Int
+        var total: Int
+        /// Files changed since the walk it was seeded from.
+        var files: Int
+        var base: String?
+        /// A full walk compared with a quick one: how many carried screens differed.
+        var misses: Int?
+        /// "Verify carried screens", in words, while it runs and after.
+        var verify: String?
     }
 
     /// What a comparison of two builds found, from the `compare` list of crawl.json.
@@ -93,6 +115,10 @@ final class Evidence: NSObject, NSMenuItemValidation {
     private(set) var cancelledRuns = 0
 
     private var entries: [String: Entry] = [:]
+    /// The newest build asked for each worktree ("Verify carried screens" acts on it).
+    private var lastBuild: [String: Build] = [:]
+    /// Worktrees whose next walk is full ("Walk Everything Again").
+    private var fullNext = Set<String>()
     private var queue: [Job] = []
     private var current: Job?
     private var retry: Timer?
@@ -113,6 +139,15 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var note: String?
         /// "Walk again": not satisfied by a map that is there.
         var force = false
+        /// Its data clone is being removed; the end is published when that is done.
+        var finishing = false
+        /// "Walk Everything Again": a full walk whatever the impact says.
+        var forceFull = false
+        /// How it walks (I1), once planned; the folder holding the seed and the only-file.
+        var plan: History.WalkPlan?
+        var workDir: URL?
+        /// "Verify carried screens" of this worktree's map (its part and final folders are `verify.part`, `verify`).
+        var verifyOf: String?
         /// The session or repository went: the walk's folder goes with it.
         var forgotten = false
         struct Waiter {
@@ -124,6 +159,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         /// A comparison's own start (a deep link) and engine options for the base's launches (a check's changed build).
         var start: String?
         var baseOption = ""
+        /// How a walk was made, for the snapshot it files (set when it starts).
+        var profile: MapProfile?
         /// Where it is made and where it ends up, fixed when the job is made (the store may change meanwhile).
         let part: URL
         let final: URL
@@ -131,6 +168,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
             self.owner = owner; self.build = build; self.kind = kind; self.part = part; self.final = final
         }
         var isChanges: Bool { if case .changes = kind { return true } else { return false } }
+        /// A walk a comparison waits for, or the comparison itself: its progress goes to its waiters.
+        var forwardsProgress: Bool { isChanges || owner.hasPrefix("map:") }
     }
 
     override init() {
@@ -145,7 +184,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
     var evidenceFolder: URL { store.root.appendingPathComponent("evidence", isDirectory: true) }
     var changesFolder: URL { store.root.appendingPathComponent("changes", isDirectory: true) }
     func mapFolder(for key: String) -> URL { evidenceFolder.appendingPathComponent(key, isDirectory: true).appendingPathComponent("map", isDirectory: true) }
-    func changesFolder(head: String, base: String) -> URL { changesFolder.appendingPathComponent("\(head)-\(base)", isDirectory: true) }
+    func changesFolder(head: String, base: String, start: String? = nil, baseOption: String = "") -> URL {
+        changesFolder.appendingPathComponent(Self.pairName(head: head, base: base, start: start, baseOption: baseOption), isDirectory: true)
+    }
+
+    /// A comparison's folder name: the two keys, and when it has its own start or base option a hash of them, so a run
+    /// with either is never answered from one made without (or with others).
+    static func pairName(head: String, base: String, start: String?, baseOption: String) -> String {
+        let extra = (start ?? "") + "\u{0}" + baseOption
+        return "\(head)-\(base)" + (extra == "\u{0}" ? "" : "-o" + String(MapJSON.sha256(extra).prefix(8)))
+    }
 
     private func hasCrawl(_ folder: URL) -> Bool { fm.fileExists(atPath: folder.appendingPathComponent("crawl.json").path) }
 
@@ -214,9 +262,10 @@ final class Evidence: NSObject, NSMenuItemValidation {
             }
         }
         let map = mapFolder(for: build.key)
+        lastBuild[worktree] = build
         if !force, hasCrawl(map), let data = ScreenMapData.read(map) {
             drop(worktree)
-            entries[worktree] = Entry(key: build.key, date: build.date, status: Self.done(data), note: nil)
+            entries[worktree] = Entry(key: build.key, date: build.date, status: Self.done(data), note: nil, impact: Self.impactNote(map))
             onChange?()
             return
         }
@@ -233,6 +282,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         entries[worktree] = Entry(key: build.key, date: build.date, status: .queued, note: nil)
         let job = walkJob(owner: worktree, build: build, slot: slot)
         job.force = force
+        job.forceFull = fullNext.remove(worktree) != nil
         queue.append(job)
         onChange?()
         pump()
@@ -248,6 +298,186 @@ final class Evidence: NSObject, NSMenuItemValidation {
         if let job = current, job.owner == owner { cancel(job) }
     }
 
+    // MARK: Map history
+
+    /// Snapshots being filed, by build key.
+    private var filing: [String: Task<Void, Never>] = [:]
+
+    /// The profile of the walks a comparison makes (and so of the snapshots it files): the queue's budget, light captures,
+    /// no signed-in data.
+    func changesProfile(start: String? = nil) -> MapProfile {
+        Self.profile(depth: budget.depth, seconds: budget.seconds, appearances: ["light"], start: start, signedIn: false, offline: false)
+    }
+
+    static func profile(depth: Int, seconds: Int, appearances: [String], start: String?, signedIn: Bool, offline: Bool) -> MapProfile {
+        MapProfile(depth: depth, seconds: seconds, starts: (start?.isEmpty == false) ? [start!] : [], combos: appearances,
+                   signIn: signedIn ? "session-data" : nil, offline: offline)
+    }
+
+    /// A finished walk of a build that has a clean commit is filed in the history store, off the main thread.
+    private func file(_ job: Job, folder: URL) {
+        guard let profile = job.profile, History.fileable(job.build) else { return }
+        let build = job.build, root = store.root, engine = Engine.shared.version
+        let candidates = candidates(for: job)
+        let key = build.key, owner = job.owner, seed = job.plan?.seedSnapshot, planProblem = job.plan?.shareProblem
+        filing[key] = Task { @MainActor [weak self] in
+            let filed = await Task.detached {
+                await History.filed(walk: folder, build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine, seed: seed)
+            }.value
+            self?.filing[key] = nil
+            // Sharing through git: said on the row, once, in words; it never stops a walk.
+            if let self, let filed, filed.shared != nil || filed.shareProblem != nil || planProblem != nil, var e = self.entries[owner], e.key == key {
+                if let why = filed.shareProblem ?? planProblem { e.share = "The map was not shared through git: \(why)" + (filed.shared.map { " (\($0))" } ?? "") }
+                else { e.share = "Map shared through git: \(filed.shared!)" }
+                self.entries[owner] = e
+                self.onChange?()
+            }
+            // A full walk compared with a quick one (I2): the row says what the quick one missed.
+            if let audit = filed?.audit { self?.updateImpact(owner: owner, key: key, folder: folder) { $0.misses = audit.misses.count } }
+        }
+    }
+
+    /// The workspaces a job's build may belong to: its session's, else all.
+    private func candidates(for job: Job) -> [Workspace] {
+        let all = controller?.workspaces ?? []
+        let worktree = job.verifyOf ?? job.owner
+        let own = controller?.sessions.first { $0.worktree.path == worktree }?.workspace.path
+        return own.map { p in all.filter { $0.root.path == p } } ?? all
+    }
+
+    // MARK: Walking only what changed (I1, I2)
+
+    static func impactNote(_ folder: URL) -> ImpactNote? {
+        (try? Data(contentsOf: folder.appendingPathComponent("greenroom-impact.json"))).flatMap { MapJSON.decode(ImpactNote.self, from: $0) }
+    }
+
+    private static func writeImpactNote(_ note: ImpactNote, _ folder: URL) {
+        try? MapJSON.encode(note).write(to: folder.appendingPathComponent("greenroom-impact.json"), options: .atomic)
+    }
+
+    /// Changes a map's impact note on disk and on its row (when the row still shows that build). A map with no note
+    /// (the released engine) gets one only for a verification.
+    private func updateImpact(owner: String, key: String, folder: URL, _ change: (inout ImpactNote) -> Void) {
+        var note = Self.impactNote(folder) ?? ImpactNote(full: true, reason: nil, walked: 0, total: 0, files: 0)
+        change(&note)
+        Self.writeImpactNote(note, folder)
+        if var e = entries[owner], e.key == key { e.impact = note; entries[owner] = e; onChange?() }
+    }
+
+    /// Decides how a walk walks (off the main thread) and hands the plan back on the main thread: nil for a comparison.
+    private func planWalk(_ job: Job, python: URL, then: @escaping (History.WalkPlan?) -> Void) {
+        guard !job.isChanges, let profile = job.profile else { then(nil); return }
+        let candidates = candidates(for: job), root = store.root, engine = Engine.shared.version, build = job.build
+        let force = job.forceFull, verify = job.verifyOf != nil
+        let work = job.part.deletingLastPathComponent().appendingPathComponent(verify ? "verify-work" : "impact-work", isDirectory: true)
+        job.workDir = work
+        Task { @MainActor in
+            let plan = await Task.detached(priority: .utility) { () -> History.WalkPlan? in
+                let fm = FileManager.default
+                try? fm.removeItem(at: work)
+                try? fm.createDirectory(at: work, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                let support = CrawlRun.support(python: python)
+                if verify {
+                    guard support.seed else { return nil }
+                    return await History.verifyPlan(build: build, profile: profile, candidates: candidates, stateRoot: root, folder: work)
+                }
+                return await History.plan(build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine, support: support,
+                                          forceFull: force, folder: work)
+            }.value
+            then(plan)
+        }
+    }
+
+    /// "Walk Everything Again": walks the build now, in full, whatever changed.
+    func walkEverythingAgain(worktree: String, build: Build, withData: Bool = false) {
+        fullNext.insert(worktree)
+        request(worktree: worktree, build: build, force: true, walk: true, withData: withData)
+    }
+
+    /// "Verify carried screens": reaches each screen the worktree's newest map carried and compares its structure and
+    /// captures, trying no control. The engine has no mode for that alone, so it is a walk seeded from the map with
+    /// `--max-actions 0` over the carried ids. What differs is a miss, as for a full walk. False when there is nothing to do.
+    @discardableResult
+    func verifyCarried(worktree: String, withData: Bool = false) -> Bool {
+        guard let build = lastBuild[worktree], let e = entries[worktree], e.key == build.key, case .done = e.status, History.fileable(build) else { return false }
+        let owner = "verify:" + worktree
+        guard current?.owner != owner, !queue.contains(where: { $0.owner == owner }) else { return true }
+        let dir = evidenceFolder.appendingPathComponent(build.key, isDirectory: true)
+        // The same data as the session's walks, so the same profile and so the same snapshot.
+        let slot = withData ? (controller?.sessions.first { $0.worktree.path == worktree }?.slot ?? SessionStore.slot(for: URL(fileURLWithPath: worktree))) : nil
+        let job = Job(owner: owner, build: build, kind: .walk(slot: slot), part: dir.appendingPathComponent("verify.part", isDirectory: true),
+                      final: dir.appendingPathComponent("verify", isDirectory: true))
+        job.force = true
+        job.verifyOf = worktree
+        queue.append(job)
+        updateImpact(owner: worktree, key: build.key, folder: mapFolder(for: build.key)) { $0.verify = "verifying carried screens…" }
+        pump()
+        return true
+    }
+
+    /// A verification's end: its walk compared with the map, in words on the row; its folders go.
+    private func finishVerify(_ job: Job, _ end: End) {
+        guard let worktree = job.verifyOf else { return }
+        let key = job.build.key, map = mapFolder(for: key), part = job.part, work = job.workDir
+        let cleanup = { let fm = FileManager.default; try? fm.removeItem(at: part); if let work { try? fm.removeItem(at: work) } }
+        switch end {
+        case .cancelled: cleanup(); updateImpact(owner: worktree, key: key, folder: map) { $0.verify = nil }
+        case .failed(let why): cleanup(); updateImpact(owner: worktree, key: key, folder: map) { $0.verify = "verifying carried screens failed: \(why)" }
+        case .finished:
+            guard let plan = job.plan, let profile = job.profile else {
+                cleanup()
+                updateImpact(owner: worktree, key: key, folder: map) { $0.verify = "nothing to verify: this map carried no screens, or this engine cannot start from an earlier walk" }
+                return
+            }
+            let build = job.build, candidates = candidates(for: job), root = store.root, engine = Engine.shared.version
+            Task { @MainActor [weak self] in
+                let r = await Task.detached { await History.verified(walk: part, plan: plan, build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine) }.value
+                cleanup()
+                let words: String
+                if let r {
+                    words = r.misses.isEmpty ? "verified \(r.checked) carried screen\(r.checked == 1 ? "" : "s"): all as carried"
+                        : "verified \(r.checked) carried screen\(r.checked == 1 ? "" : "s"): \(MapImpact.missWords(r.misses.count))"
+                } else { words = "verifying carried screens failed: its walk could not be read" }
+                self?.updateImpact(owner: worktree, key: key, folder: map) { $0.verify = words; if let r, !r.misses.isEmpty { $0.misses = ($0.misses ?? 0) + r.misses.count } }
+            }
+        }
+    }
+
+    /// Waits for the snapshot of this build's walk to be filed, when one is being.
+    func awaitFiling(_ build: Build) async {
+        if let t = filing[build.key] { await t.value }
+    }
+
+    /// Walks only `head` (the same budgets), for a comparison whose base is already in the history; the walk files its
+    /// snapshot. Cached: a build that has its map is answered at once. Callers asking for the same build share the run.
+    @discardableResult
+    func walkHead(_ head: Build, progress: ((CrawlRun.Event) -> Void)? = nil, completion: @escaping (Result<ChangesResult, Failure>) -> Void) -> Token {
+        let token = Token()
+        let final = mapFolder(for: head.key)
+        let owner = "map:\(head.key)"
+        if hasCrawl(final), let data = ScreenMapData.read(final) {
+            DispatchQueue.main.async { completion(.success(ChangesResult(folder: final, map: data, summary: Self.summary(of: final)))) }
+            return token
+        }
+        let job: Job
+        if let running = current, running.owner == owner, !running.cancelled { job = running }
+        else if let queued = queue.first(where: { $0.owner == owner }) { job = queued }
+        else {
+            job = walkJob(owner: owner, build: head, slot: nil)
+            queue.append(job)
+        }
+        let waiter = Job.Waiter(completion: completion, progress: progress)
+        job.waiters.append(waiter)
+        token.cancelAction = { [weak self, weak job] in
+            guard let self, let job, let i = job.waiters.firstIndex(where: { $0.id == waiter.id }) else { return }
+            job.waiters.remove(at: i).completion(.failure(Failure(message: "cancelled")))
+            guard job.waiters.isEmpty else { return }
+            if self.current === job { self.cancel(job) } else { self.queue.removeAll { $0 === job } }
+        }
+        pump()
+        return token
+    }
+
     // MARK: Comparisons
 
     /// Walks `head` against `base` (`crawl.py HEAD --base BASE`, the same budgets) and tells the result, on the main
@@ -258,8 +488,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
     func changes(head: Build, base: Build, start: String? = nil, baseOption: String = "", progress: ((CrawlRun.Event) -> Void)? = nil,
                  completion: @escaping (Result<ChangesResult, Failure>) -> Void) -> Token {
         let token = Token()
-        let folder = changesFolder(head: head.key, base: base.key)
-        let owner = "changes:\(head.key)-\(base.key)"
+        let name = Self.pairName(head: head.key, base: base.key, start: start, baseOption: baseOption)
+        let folder = changesFolder.appendingPathComponent(name, isDirectory: true)
+        let owner = "changes:" + name
         if hasCrawl(folder), let data = ScreenMapData.read(folder) {
             DispatchQueue.main.async { completion(.success(ChangesResult(folder: folder, map: data, summary: Self.summary(of: folder)))) }
             return token
@@ -269,7 +500,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         else if let queued = queue.first(where: { $0.owner == owner }) { job = queued }
         else {
             job = Job(owner: owner, build: head, kind: .changes(base: base),
-                      part: changesFolder.appendingPathComponent("\(head.key)-\(base.key).part", isDirectory: true), final: folder)
+                      part: changesFolder.appendingPathComponent(name + ".part", isDirectory: true), final: folder)
             job.start = start
             job.baseOption = baseOption
             queue.append(job)
@@ -312,7 +543,10 @@ final class Evidence: NSObject, NSMenuItemValidation {
             // The same build in two sessions: the first walk made the map the second one wants.
             if !next.isChanges, !next.force, hasCrawl(next.final), let data = ScreenMapData.read(next.final) {
                 queue.removeFirst()
-                if var e = entries[next.owner], e.key == next.build.key { e.status = Self.done(data); entries[next.owner] = e; onChange?() }
+                if var e = entries[next.owner], e.key == next.build.key { e.status = Self.done(data); e.impact = Self.impactNote(next.final); entries[next.owner] = e; onChange?() }
+                let waiters = next.waiters
+                next.waiters.removeAll()
+                for w in waiters { w.completion(.success(ChangesResult(folder: next.final, map: data, summary: Self.summary(of: next.final)))) }
                 continue
             }
             if shouldPause?(next.owner) == true {
@@ -341,6 +575,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         s.appearances = ["light"]
         s.background = true   // evidence walks yield to everything the person is doing
         if case .changes(let base) = job.kind { s.base = base.apk; s.start = job.start; s.baseOption = job.baseOption }
+        else if job.owner.hasPrefix("map:") { s.start = job.start }
         // The clone, and the rest of the set-up, off the main thread (a copy fallback of a big slot takes a while).
         let root = dataRoot
         var slotName: String?
@@ -380,24 +615,40 @@ final class Evidence: NSObject, NSMenuItemValidation {
                 guard let self else { return }
                 job.clone = clone
                 job.note = note
+                // A snapshot's profile is the walk's own settings: signed-in only when the data was really copied.
+                job.profile = Self.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start,
+                                           signedIn: settings.keepData && slotName != nil, offline: settings.offline)
                 if job.cancelled { self.finish(job, .cancelled); return }
-                let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
-                job.run = run
-                run.onEvent = { [weak self] e in self?.event(e, job) }
-                run.onFinish = { [weak self] o in
-                    switch o {
-                    case .finished: self?.finish(job, .finished)
-                    case .failed(let why): self?.finish(job, .failed(why))
-                    case .cancelled: self?.finish(job, .cancelled)
+                self.planWalk(job, python: python) { [weak self] plan in
+                    guard let self else { return }
+                    if job.cancelled { self.finish(job, .cancelled); return }
+                    var settings = settings
+                    job.plan = plan
+                    if let plan {
+                        settings.recordDeps = plan.recordDeps
+                        settings.seed = plan.seed
+                        settings.onlyFile = plan.onlyFile
+                        if job.verifyOf != nil { settings.maxActions = 0 }
                     }
+                    if job.verifyOf != nil, plan == nil { self.finish(job, .finished); return }
+                    let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
+                    job.run = run
+                    run.onEvent = { [weak self] e in self?.event(e, job) }
+                    run.onFinish = { [weak self] o in
+                        switch o {
+                        case .finished: self?.finish(job, .finished)
+                        case .failed(let why): self?.finish(job, .failed(why))
+                        case .cancelled: self?.finish(job, .cancelled)
+                        }
+                    }
+                    run.start()
                 }
-                run.start()
             }
         }
     }
 
     private func event(_ e: CrawlRun.Event, _ job: Job) {
-        if job.isChanges { job.waiters.forEach { $0.progress?(e) }; return }
+        if job.forwardsProgress { job.waiters.forEach { $0.progress?(e) }; return }
         guard var entry = entries[job.owner], entry.key == job.build.key else { return }
         switch e {
         case .level(let depth, _, let known): entry.status = .walking(depth: depth, known: known)
@@ -417,15 +668,36 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     private enum End { case finished, failed(String), cancelled }
 
+    /// A run's end. Its data clone is removed first, off the main thread, and only then is the result published (the
+    /// row says done, waiters hear, the next walk starts): a walk is not over while its copy of the data is still there.
     private func finish(_ job: Job, _ end: End) {
-        guard current === job else { return }
+        guard current === job, !job.finishing else { return }
+        if let name = job.clone {
+            job.clone = nil
+            job.finishing = true
+            let root = dataRoot
+            DispatchQueue.global(qos: .userInitiated).async {
+                SlotClone.remove(name, in: root)
+                DispatchQueue.main.async { [weak self] in
+                    job.finishing = false
+                    self?.finish(job, end)
+                }
+            }
+            return
+        }
         current = nil
         switch end {
         case .finished: break
         case .failed(let why): NSLog("Greenroom: a walk of \(job.build.key) failed: \(why)")
         case .cancelled: NSLog("Greenroom: the walk of \(job.build.key) was cancelled\(job.stopped ? " (stopped)" : "")")
         }
-        if let name = job.clone { let root = dataRoot; DispatchQueue.global(qos: .utility).async { SlotClone.remove(name, in: root) } }
+        if job.verifyOf != nil {
+            finishVerify(job, end)
+            onChange?()
+            pump()
+            return
+        }
+        if let work = job.workDir { try? fm.removeItem(at: work) }
         let part = job.part, final = job.final
         var result: Result<ChangesResult, Failure> = .failure(Failure(message: "cancelled"))
         var status: Status?
@@ -436,7 +708,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
             try? fm.removeItem(at: final)
             if (try? fm.moveItem(at: part, to: final)) != nil, let data = ScreenMapData.read(final) {
                 status = Self.done(data)
+                if let plan = job.plan, !plan.isFull || plan.reason != nil { Self.writeImpactNote(Self.note(plan, walk: final), final) }
                 result = .success(ChangesResult(folder: final, map: data, summary: Self.summary(of: final)))
+                if !job.isChanges { file(job, folder: final) }
             } else {
                 status = .failed("The walk finished but its map could not be read.")
                 result = .failure(Failure(message: "the walk's map could not be read"))
@@ -453,6 +727,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         if !job.isChanges, let status, var e = entries[job.owner], e.key == job.build.key {
             e.status = status
             e.note = job.note
+            e.impact = Self.impactNote(final)
             entries[job.owner] = e
         }
         let waiters = job.waiters
@@ -461,6 +736,15 @@ final class Evidence: NSObject, NSMenuItemValidation {
         onChange?()
         pruneToCap(force: true)
         pump()
+    }
+
+    /// What a finished walk's plan came to: walked and carried screens are counted in its crawl.json.
+    static func note(_ plan: History.WalkPlan, walk: URL) -> ImpactNote {
+        let list = ((try? Data(contentsOf: walk.appendingPathComponent("crawl.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["screens"] as? [[String: Any]]) ?? []
+        let carried = list.filter { ($0["origin"] as? String) == "carried" }.count
+        return ImpactNote(full: plan.isFull, reason: plan.reason, walked: list.count - carried, total: list.count, files: plan.files,
+                          base: plan.seedSnapshot.map { String($0.commit.prefix(7)) })
     }
 
     /// Kills the walk's processes and removes its clone (app quit).
@@ -546,8 +830,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         for job in queue + (current.map { [$0] } ?? []) {
             switch job.kind {
             case .walk: out.insert(evidenceFolder.appendingPathComponent(job.build.key).path)
-            case .changes(let base):
-                out.insert(changesFolder.appendingPathComponent("\(job.build.key)-\(base.key)").path)
+            case .changes:
+                out.insert(job.final.path)
                 out.insert(job.part.path)
             }
         }
@@ -585,7 +869,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case .queued: return "walk queued"
         case .walking(_, let known): return known > 0 ? "walking… \(known) screen\(known == 1 ? "" : "s")" : "walking…"
         case .done(let n, let crashes, let unfinished):
-            return "\(n) screen\(n == 1 ? "" : "s")" + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : "") + (unfinished ? ", not finished" : "")
+            let screens = e.impact.map { !$0.full ? "walked \($0.walked) of \($0.total) screens" : nil } ?? nil
+            return (screens ?? "\(n) screen\(n == 1 ? "" : "s")") + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : "") + (unfinished ? ", not finished" : "")
         case .failed: return "walk failed"
         case .stopped: return "walk stopped"
         }
@@ -600,8 +885,29 @@ final class Evidence: NSObject, NSMenuItemValidation {
         default: break
         }
         if let n = e.note { lines.append(n.prefix(1).uppercased() + n.dropFirst() + ".") }
+        if case .done = e.status, let i = e.impact {
+            for l in Self.impactLines(i) { lines.append(l) }
+        }
+        if let sh = e.share { lines.append(sh.hasSuffix(".") ? sh : sh + ".") }
         lines.append(Self.limits)
         return lines.joined(separator: "\n")
+    }
+
+    /// The impact note in words: "Walked 3 of 212 screens (12 files changed); the other 209 were carried from 1a2b3c4.",
+    /// "Full walk: build files changed.", "1 screen changed that the last quick walk did not redo."
+    static func impactLines(_ i: ImpactNote) -> [String] {
+        var lines: [String] = []
+        let files = "\(i.files) file\(i.files == 1 ? "" : "s") changed"
+        if !i.full {
+            let carried = i.total - i.walked
+            lines.append("Walked \(i.walked) of \(i.total) screens (\(files)); the other \(carried) \(carried == 1 ? "was" : "were") carried from \(i.base.map { "the walk of " + $0 } ?? "the last walk").")
+        } else if let r = i.reason {
+            lines.append("Full walk: \(r).")
+        }
+        if let m = i.misses, m > 0 { lines.append(MapImpact.missWords(m).prefix(1).uppercased() + MapImpact.missWords(m).dropFirst() + "; its folder now always gets a full walk.") }
+        else if i.misses == 0 { lines.append("Compared with the last quick walk: every screen it carried was as carried.") }
+        if let v = i.verify { lines.append(v.prefix(1).uppercased() + v.dropFirst() + ".") }
+        return lines
     }
 
     /// The row's evidence button: its label is the status, a click opens the Screen Map on that build's run.
@@ -635,11 +941,37 @@ final class Evidence: NSObject, NSMenuItemValidation {
     /// Items for the sidebar's session-row menu; they act on `clickedSession`.
     func menuItems() -> [NSMenuItem] {
         let again = NSMenuItem(title: "Walk Again", action: #selector(walkAgainMenu(_:)), keyEquivalent: "")
+        let everything = NSMenuItem(title: "Walk Everything Again", action: #selector(walkEverythingMenu(_:)), keyEquivalent: "")
+        let verify = NSMenuItem(title: "Verify Carried Screens", action: #selector(verifyMenu(_:)), keyEquivalent: "")
+        let share = NSMenuItem(title: "Share Screen Maps Through Git", action: #selector(shareMenu(_:)), keyEquivalent: "")
+        share.toolTip = Workspace.shareExplanation
+        let shareSignedIn = NSMenuItem(title: "Also Share Maps Walked on Signed-In Data", action: #selector(shareSignedInMenu(_:)), keyEquivalent: "")
+        shareSignedIn.toolTip = Workspace.shareSignedInExplanation
+        shareSignedIn.indentationLevel = 1
         let stop = NSMenuItem(title: "Stop Walking", action: #selector(stopMenu(_:)), keyEquivalent: "")
         let auto = NSMenuItem(title: "Walk New Builds Automatically", action: #selector(autoMenu(_:)), keyEquivalent: "")
         let data = NSMenuItem(title: "Walk with My Signed-In Data", action: #selector(dataMenu(_:)), keyEquivalent: "")
-        for i in [again, stop, auto, data] { i.target = self }
-        return [.separator(), again, stop, auto, data]
+        for i in [again, everything, verify, stop, auto, data, share, shareSignedIn] { i.target = self }
+        return [.separator(), again, everything, verify, stop, auto, data, share, shareSignedIn]
+    }
+
+    @objc private func shareMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller else { return }
+        c.setShareMaps(!c.sharesMaps(s), for: s)
+    }
+    @objc private func shareSignedInMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller else { return }
+        c.setShareMaps(c.sharesMaps(s), signedIn: !c.sharesSignedInMaps(s), for: s)
+    }
+
+    @objc private func walkEverythingMenu(_ sender: Any?) {
+        guard let s = clickedSession() else { return }
+        fullNext.insert(s.worktree.path)
+        controller?.walkAgain(s)
+    }
+    @objc private func verifyMenu(_ sender: Any?) {
+        guard let s = clickedSession() else { return }
+        verifyCarried(worktree: s.worktree.path, withData: controller?.walksWithData(s) == true)
     }
 
     @objc private func walkAgainMenu(_ sender: Any?) { clickedSession().map { controller?.walkAgain($0) } }
@@ -656,10 +988,15 @@ final class Evidence: NSObject, NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let s = clickedSession() else { return false }
         switch item.action {
-        case #selector(walkAgainMenu(_:))?: return controller?.hasBuild(s) == true
+        case #selector(walkAgainMenu(_:))?, #selector(walkEverythingMenu(_:))?: return controller?.hasBuild(s) == true
+        case #selector(verifyMenu(_:))?: return entries[s.worktree.path]?.impact?.full == false && !isWalking(s.worktree.path)
         case #selector(stopMenu(_:))?: return isWalking(s.worktree.path)
         case #selector(autoMenu(_:))?: item.state = controller?.auto(of: s) == .off ? .off : .on; return true
         case #selector(dataMenu(_:))?: item.state = controller?.walksWithData(s) == true ? .on : .off; return true
+        case #selector(shareMenu(_:))?: item.state = controller?.sharesMaps(s) == true ? .on : .off; return true
+        case #selector(shareSignedInMenu(_:))?:
+            item.state = controller?.sharesSignedInMaps(s) == true ? .on : .off
+            return controller?.sharesMaps(s) == true
         default: return true
         }
     }

@@ -12,6 +12,40 @@ if let i = arguments.firstIndex(of: "--connect-check"), i + 1 < arguments.count 
 if let i = arguments.firstIndex(of: "--t3-check"), i + 1 < arguments.count { T3Check.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --t3-live REPO`: one read of your own T3 Code's threads for REPO, printed.
 if let i = arguments.firstIndex(of: "--t3-live"), i + 1 < arguments.count { T3Check.live(repo: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-contract-check [DIR]`: map history's stored form and its fixtures (MapFixtures).
+if let i = arguments.firstIndex(of: "--map-contract-check") {
+    MapContractCheck.run(dir: i + 1 < arguments.count ? URL(fileURLWithPath: arguments[i + 1]) : nil)
+}
+// `Greenroom --map-store-check DIR`: the map history store, headless, against small walks written into DIR.
+if let i = arguments.firstIndex(of: "--map-store-check"), i + 1 < arguments.count { MapStoreCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-pairing-check`: map history's pairing finds the fixtures' lineages (MapPairing).
+if arguments.contains("--map-pairing-check") { MapPairingCheck.run() }
+// `Greenroom --map-history-check DIR`: map history wired into comparisons (History), headless, no engine (HistoryCheck).
+if let i = arguments.firstIndex(of: "--map-history-check"), i + 1 < arguments.count { HistoryCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-share-check DIR`: map sharing through git between a bare origin and clones, headless, no network (MapShareCheck).
+if let i = arguments.firstIndex(of: "--map-share-check"), i + 1 < arguments.count { MapShareCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-impact-check DIR [APK]`: walking only what changed (MapImpact, the seeded walk, misses), headless (MapImpactCheck).
+if let i = arguments.firstIndex(of: "--map-impact-check"), i + 1 < arguments.count {
+    MapImpactCheck.run(dir: URL(fileURLWithPath: arguments[i + 1]), apk: i + 2 < arguments.count ? URL(fileURLWithPath: arguments[i + 2]) : nil)
+}
+// `Greenroom --map-layout-check`: the map's layout (MapLayout) on the fixtures.
+if arguments.contains("--map-layout-check") { MapLayoutCheck.run() }
+// `Greenroom --map-git-check DIR`: map snapshots in git refs, between a bare repository and two clones (MapGitCheck).
+if let i = arguments.firstIndex(of: "--map-git-check"), i + 1 < arguments.count { MapGitCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-import WALK_DIR --repo REPO --commit SHA ...`: files a walk as a map snapshot by hand (MapTool).
+if let i = arguments.firstIndex(of: "--map-import") { MapTool.run(Array(arguments[(i + 1)...])) }
+// `Greenroom --map-surface-check DIR`: the map's renderer on 2,000 made-up screens, in a window of its own (MapSurfaceCheck).
+if let i = arguments.firstIndex(of: "--map-surface-check"), i + 1 < arguments.count { MapSurfaceCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-export-check DIR`: the HTML export of the "mixed" and "grow" pairs, headless (MapExportCheck).
+if let i = arguments.firstIndex(of: "--map-export-check"), i + 1 < arguments.count { MapExportCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-navigator-check DIR`: getting around the map (filters, changes first, groups, search, minimap, keys) on made-up maps (MapNavigatorCheck).
+if let i = arguments.firstIndex(of: "--map-navigator-check"), i + 1 < arguments.count { MapNavigatorCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-detail-check DIR`: the map's detail column and time strip on a made-up history (MapDetailCheck).
+if let i = arguments.firstIndex(of: "--map-detail-check"), i + 1 < arguments.count { MapDetailCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-walks DIR WALK_A WALK_B`: two finished walks through import, pairing, diff and the HTML export (MapWalksTool).
+if let i = arguments.firstIndex(of: "--map-walks"), i + 3 < arguments.count {
+    MapWalksTool.run(dir: URL(fileURLWithPath: arguments[i + 1]), a: URL(fileURLWithPath: arguments[i + 2]), b: URL(fileURLWithPath: arguments[i + 3]))
+}
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
