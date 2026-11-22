@@ -16,6 +16,8 @@ if let i = arguments.firstIndex(of: "--t3-live"), i + 1 < arguments.count { T3Ch
 if let i = arguments.firstIndex(of: "--map-contract-check") {
     MapContractCheck.run(dir: i + 1 < arguments.count ? URL(fileURLWithPath: arguments[i + 1]) : nil)
 }
+// `Greenroom --map-pairing-check`: map history's pairing finds the fixtures' lineages (MapPairing).
+if arguments.contains("--map-pairing-check") { MapPairingCheck.run() }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
