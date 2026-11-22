@@ -22,6 +22,8 @@ if let i = arguments.firstIndex(of: "--map-store-check"), i + 1 < arguments.coun
 if arguments.contains("--map-pairing-check") { MapPairingCheck.run() }
 // `Greenroom --map-history-check DIR`: map history wired into comparisons (History), headless, no engine (HistoryCheck).
 if let i = arguments.firstIndex(of: "--map-history-check"), i + 1 < arguments.count { HistoryCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-share-check DIR`: map sharing through git between a bare origin and clones, headless, no network (MapShareCheck).
+if let i = arguments.firstIndex(of: "--map-share-check"), i + 1 < arguments.count { MapShareCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --map-impact-check DIR [APK]`: walking only what changed (MapImpact, the seeded walk, misses), headless (MapImpactCheck).
 if let i = arguments.firstIndex(of: "--map-impact-check"), i + 1 < arguments.count {
     MapImpactCheck.run(dir: URL(fileURLWithPath: arguments[i + 1]), apk: i + 2 < arguments.count ? URL(fileURLWithPath: arguments[i + 2]) : nil)

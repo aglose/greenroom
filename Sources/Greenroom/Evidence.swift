@@ -38,6 +38,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var note: String?
         /// Whether the walk redid everything or only what a change could touch, and what keeping it honest found.
         var impact: ImpactNote? = nil
+        /// What sharing the map through git did, or what went wrong, in words (nil when the workspace does not share).
+        var share: String? = nil
     }
 
     /// A walk's plan and what came of it (packages I1, I2), kept beside its map as `greenroom-impact.json`. Absent for a
@@ -315,12 +317,19 @@ final class Evidence: NSObject, NSMenuItemValidation {
         guard let profile = job.profile, History.fileable(job.build) else { return }
         let build = job.build, root = store.root, engine = Engine.shared.version
         let candidates = candidates(for: job)
-        let key = build.key, owner = job.owner, seed = job.plan?.seedSnapshot
+        let key = build.key, owner = job.owner, seed = job.plan?.seedSnapshot, planProblem = job.plan?.shareProblem
         filing[key] = Task { @MainActor [weak self] in
             let filed = await Task.detached {
                 await History.filed(walk: folder, build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine, seed: seed)
             }.value
             self?.filing[key] = nil
+            // Sharing through git: said on the row, once, in words; it never stops a walk.
+            if let self, let filed, filed.shared != nil || filed.shareProblem != nil || planProblem != nil, var e = self.entries[owner], e.key == key {
+                if let why = filed.shareProblem ?? planProblem { e.share = "The map was not shared through git: \(why)" + (filed.shared.map { " (\($0))" } ?? "") }
+                else { e.share = "Map shared through git: \(filed.shared!)" }
+                self.entries[owner] = e
+                self.onChange?()
+            }
             // A full walk compared with a quick one (I2): the row says what the quick one missed.
             if let audit = filed?.audit { self?.updateImpact(owner: owner, key: key, folder: folder) { $0.misses = audit.misses.count } }
         }
@@ -805,7 +814,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         for job in queue + (current.map { [$0] } ?? []) {
             switch job.kind {
             case .walk: out.insert(evidenceFolder.appendingPathComponent(job.build.key).path)
-            case .changes(let base):
+            case .changes:
                 out.insert(job.final.path)
                 out.insert(job.part.path)
             }
@@ -863,6 +872,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         if case .done = e.status, let i = e.impact {
             for l in Self.impactLines(i) { lines.append(l) }
         }
+        if let sh = e.share { lines.append(sh.hasSuffix(".") ? sh : sh + ".") }
         lines.append(Self.limits)
         return lines.joined(separator: "\n")
     }
@@ -917,11 +927,25 @@ final class Evidence: NSObject, NSMenuItemValidation {
         let again = NSMenuItem(title: "Walk Again", action: #selector(walkAgainMenu(_:)), keyEquivalent: "")
         let everything = NSMenuItem(title: "Walk Everything Again", action: #selector(walkEverythingMenu(_:)), keyEquivalent: "")
         let verify = NSMenuItem(title: "Verify Carried Screens", action: #selector(verifyMenu(_:)), keyEquivalent: "")
+        let share = NSMenuItem(title: "Share Screen Maps Through Git", action: #selector(shareMenu(_:)), keyEquivalent: "")
+        share.toolTip = Workspace.shareExplanation
+        let shareSignedIn = NSMenuItem(title: "Also Share Maps Walked on Signed-In Data", action: #selector(shareSignedInMenu(_:)), keyEquivalent: "")
+        shareSignedIn.toolTip = Workspace.shareSignedInExplanation
+        shareSignedIn.indentationLevel = 1
         let stop = NSMenuItem(title: "Stop Walking", action: #selector(stopMenu(_:)), keyEquivalent: "")
         let auto = NSMenuItem(title: "Walk New Builds Automatically", action: #selector(autoMenu(_:)), keyEquivalent: "")
         let data = NSMenuItem(title: "Walk with My Signed-In Data", action: #selector(dataMenu(_:)), keyEquivalent: "")
-        for i in [again, everything, verify, stop, auto, data] { i.target = self }
-        return [.separator(), again, everything, verify, stop, auto, data]
+        for i in [again, everything, verify, stop, auto, data, share, shareSignedIn] { i.target = self }
+        return [.separator(), again, everything, verify, stop, auto, data, share, shareSignedIn]
+    }
+
+    @objc private func shareMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller else { return }
+        c.setShareMaps(!c.sharesMaps(s), for: s)
+    }
+    @objc private func shareSignedInMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller else { return }
+        c.setShareMaps(c.sharesMaps(s), signedIn: !c.sharesSignedInMaps(s), for: s)
     }
 
     @objc private func walkEverythingMenu(_ sender: Any?) {
@@ -953,6 +977,10 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case #selector(stopMenu(_:))?: return isWalking(s.worktree.path)
         case #selector(autoMenu(_:))?: item.state = controller?.auto(of: s) == .off ? .off : .on; return true
         case #selector(dataMenu(_:))?: item.state = controller?.walksWithData(s) == true ? .on : .off; return true
+        case #selector(shareMenu(_:))?: item.state = controller?.sharesMaps(s) == true ? .on : .off; return true
+        case #selector(shareSignedInMenu(_:))?:
+            item.state = controller?.sharesSignedInMaps(s) == true ? .on : .off
+            return controller?.sharesMaps(s) == true
         default: return true
         }
     }

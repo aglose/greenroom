@@ -100,6 +100,10 @@ enum History {
     struct Filed {
         var snapshot: MapSnapshot
         var audit: (quick: String, misses: [MapImpact.Miss])?
+        /// Sharing through git went wrong (writing, pushing or fetching), in words; nil when it worked or is off.
+        var shareProblem: String?
+        /// What sharing did: "written", "pushed", "written, not pushed (signed-in data)"; nil when off.
+        var shared: String?
     }
 
     /// `file`, saying what it did. Nil when nothing could be filed. `seed`: the snapshot a seeded walk started from.
@@ -119,12 +123,108 @@ enum History {
         }
         let isFull = !imported.screens.contains { $0.carriedFrom != nil }
         if let existing, !(isFull && existing.screens.contains { $0.carriedFrom != nil }) { return Filed(snapshot: existing) }
-        let base = await baseline(commit: p.commit, mainRef: p.workspace.baseRef, in: p.workspace.root, store: p.store, profile: profile.id)
-        let (paired, _) = MapPairing.pair(head: imported, base: base?.snapshot)
+        let base = await sharedBaseline(place: p, profile: profile)
+        let (paired, _) = MapPairing.pair(head: imported, base: base.found?.snapshot)
         guard p.store.save(paired) else { return nil }
         var filed = Filed(snapshot: paired)
         if isFull { filed.audit = await audit(full: paired, quick: existing, place: p) }
+        if p.workspace.shareMaps {
+            let s = share(paired, workspace: p.workspace, store: p.store)
+            filed.shared = s.done
+            filed.shareProblem = s.problem ?? base.problem
+        }
         return filed
+    }
+
+    // MARK: Sharing through git (the workspace's "Share screen maps through git")
+
+    /// The remote maps are pushed to and fetched from.
+    static let shareRemote = "origin"
+    private static let fetchLock = NSLock()
+    private static var lastFetch: [String: Date] = [:]
+
+    /// Writes the snapshot's refs (`MapGit.write`, captures from the store's blobs) in the workspace's repository and,
+    /// unless it was walked on signed-in data and the workspace does not share those, pushes them to origin (never
+    /// forced). Only called when the workspace shares maps. Never throws: a failure comes back in words.
+    static func share(_ snapshot: MapSnapshot, workspace ws: Workspace, store: MapStore) -> (done: String?, problem: String?) {
+        let git = MapGit(repo: ws.root)
+        let written: MapGit.Written
+        do { written = try git.write(snapshot, blob: { store.blobURL($0) }) } catch { return (nil, "writing the map's refs failed: \(error)") }
+        let missing = written.missing.isEmpty ? "" : " (\(written.missing.count) capture\(written.missing.count == 1 ? "" : "s") missing from the store)"
+        if snapshot.profile.signIn != nil && !ws.shareSignedInMaps {
+            return ("written here, not pushed: it was walked on signed-in data" + missing, nil)
+        }
+        if let why = git.push(remote: shareRemote, profile: snapshot.profile.id) { return ("written here" + missing, why) }
+        return ("pushed to \(shareRemote)" + missing, nil)
+    }
+
+    /// Fetches `refs/greenroom/maps/*` from origin when the workspace shares maps and the last fetch for it is ten
+    /// minutes old (`force`: whatever its age). Nil when it worked or was not due; else what went wrong, in words.
+    @discardableResult
+    static func fetchIfDue(_ ws: Workspace, stateRoot: URL, force: Bool = false) async -> String? {
+        guard ws.shareMaps else { return nil }
+        guard due(stateRoot.path + "\u{0}" + ws.root.resolvingSymlinksInPath().path, force: force) else { return nil }
+        return await Task.detached(priority: .utility) { MapGit(repo: ws.root).fetch(remote: shareRemote) }.value
+    }
+
+    /// Whether a fetch for `key` is due (none in the last ten minutes), marking it done now when it is.
+    private static func due(_ key: String, force: Bool) -> Bool {
+        fetchLock.lock(); defer { fetchLock.unlock() }
+        if !force, let last = lastFetch[key], Date().timeIntervalSince(last) < 600 { return false }
+        lastFetch[key] = Date()
+        return true
+    }
+
+    /// Imports the snapshot git has for `commit` (its own ref, else its tree's) into the store, captures included,
+    /// when the store has none. True when the store has one now.
+    static func importShared(commit: String, profile: MapProfile, workspace ws: Workspace, store: MapStore) -> Bool {
+        if store.snapshot(profile: profile.id, commit: commit) != nil { return true }
+        let git = MapGit(repo: ws.root)
+        guard let s = git.read(profile: profile.id, commit: commit), s.profile.id == profile.id else { return false }
+        if store.snapshot(profile: profile.id, commit: s.commit) != nil { return true }
+        for sc in s.screens {
+            for (combo, hash) in sc.captures where store.blobURL(hash) == nil {
+                if let data = git.blobData(profile: profile.id, commit: s.commit, lineage: sc.lineage.isEmpty ? sc.id : sc.lineage, combo: combo) {
+                    store.importBlob(data, expected: hash)
+                }
+            }
+        }
+        return store.save(s)
+    }
+
+    /// The baseline rule, after fetching teammates' maps when the workspace shares them: the merge base, by commit and
+    /// then by tree, and failing that the nearest ancestor, each taken from git when the store has none. With sharing
+    /// off this is `baseline` exactly.
+    private static func sharedBaseline(place p: Place, profile: MapProfile) async -> (found: (snapshot: MapSnapshot, behind: Int)?, problem: String?) {
+        let ws = p.workspace
+        var problem: String?
+        if ws.shareMaps {
+            problem = await fetchIfDue(ws, stateRoot: p.store.folder.deletingLastPathComponent().deletingLastPathComponent())
+            var mb: String?
+            for ref in [ws.baseRef, ws.baseRef.hasPrefix("origin/") ? String(ws.baseRef.dropFirst(7)) : nil].compactMap({ $0 }) where mb == nil {
+                mb = await Git.mergeBase(p.commit, ref, in: ws.root)
+            }
+            if let mb, p.store.snapshot(profile: profile.id, commit: mb) == nil, !importShared(commit: mb, profile: profile, workspace: ws, store: p.store) {
+                // The nearest ancestor that git has a snapshot of (by its own ref) and the store has not.
+                let shared = Set(MapGit(repo: ws.root).list(profile: profile.id)), have = Set(p.store.commits(profile: profile.id))
+                if !shared.subtracting(have).isEmpty, let list = await Git.run(["rev-list", "-n", "2000", mb], in: ws.root) {
+                    for c in list.split(whereSeparator: \.isNewline).map(String.init) {
+                        if have.contains(c) { break }
+                        if shared.contains(c) { _ = importShared(commit: c, profile: profile, workspace: ws, store: p.store); break }
+                    }
+                }
+            }
+        }
+        let found = await baseline(commit: p.commit, mainRef: ws.baseRef, in: ws.root, store: p.store, profile: profile.id)
+        return (found, problem)
+    }
+
+    /// The baseline of a build as a walk would find it (teammates' maps fetched and imported when the workspace shares
+    /// them). Nil when the build has no commit in any of `candidates` or there is no baseline.
+    static func baseline(of build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL) async -> (snapshot: MapSnapshot, behind: Int, problem: String?)? {
+        guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return nil }
+        let r = await sharedBaseline(place: p, profile: profile)
+        return r.found.map { ($0.snapshot, $0.behind, r.problem) }
     }
 
     // MARK: Walking only what changed (I1, I2)
@@ -142,6 +242,8 @@ enum History {
         /// Why the walk is full, in words; nil for a full walk the engine gives no choice about (as before I1).
         var reason: String?
         var recordDeps = false
+        /// Fetching teammates' maps before looking for the baseline went wrong, in words.
+        var shareProblem: String?
         var isFull: Bool { seed == nil }
     }
 
@@ -164,7 +266,9 @@ enum History {
             let n = p.store.updateLedger { l -> Int in l.mainWalks[profile.id, default: 0] += 1; return l.mainWalks[profile.id]! }
             if n % MapImpact.fullEvery == 0 { plan.reason = "every \(MapImpact.fullEvery)th walk of main is a full walk"; return plan }
         }
-        guard let base = await baseline(commit: p.commit, mainRef: ref, in: p.workspace.root, store: p.store, profile: profile.id) else {
+        let shared = await sharedBaseline(place: p, profile: profile)
+        plan.shareProblem = shared.problem
+        guard let base = shared.found else {
             plan.reason = "no earlier walk to start from"; return plan
         }
         if base.snapshot.commit == p.commit { plan.reason = "this commit was walked before, so it is walked again in full"; return plan }
