@@ -20,8 +20,18 @@ import Foundation
 // command, the head id, the base id) order, the first to claim a screen keeps it. Routes are tried in (depth, head id)
 // order against base screens in id order.
 enum MapPairing {
+    /// A base made outside the app has no lineages: each empty one becomes `<id>@<its commit's first seven digits>`.
+    static func seeded(_ base: MapSnapshot) -> MapSnapshot {
+        guard base.screens.contains(where: { $0.lineage.isEmpty }) else { return base }
+        var b = base
+        let short = String(b.commit.prefix(7))
+        for i in b.screens.indices where b.screens[i].lineage.isEmpty { b.screens[i].lineage = b.screens[i].id + "@" + short }
+        return b
+    }
+
     /// The head with every screen's lineage set, and how each paired lineage was matched (new screens are not in it).
-    static func pair(head: MapSnapshot, base: MapSnapshot?) -> (MapSnapshot, [String: MapDiff.Pairing]) {
+    static func pair(head: MapSnapshot, base baseIn: MapSnapshot?) -> (MapSnapshot, [String: MapDiff.Pairing]) {
+        let base = baseIn.map(seeded)
         var out = head
         let short = String(head.commit.prefix(7))
         guard let base else {
@@ -107,7 +117,8 @@ enum MapPairing {
     }
 
     /// Pair, compare, and say on each paired screen how it was matched.
-    static func diff(head: MapSnapshot, base: MapSnapshot) -> MapDiff {
+    static func diff(head: MapSnapshot, base baseIn: MapSnapshot) -> MapDiff {
+        let base = seeded(baseIn)
         let (paired, how) = pair(head: head, base: base)
         var d = MapDiff.compare(base: base, head: paired)
         for i in d.screens.indices where d.screens[i].base != nil && d.screens[i].head != nil {

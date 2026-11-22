@@ -157,6 +157,39 @@ struct ChangeSet {
                 why: why))
         }
 
+        // The head's findings only: the base build's crashes are marked on the base-only screens by their edges, not as the head's.
+        var headFindings: [MapFinding] = []
+        for f in (raw["findings"] as? [[String: Any]]) ?? [] where (f["build"] as? String) != "base" {
+            headFindings.append(MapFinding(kind: (f["kind"] as? String) ?? "", detail: (f["detail"] as? String) ?? "",
+                                           steps: ((f["path"] as? [String: Any])?["steps"] as? [String]) ?? []))
+        }
+        var crashes: [ChangeFinding] = []
+        for f in (raw["findings"] as? [[String: Any]]) ?? [] {
+            let kind = (f["kind"] as? String) ?? ""
+            guard kind == "crash" || kind == "compare" else { continue }
+            crashes.append(ChangeFinding(side: (f["build"] as? String) == "base" ? .base : .head, kind: kind, detail: (f["detail"] as? String) ?? ""))
+        }
+        let unfinished = ((raw["incomplete"] as? [String]) ?? []).map(unfinishedLine)
+        return assemble(folder: folder, screens: screens, baseToMerged: baseToMerged, headMap: headMap, baseMap: baseMap, headFindings: headFindings,
+                        crashes: crashes, unfinished: unfinished)
+    }
+
+    /// "The walk of the head stopped at the time limit": one line of crawl.json's `incomplete`, in words.
+    static func unfinishedLine(_ line: String) -> String {
+        let isBase = line.hasPrefix("base: ")
+        let text = isBase ? String(line.dropFirst(6)) : line
+        let what: String
+        if text.hasPrefix("--max-seconds") { what = "stopped at the time limit" }
+        else if text.hasPrefix("--max-depth") { what = "did not open the deepest level" }
+        else if text.hasPrefix("--max-screens") { what = "stopped at the screen limit" }
+        else { what = text }
+        return "The walk of the \(isBase ? "base" : "head") \(what)"
+    }
+
+    /// The merged map, the marks and the counts, from the screens a comparison found (a walk's `compare` list or a history diff).
+    /// `baseToMerged` names each base id by the id its pair has in the merged map.
+    static func assemble(folder: URL, screens: [ChangeScreen], baseToMerged: [String: String], headMap: ScreenMapData, baseMap: ScreenMapData?,
+                         headFindings: [MapFinding], crashes: [ChangeFinding], unfinished: [String]) -> ChangeSet {
         // The merged map: the head's screens, plus the base's that no screen of the head reaches, with the edges that
         // lead into or out of them (base ids named by the head's where the two are paired).
         var mergedScreens = headMap.screens
@@ -178,14 +211,8 @@ struct ChangeSet {
                 mergedEdges.append(MapEdge(from: from, action: e.action, cmd: e.cmd, to: to, note: e.note))
             }
         }
-        // The head's findings only: the base build's crashes are marked on the base-only screens by their edges, not as the head's.
-        var headFindings: [MapFinding] = []
-        for f in (raw["findings"] as? [[String: Any]]) ?? [] where (f["build"] as? String) != "base" {
-            headFindings.append(MapFinding(kind: (f["kind"] as? String) ?? "", detail: (f["detail"] as? String) ?? "",
-                                           steps: ((f["path"] as? [String: Any])?["steps"] as? [String]) ?? []))
-        }
         let merged = ScreenMapData(folder: folder, apkName: headMap.apkName, screens: mergedScreens, edges: mergedEdges, findings: headFindings,
-                                   combos: combos, incomplete: headMap.incomplete, seconds: headMap.seconds, apk: headMap.apk)
+                                   combos: headMap.combos, incomplete: headMap.incomplete, seconds: headMap.seconds, apk: headMap.apk)
         var marks: [String: MapMark] = [:]
         for s in screens {
             switch s.status {
@@ -197,23 +224,6 @@ struct ChangeSet {
             }
         }
 
-        var crashes: [ChangeFinding] = []
-        for f in (raw["findings"] as? [[String: Any]]) ?? [] {
-            let kind = (f["kind"] as? String) ?? ""
-            guard kind == "crash" || kind == "compare" else { continue }
-            crashes.append(ChangeFinding(side: (f["build"] as? String) == "base" ? .base : .head, kind: kind, detail: (f["detail"] as? String) ?? ""))
-        }
-        var unfinished: [String] = []
-        for line in (raw["incomplete"] as? [String]) ?? [] {
-            let isBase = line.hasPrefix("base: ")
-            let text = isBase ? String(line.dropFirst(6)) : line
-            let what: String
-            if text.hasPrefix("--max-seconds") { what = "stopped at the time limit" }
-            else if text.hasPrefix("--max-depth") { what = "did not open the deepest level" }
-            else if text.hasPrefix("--max-screens") { what = "stopped at the screen limit" }
-            else { what = text }
-            unfinished.append("The walk of the \(isBase ? "base" : "head") \(what)")
-        }
         let report = folder.appendingPathComponent("report.html")
         var counts = Evidence.ChangesSummary()
         for c in screens { switch c.status { case .new: counts.new += 1; case .changed: counts.changed += 1; case .gone: counts.gone += 1; case .same: counts.same += 1; case .unreached: break } }
@@ -343,6 +353,10 @@ final class ChangesRun {
                     return
                 }
                 self.state = .walking(depth: nil, known: 0, since: Date())
+                // From history: both builds' maps are stored, so nothing is walked. A stored base and a head with none is
+                // walked alone (the evidence walk files it), then compared from history. Anything else is a pair walk, as before.
+                if baseOption.isEmpty, await self.fromHistory(head: head, base: base, workspace: ws, start: start, gen: gen) { return }
+                guard gen == self.generation else { return }
                 self.token = self.controller.evidence.changes(head: head, base: base, start: start, baseOption: baseOption, progress: { [weak self] e in
                     guard let self, gen == self.generation, case .walking(var depth, var known, let since) = self.state else { return }
                     switch e {
@@ -355,11 +369,67 @@ final class ChangesRun {
                     guard let self, gen == self.generation else { return }
                     switch result {
                     case .success(let r):
-                        if let set = ChangeSet.read(r.folder) { self.state = .done(set) } else { self.state = .failed("The comparison finished but its result could not be read.") }
+                        if let set = ChangeSet.read(r.folder) {
+                            self.state = .done(set)
+                            // The pair's walk gave both builds' maps: filed, so the next comparison with this base walks only its head.
+                            if baseOption.isEmpty { self.fileFromPair(folder: r.folder, head: head, base: base, workspace: ws, start: start) }
+                        } else { self.state = .failed("The comparison finished but its result could not be read.") }
                     case .failure(let f): self.state = f.message == "cancelled" ? .cancelled : .failed(f.message)
                     }
                 })
             }
+        }
+    }
+
+    /// Answers from stored snapshots when it can. True when the comparison ended here (done or failed); false to walk the pair.
+    @MainActor
+    private func fromHistory(head: Build, base: Build, workspace ws: Workspace, start: String?, gen: Int) async -> Bool {
+        let evidence = controller.evidence
+        let profile = evidence.changesProfile(start: start)
+        let root = evidence.store.root
+        let folder = evidence.changesFolder(head: head.key, base: base.key)
+        func attempt() async -> ChangeSet? {
+            await Task.detached { await History.changeSet(head: head, base: base, workspace: ws.root, profile: profile, stateRoot: root, folder: folder) }.value
+        }
+        if let set = await attempt() {
+            guard gen == generation else { return true }
+            state = .done(set)
+            return true
+        }
+        // Only the head lacks a map: one walk of it (it is filed when it ends), no walk of the base.
+        guard start == nil, History.fileable(head), await History.hasSnapshot(of: base, workspace: ws.root, profile: profile, stateRoot: root) else { return false }
+        let result: Result<Evidence.ChangesResult, Evidence.Failure> = await withCheckedContinuation { c in
+            self.token = evidence.walkHead(head, progress: { [weak self] e in
+                guard let self, gen == self.generation, case .walking(var depth, var known, let since) = self.state else { return }
+                switch e {
+                case .level(let d, _, let k): depth = d; known = k
+                case .capturing(let n, _): depth = -1; known = n
+                case .line: return
+                }
+                self.state = .walking(depth: depth, known: known, since: since)
+            }, completion: { c.resume(returning: $0) })
+        }
+        guard gen == generation else { return true }
+        switch result {
+        case .failure(let f):
+            state = f.message == "cancelled" ? .cancelled : .failed(f.message)
+            return true
+        case .success:
+            await evidence.awaitFiling(head)
+            guard gen == generation else { return true }
+            if let set = await attempt() { state = .done(set); return true }
+            return false
+        }
+    }
+
+    /// Files the heads and bases of a finished pair walk (each that has a commit and is not dirty).
+    private func fileFromPair(folder: URL, head: Build, base: Build, workspace ws: Workspace, start: String?) {
+        let evidence = controller.evidence
+        let profile = evidence.changesProfile(start: start), root = evidence.store.root, engine = Engine.shared.version
+        Task.detached {
+            // The base first: the head's baseline is then the base when it is the merge base.
+            await History.fileFromPair(folder: folder, build: base, side: .base, workspace: ws, profile: profile, stateRoot: root, engine: engine)
+            await History.fileFromPair(folder: folder, build: head, side: .head, workspace: ws, profile: profile, stateRoot: root, engine: engine)
         }
     }
 

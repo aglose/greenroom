@@ -122,6 +122,16 @@ enum MapPairingCheck {
         let short = String(mixed.head.commit.prefix(7))
         expect(none.isEmpty && fresh.screens.allSatisfy { $0.lineage == $0.id + "@" + short }, "no base: every screen is new")
 
+        // A base made outside the app has no lineages: it is given `<id>@<commit>` first, and the difference is the same.
+        let outside = MapFixtures.golden().first { $0.name == "mixed" }!
+        let seededBase = MapPairing.seeded(blank(outside.base))
+        let baseShort = String(outside.base.commit.prefix(7))
+        let viaOutside = MapPairing.diff(head: blank(outside.head), base: blank(outside.base))
+        expect(seededBase.screens.allSatisfy { $0.lineage == $0.id + "@" + baseShort }
+               && viaOutside.counts == MapPairing.diff(head: blank(outside.head), base: seededBase).counts
+               && viaOutside.screens.allSatisfy { $0.status == .added || $0.lineage.hasSuffix("@" + baseShort) || $0.lineage.hasSuffix("@" + String(outside.head.commit.prefix(7))) },
+               "base with no lineages: given <id>@<its commit's first seven digits>, then paired as usual")
+
         // The large pair, and its time.
         let big = MapFixtures.large()
         check("large", base: big.base, head: big.head, restructured: restructured(big))
