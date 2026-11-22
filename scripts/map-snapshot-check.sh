@@ -67,9 +67,37 @@ walk("empty", {"screens": [{"id": "Only-0001", "activity": "com.example.Only", "
      {"a.png": png(9)})
 # a walk with no screens at all and no seconds
 walk("nothing", {"screens": []}, {})
+# --record-deps (package I1): per-screen deps in no order with unicode, an empty deps object, a list that is not all
+# strings, deps that is not an object, the app start's deps, why they cannot be trusted, and walked and carried screens
+walk("deps", {
+    "screens": [
+        {"id": "Deps-0001", "activity": "com.example.Main", "title": "Main", "depth": 0, "path": {"steps": []}, "captures": {"light": "a.png"},
+         "texts": ["x"], "origin": "walked",
+         "deps": {"classes": ["com.example.Zed", "com.example.Ä", "com.example.Main"], "sources": ["com/example/Main.kt", "com/example/Ä.kt", "com/example/Util.kt"],
+                  "resources": ["string/title", "layout/main", "drawable/ic_ä"]}},
+        {"id": "Deps-0002", "activity": "com.example.Detail", "depth": 1, "parent": "Deps-0001", "path": {"steps": ["tap 1"]}, "captures": {"light": "b.png"},
+         "origin": "carried", "deps": {}},
+        {"id": "Deps-0003", "activity": "com.example.Odd", "depth": 1, "origin": "carried", "deps": {"classes": ["a", 3], "sources": "nope", "resources": ["r/x"]}},
+        {"id": "Deps-0004", "activity": "com.example.NoDeps", "depth": 1, "origin": "walked", "deps": ["not", "an", "object"]},
+    ],
+    "edges": [{"from": "Deps-0001", "action": "Open", "cmd": "tap 1", "to": "Deps-0002"}],
+    "start_deps": {"classes": ["com.example.App"], "sources": ["com/example/App.kt"], "resources": ["style/Theme.App", "mipmap/ic_launcher"]},
+    "deps_unreliable": "the probes were reset mid-screen", "seconds": {"total": 3.25}},
+    {"a.png": png(11), "b.png": png(12)})
+# seeded from the deps walk's snapshot: a carried screen the seed walked, one the seed carried, one the seed lacks, and a
+# carried screen with no deps of its own (it keeps the seed's)
+walk("deps2", {
+    "screens": [
+        {"id": "Deps-0001", "activity": "com.example.Main", "depth": 0, "origin": "carried", "captures": {"light": "a.png"}},
+        {"id": "Deps-0002", "activity": "com.example.Detail", "depth": 1, "origin": "carried"},
+        {"id": "Deps-0009", "activity": "com.example.New", "depth": 1, "origin": "carried", "deps": {"sources": ["com/example/New.kt"]}},
+        {"id": "Deps-0010", "activity": "com.example.Walked", "depth": 1, "origin": "walked", "replaces": "Deps-0004", "deps": {"resources": ["layout/w"]}},
+    ],
+    "edges": [], "start_deps": {"classes": [], "sources": [], "resources": []}, "incomplete": ["seed: --max-depth 3: Deps-0002 not explored", "--max-seconds 9"]},
+    {"a.png": png(11)})
 PY
 # the unicode walk's outside.png sits above its folder on purpose; the walk must refuse to read it
-step "fixture walks written" test -f "$W/unicode/crawl.json" -a -f "$W/empty/crawl.json" -a -f "$W/nothing/crawl.json"
+step "fixture walks written" test -f "$W/unicode/crawl.json" -a -f "$W/empty/crawl.json" -a -f "$W/nothing/crawl.json" -a -f "$W/deps2/crawl.json"
 
 # --- Two identical repositories: two commits sharing a tree, then four more with trees of their own ----------------
 export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@example.com
@@ -79,7 +107,7 @@ export -f G
 mkdir "$W/seed" && cd "$W/seed" && G init -q -b main . && echo one >f.txt && G add f.txt && G commit -q -m one
 C1=$(G rev-parse HEAD)
 G commit -q --allow-empty -m "same tree as one"; C2=$(G rev-parse HEAD)
-for n in 3 4 5 6; do echo "v$n" >f.txt; G commit -q -am "v$n"; eval "C$n=\$(G rev-parse HEAD)"; done
+for n in 3 4 5 6 7 8; do echo "v$n" >f.txt; G commit -q -am "v$n"; eval "C$n=\$(G rev-parse HEAD)"; done
 cd "$ROOT"
 cp -R "$W/seed" "$W/repo-py"; cp -R "$W/seed" "$W/repo-app"
 step "the repository has two commits with one tree" test "$(G -C "$W/seed" rev-parse "$C1^{tree}")" = "$(G -C "$W/seed" rev-parse "$C2^{tree}")" -a "$C1" != "$C2"
@@ -96,6 +124,8 @@ CASES=(
   "unicode, quotes, controls, odd seconds, missing captures|$W/unicode|$C4|--combos light,dark --depth 3 --seconds 90 --start app://x --start app://y --offline --sign-in demo"
   "empty edge list, whole seconds|$W/empty|$C5|"
   "no screens|$W/nothing|$C6|--depth 1"
+  "deps, start deps, unreliable, walked and carried|$W/deps|$C7|"
+  "seeded: carried entries take the seed's commit and deps|$W/deps2|$C8|--seed-snapshot $W/py-6.json"
 )
 echo '{"depth": 4, "seconds": 60, "combos": ["light", "dark"], "starts": []}' > "$W/profile.json"
 n=0
@@ -112,13 +142,29 @@ for c in "${CASES[@]}"; do
 done
 [ -s "$W/py-3.json" ] && grep -q 'Réservations' "$W/py-3.json" && grep -q '"seconds" : 1234.5678' "$W/py-3.json" && grep -q '"seconds" : 7' "$W/py-4.json" && grep -q '"edges" : \[' "$W/py-4.json"
 step "the fixtures reached the JSON (unicode, fractional seconds, empty lists)" test $? -eq 0
+python3 - "$W/py-6.json" "$W/py-7.json" "$C7" <<'PY'
+import json, sys
+a, b, c7 = json.load(open(sys.argv[1])), json.load(open(sys.argv[2])), sys.argv[3]
+s = {x["id"]: x for x in a["screens"]}
+t = {x["id"]: x for x in b["screens"]}
+ok = (s["Deps-0001"]["deps"]["sources"] == sorted(s["Deps-0001"]["deps"]["sources"]) and "carriedFrom" not in s["Deps-0001"]
+      and s["Deps-0002"]["carriedFrom"] == "unknown" and s["Deps-0002"]["deps"] == {"classes": [], "resources": [], "sources": []}
+      and s["Deps-0003"]["deps"] == {"classes": [], "resources": ["r/x"], "sources": []} and "deps" not in s["Deps-0004"]
+      and a["startDeps"]["resources"] == ["mipmap/ic_launcher", "style/Theme.App"] and a["depsUnreliable"].startswith("the probes")
+      and t["Deps-0001"]["carriedFrom"] == c7 and t["Deps-0001"]["deps"] == s["Deps-0001"]["deps"]
+      and t["Deps-0002"]["carriedFrom"] == "unknown" and t["Deps-0009"]["carriedFrom"] == c7
+      and t["Deps-0009"]["deps"]["sources"] == ["com/example/New.kt"] and "carriedFrom" not in t["Deps-0010"] and "depsUnreliable" not in b
+      and b["incomplete"] == ["--max-depth 3: Deps-0002 not explored", "--max-seconds 9"])
+sys.exit(0 if ok else 1)
+PY
+step "deps, start deps and carried screens read as the contract says" test $? -eq 0
 step "a capture that is missing or leads out of the walk is left out" bash -c "! grep -q 'missing.png\|outside' '$W/py-3.json' && grep -c '\"captures\" : {' '$W/py-3.json' | grep -q ."
 
 refs() { G -C "$1" for-each-ref --format='%(refname) %(objectname)' refs/greenroom; }
 refs "$W/repo-py" >"$W/refs-py.txt"; refs "$W/repo-app" >"$W/refs-app.txt"
 step "both repositories hold the same refs, pointing at the same commits ($(wc -l <"$W/refs-py.txt" | tr -d ' '))" bash -c "test -s '$W/refs-py.txt' && cmp '$W/refs-py.txt' '$W/refs-app.txt'"
 step "the same objects are stored" bash -c "diff <(cd '$W/repo-py/.git/objects' && find . -type f | sort) <(cd '$W/repo-app/.git/objects' && find . -type f | sort)"
-step "every one has a tree ref with its own commit's snapshot" bash -c "grep -c '/tree/' '$W/refs-py.txt' | grep -q '^5$'"
+step "every one has a tree ref with its own commit's snapshot" bash -c "grep -c '/tree/' '$W/refs-py.txt' | grep -q '^7$'"
 
 # --- Found by commit, or by tree ----------------------------------------------------------------------------------
 step "--has: the script finds the commit walked" python3 "$PY" --has "$C1" --repo "$W/repo-py"
@@ -139,7 +185,7 @@ G -C "$W/repo-py" for-each-ref >"$W/all1"
 (cd "$W/repo-py/.git" && find . -type f -not -name '*.lock' | sort | xargs shasum 2>/dev/null | grep -v 'index\|logs/' ) >"$W/files1"
 step "running it twice changes no ref and no stored object" bash -c "cmp '$W/all0' '$W/all1' && cmp '$W/files0' '$W/files1'"
 step "git status is clean" test ! -s "$W/status0" -a -z "$(G -C "$W/repo-py" status --porcelain)"
-step "HEAD, branches and tags are untouched" bash -c "test \"\$(G -C '$W/repo-py' rev-parse HEAD)\" = \"\$(cat '$W/head0')\" -a \"\$(G -C '$W/repo-py' rev-parse HEAD)\" = '$C6' && cmp '$W/heads0' <(G -C '$W/repo-py' for-each-ref refs/heads refs/tags) && cmp '$W/heads0' <(G -C '$W/seed' for-each-ref refs/heads refs/tags)"
+step "HEAD, branches and tags are untouched" bash -c "test \"\$(G -C '$W/repo-py' rev-parse HEAD)\" = \"\$(cat '$W/head0')\" -a \"\$(G -C '$W/repo-py' rev-parse HEAD)\" = '$C8' && cmp '$W/heads0' <(G -C '$W/repo-py' for-each-ref refs/heads refs/tags) && cmp '$W/heads0' <(G -C '$W/seed' for-each-ref refs/heads refs/tags)"
 step "nothing is written outside refs/greenroom/" bash -c "test -z \"\$(G -C '$W/repo-py' for-each-ref --format='%(refname)' | grep -v '^refs/heads/main\$' | grep -v '^refs/greenroom/maps/')\""
 step "the working tree is as it was" bash -c "cmp '$W/seed/f.txt' '$W/repo-py/f.txt'"
 

@@ -22,6 +22,10 @@ if let i = arguments.firstIndex(of: "--map-store-check"), i + 1 < arguments.coun
 if arguments.contains("--map-pairing-check") { MapPairingCheck.run() }
 // `Greenroom --map-history-check DIR`: map history wired into comparisons (History), headless, no engine (HistoryCheck).
 if let i = arguments.firstIndex(of: "--map-history-check"), i + 1 < arguments.count { HistoryCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-impact-check DIR [APK]`: walking only what changed (MapImpact, the seeded walk, misses), headless (MapImpactCheck).
+if let i = arguments.firstIndex(of: "--map-impact-check"), i + 1 < arguments.count {
+    MapImpactCheck.run(dir: URL(fileURLWithPath: arguments[i + 1]), apk: i + 2 < arguments.count ? URL(fileURLWithPath: arguments[i + 2]) : nil)
+}
 // `Greenroom --map-layout-check`: the map's layout (MapLayout) on the fixtures.
 if arguments.contains("--map-layout-check") { MapLayoutCheck.run() }
 // `Greenroom --map-git-check DIR`: map snapshots in git refs, between a bare repository and two clones (MapGitCheck).

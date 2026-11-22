@@ -3,12 +3,15 @@
 
     map-snapshot.py WALK_DIR --repo REPO --commit SHA [--profile-file .greenroom/map.json]
                     [--depth N] [--seconds N] [--start LINK]... [--combos light,dark] [--sign-in NAME] [--offline]
-                    --engine VERSION --walked ISO_DATE [--write-refs]
+                    --engine VERSION --walked ISO_DATE [--seed-snapshot SEED_JSON] [--write-refs]
     map-snapshot.py --has SHA --repo REPO [profile options]
 
 It must write the very bytes, and the very git objects, that the app writes (MapStore.importWalk, MapSnapshot.data(),
 MapGit.write in Sources/Greenroom), so a snapshot made by CI on Linux and one made on a Mac never disagree. Python 3
 standard library only; git is used through its plumbing and nothing outside refs/greenroom/ is touched.
+
+--seed-snapshot: for a walk seeded from an earlier one (crawl.py --seed), that walk's snapshot JSON: a screen marked
+"origin": "carried" takes its carriedFrom (and, when it has none of its own, its deps) from it, as the app's import does.
 
 stdout: the snapshot JSON (the bytes of map.json). With --write-refs, stderr gets `snapshot-commit: <git commit id>`.
 --has exits 0 when SHA, or a commit with its tree, already has a snapshot for the profile; 1 when not.
@@ -117,7 +120,17 @@ def str_list(v):
     return list(v) if isinstance(v, list) and all(isinstance(x, str) for x in v) else None
 
 
-def import_walk(walk, commit, tree, profile, engine, walked):
+def deps_of(v):
+    """crawl.json's deps object (MapStore.deps): each list when it is a list of strings, else empty; None when not an object."""
+    if not isinstance(v, dict): return None
+    return {k: str_list(v.get(k)) or [] for k in ("classes", "sources", "resources")}
+
+
+def sorted_deps(d):
+    return {k: sorted(d[k], key=nfc) for k in ("classes", "sources", "resources")}
+
+
+def import_walk(walk, commit, tree, profile, engine, walked, seed=None):
     """Returns (snapshot dict, {capture sha256: file}) or None when there is no readable crawl.json."""
     try:
         with open(os.path.join(walk, "crawl.json"), "rb") as f:
@@ -164,6 +177,13 @@ def import_walk(walk, commit, tree, profile, engine, walked):
         if isinstance(s.get("parent"), str): screen["parent"] = s["parent"]
         if isinstance(path.get("start"), str): screen["start"] = path["start"]
         if isinstance(s.get("flaky"), str): screen["flaky"] = s["flaky"]
+        deps = deps_of(s.get("deps"))
+        if s.get("origin") == "carried":
+            was = next((x for x in seed["screens"] if x.get("id") == sid), None) if seed else None
+            if was is not None: screen["carriedFrom"] = was["carriedFrom"] if isinstance(was.get("carriedFrom"), str) else seed["commit"]
+            else: screen["carriedFrom"] = seed["commit"] if seed else "unknown"
+            if deps is None and was is not None and isinstance(was.get("deps"), dict): deps = deps_of(was["deps"])
+        if deps is not None: screen["deps"] = sorted_deps(deps)
         screens.append(screen)
 
     nxt, edges = {}, []
@@ -192,7 +212,10 @@ def import_walk(walk, commit, tree, profile, engine, walked):
     edges.sort(key=lambda e: (nfc(e["from"]), e["order"], nfc(e["cmd"])))
     snap = {"schema": SCHEMA, "commit": commit, "tree": tree, "profile": profile, "engine": engine, "walked": walked,
             "screens": screens, "edges": edges, "findings": findings,
-            "incomplete": str_list(data.get("incomplete")) or [], "seconds": Float(seconds)}
+            "incomplete": [x[6:] if x.startswith("seed: ") else x for x in str_list(data.get("incomplete")) or []], "seconds": Float(seconds)}
+    start = deps_of(data.get("start_deps"))
+    if start is not None: snap["startDeps"] = sorted_deps(start)
+    if isinstance(data.get("deps_unreliable"), str): snap["depsUnreliable"] = data["deps_unreliable"]
     return snap, files
 
 
@@ -313,6 +336,7 @@ def main():
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--engine")
     ap.add_argument("--walked")
+    ap.add_argument("--seed-snapshot")
     ap.add_argument("--write-refs", action="store_true")
     a = ap.parse_args()
 
@@ -322,7 +346,16 @@ def main():
     if not (a.walk and a.commit and a.engine and a.walked): ap.error("WALK_DIR, --commit, --engine and --walked are required")
     tree = tree_of(a.repo, a.commit)
     if not tree: fail("no such commit in %s: %s" % (a.repo, a.commit))
-    got = import_walk(a.walk, a.commit, tree, profile, a.engine, iso(a.walked))
+    seed = None
+    if a.seed_snapshot:
+        try:
+            with open(a.seed_snapshot, "rb") as f:
+                seed = json.load(f)
+        except (OSError, ValueError):
+            fail("--seed-snapshot is not a readable snapshot: " + a.seed_snapshot)
+        if not isinstance(seed, dict) or not isinstance(seed.get("commit"), str) or not isinstance(seed.get("screens"), list):
+            fail("--seed-snapshot is not a snapshot: " + a.seed_snapshot)
+    got = import_walk(a.walk, a.commit, tree, profile, a.engine, iso(a.walked), seed)
     if not got: fail("no readable crawl.json in " + a.walk)
     snap, files = got
     sys.stdout.buffer.write(encode(snap))

@@ -47,11 +47,27 @@ struct MapSnapshot: Codable, Equatable {
     /// Where an edge leads when it is not a screen (crawl.json's words); nil is a control that was not followed.
     static let pseudo: Set<String> = ["EXIT", "CRASH", "SKIPPED", "FAILED"]
 
+    /// What a screen (or the app's start) depends on, as the engine's `--record-deps` records it (package I1).
     struct Deps: Codable, Equatable {
         /// App classes whose code ran while the screen was reached and shown.
         var classes: [String] = []
+        /// The source files of those classes, as package paths ("com/example/app/MainActivity.kt"), Kotlin's inlined
+        /// files included. A changed file is matched by its path's suffix.
+        var sources: [String] = []
         /// Resources it resolved, as `type/name` ("layout/trip_row").
         var resources: [String] = []
+
+        init(classes: [String] = [], sources: [String] = [], resources: [String] = []) {
+            self.classes = classes; self.sources = sources; self.resources = resources
+        }
+        // A record written before `sources` existed still reads.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            classes = try c.decodeIfPresent([String].self, forKey: .classes) ?? []
+            sources = try c.decodeIfPresent([String].self, forKey: .sources) ?? []
+            resources = try c.decodeIfPresent([String].self, forKey: .resources) ?? []
+        }
+        func sorted() -> Deps { Deps(classes: classes.sorted(), sources: sources.sorted(), resources: resources.sorted()) }
     }
 
     struct Screen: Codable, Equatable {
@@ -109,6 +125,12 @@ struct MapSnapshot: Codable, Equatable {
     /// What the walk did not finish, in crawl.json's words ("--max-seconds ...").
     var incomplete: [String] = []
     var seconds: Double = 0
+    /// What the app's start (launch to first settle) depends on: a change there changes every screen. Nil when the walk
+    /// recorded no dependencies (the released engine, or `--record-deps` not passed).
+    var startDeps: Deps?
+    /// Set when the engine says its dependency record cannot be trusted (why, in its words): a walk seeded from this
+    /// snapshot would not be honest, so the next one is full.
+    var depsUnreliable: String?
 
     func screen(_ id: String) -> Screen? { screens.first { $0.id == id } }
 
@@ -120,10 +142,8 @@ struct MapSnapshot: Codable, Equatable {
     func canonical() -> MapSnapshot {
         var s = self
         s.screens.sort { $0.id < $1.id }
-        for i in s.screens.indices {
-            s.screens[i].deps?.classes.sort()
-            s.screens[i].deps?.resources.sort()
-        }
+        for i in s.screens.indices { s.screens[i].deps = s.screens[i].deps?.sorted() }
+        s.startDeps = s.startDeps?.sorted()
         s.edges.sort { ($0.from, $0.order, $0.cmd) < ($1.from, $1.order, $1.cmd) }
         return s
     }
