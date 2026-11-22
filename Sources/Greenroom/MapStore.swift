@@ -29,7 +29,12 @@ final class MapStore {
     /// Reads a walk's folder (`crawl.json` and the captures it names) into a snapshot, storing each capture once.
     /// The file is read here, not through `ScreenMapData`, so the order of the edges and the raw `to` survive.
     /// Nil when there is no readable `crawl.json`. A capture whose file is missing is left out of its screen.
-    func importWalk(_ walk: URL, commit: String, tree: String, profile: MapProfile, engine: String, walked: Date) -> MapSnapshot? {
+    ///
+    /// A walk seeded from an earlier one (`crawl.py --seed`, package I1) marks each screen `"origin": "walked"` or
+    /// `"carried"`. A carried screen's `carriedFrom` is the commit its entry was walked at: the seed's own entry's
+    /// `carriedFrom`, else the seed's commit; "unknown" when no `seed` is given. A carried screen the engine wrote without
+    /// `deps` keeps the seed entry's. `deps`, `start_deps` and `deps_unreliable` (`--record-deps`) are read as they are.
+    func importWalk(_ walk: URL, commit: String, tree: String, profile: MapProfile, engine: String, walked: Date, seed: MapSnapshot? = nil) -> MapSnapshot? {
         guard MapStore.safe(commit) != nil,
               let data = try? Data(contentsOf: walk.appendingPathComponent("crawl.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -52,10 +57,17 @@ final class MapStore {
                 if let h = blob(rel) { captures[combo] = h }
             }
             let activity = ((s["activity"] as? String) ?? id).split(separator: ".").last.map(String.init) ?? id
+            var carriedFrom: String?
+            var deps = MapStore.deps(s["deps"])
+            if (s["origin"] as? String) == "carried" {
+                let was = seed?.screen(id)
+                carriedFrom = was.map { $0.carriedFrom ?? seed!.commit } ?? seed?.commit ?? "unknown"
+                if deps == nil { deps = was?.deps }
+            }
             return MapSnapshot.Screen(id: id, lineage: "", activity: activity, title: (s["title"] as? String) ?? "",
                                       depth: (s["depth"] as? Int) ?? 0, parent: s["parent"] as? String, start: path["start"] as? String,
                                       steps: (path["steps"] as? [String]) ?? [], captures: captures, texts: (s["texts"] as? [String]) ?? [],
-                                      settled: (s["settled"] as? Bool) ?? true, flaky: s["flaky"] as? String, carriedFrom: nil, deps: nil)
+                                      settled: (s["settled"] as? Bool) ?? true, flaky: s["flaky"] as? String, carriedFrom: carriedFrom, deps: deps)
         }
 
         var next: [String: Int] = [:]       // each screen's controls are numbered in the order the file lists them
@@ -72,7 +84,67 @@ final class MapStore {
         }
         return MapSnapshot(commit: commit, tree: tree, profile: profile, engine: engine, walked: ISO8601DateFormatter().string(from: walked),
                            screens: screens, edges: edges, findings: findings, incomplete: (json["incomplete"] as? [String]) ?? [],
-                           seconds: ((json["seconds"] as? [String: Any])?["total"] as? Double) ?? 0).canonical()
+                           seconds: ((json["seconds"] as? [String: Any])?["total"] as? Double) ?? 0,
+                           startDeps: MapStore.deps(json["start_deps"]), depsUnreliable: json["deps_unreliable"] as? String).canonical()
+    }
+
+    /// crawl.json's `deps` object: each list read when it is a list of strings, else empty. Nil when it is not an object.
+    private static func deps(_ value: Any?) -> MapSnapshot.Deps? {
+        guard let d = value as? [String: Any] else { return nil }
+        return MapSnapshot.Deps(classes: (d["classes"] as? [String]) ?? [], sources: (d["sources"] as? [String]) ?? [], resources: (d["resources"] as? [String]) ?? [])
+    }
+
+    // MARK: Seed
+
+    /// Writes a stored snapshot back out as a walk's folder, in the shape `crawl.py` writes and reads (`--seed`):
+    /// `crawl.json` and its captures, cloned from the blobs as `screens/<hash>.png`. Each screen says `origin` (carried
+    /// when its entry was carried), so `importWalk(folder, ..., seed: snapshot)` gives the snapshot back, lineages aside.
+    /// False when the folder could not be written or a capture is missing from the store.
+    @discardableResult
+    func writeSeed(_ snapshot: MapSnapshot, to folder: URL) -> Bool {
+        try? fm.removeItem(at: folder)
+        makeFolder(folder.appendingPathComponent("screens", isDirectory: true))
+        func depsJSON(_ d: MapSnapshot.Deps) -> [String: Any] { ["classes": d.classes, "sources": d.sources, "resources": d.resources] }
+        var complete = true
+        var screens: [[String: Any]] = []
+        for sc in snapshot.screens {
+            var captures: [String: String] = [:]
+            for (combo, hash) in sc.captures {
+                let rel = "screens/\(hash).png"
+                let to = folder.appendingPathComponent(rel)
+                if !fm.fileExists(atPath: to.path) {
+                    guard let from = blobURL(hash) else { complete = false; continue }
+                    if clonefile(from.path, to.path, 0) != 0, (try? fm.copyItem(at: from, to: to)) == nil { complete = false; continue }
+                }
+                captures[combo] = rel
+            }
+            var path: [String: Any] = ["steps": sc.steps]
+            if let start = sc.start { path["start"] = start }
+            var o: [String: Any] = ["id": sc.id, "activity": sc.activity, "title": sc.title, "depth": sc.depth, "path": path, "captures": captures,
+                                    "texts": sc.texts, "settled": sc.settled, "origin": sc.carriedFrom == nil ? "walked" : "carried"]
+            o["parent"] = sc.parent ?? NSNull()
+            if let f = sc.flaky { o["flaky"] = f }
+            if let d = sc.deps { o["deps"] = depsJSON(d) }
+            screens.append(o)
+        }
+        let edges: [[String: Any]] = snapshot.edges.map { e in
+            var o: [String: Any] = ["from": e.from, "action": e.action, "cmd": e.cmd]
+            if let to = e.to { o["to"] = to }
+            if let n = e.note { o["note"] = n }
+            return o
+        }
+        var json: [String: Any] = [
+            "combos": snapshot.profile.combos, "screens": screens, "edges": edges,
+            "findings": snapshot.findings.map { ["kind": $0.kind, "detail": $0.detail, "path": ["steps": $0.steps]] },
+            "incomplete": snapshot.incomplete, "seconds": ["total": snapshot.seconds],
+            // Not read by the crawler: what this seed is, for a person looking at the folder.
+            "greenroom_seed": ["commit": snapshot.commit, "profile": snapshot.profile.id, "engine": snapshot.engine],
+        ]
+        if let d = snapshot.startDeps { json["start_deps"] = depsJSON(d) }
+        if let u = snapshot.depsUnreliable { json["deps_unreliable"] = u }
+        guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .prettyPrinted]),
+              (try? data.write(to: folder.appendingPathComponent("crawl.json"), options: .atomic)) != nil else { return false }
+        return complete
     }
 
     /// Keeps a snapshot, and its tree's way to it when the tree has none yet. False when it could not be written.

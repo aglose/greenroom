@@ -1,6 +1,6 @@
 import Foundation
 
-/// `Greenroom --map-import WALK_DIR --repo REPO --commit SHA [options] --engine VERSION --walked ISO_DATE [--write-refs]`
+/// `Greenroom --map-import WALK_DIR --repo REPO --commit SHA [options] --engine VERSION --walked ISO_DATE [--seed-snapshot FILE] [--write-refs]`
 /// and `Greenroom --map-import --has SHA --repo REPO [options]`: files one walk as a snapshot by hand, headless. It
 /// does what `scripts/map-snapshot.py` does on Linux in CI (same options, same bytes, same git objects), through
 /// `MapStore.importWalk` into a temporary store and `MapGit.write`; the check compares the two.
@@ -38,7 +38,7 @@ enum MapTool {
 
     static func run(_ args: [String]) -> Never {
         let flags: Set<String> = ["--offline", "--write-refs"]
-        let valued: Set<String> = ["--repo", "--commit", "--has", "--profile-file", "--depth", "--seconds", "--start", "--combos", "--sign-in", "--engine", "--walked"]
+        let valued: Set<String> = ["--repo", "--commit", "--has", "--profile-file", "--depth", "--seconds", "--start", "--combos", "--sign-in", "--engine", "--walked", "--seed-snapshot"]
         var o: [String: [String]] = [:]
         var walk: String?
         var i = 0
@@ -69,7 +69,12 @@ enum MapTool {
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent("greenroom-map-import-" + UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: temp) }
         let store = MapStore(root: temp, repo: "import")
-        guard let snapshot = store.importWalk(URL(fileURLWithPath: walk), commit: commit, tree: t.text, profile: p, engine: engine, walked: walked) else {
+        var seed: MapSnapshot?
+        if let file = o["--seed-snapshot"]?.last {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: file)), let s = MapSnapshot.read(data) else { fail("--seed-snapshot is not a readable snapshot: \(file)") }
+            seed = s
+        }
+        guard let snapshot = store.importWalk(URL(fileURLWithPath: walk), commit: commit, tree: t.text, profile: p, engine: engine, walked: walked, seed: seed) else {
             fail("no readable crawl.json in \(walk)")
         }
         FileHandle.standardOutput.write(snapshot.data())
