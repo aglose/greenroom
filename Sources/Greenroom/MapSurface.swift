@@ -80,6 +80,8 @@ final class MapSurface: NSView {
 
     var onSelect: ((String?) -> Void)?
     var onOpen: ((String) -> Void)?
+    /// A click on a group's title, by its place in the placement's `groups` (the navigator folds and unfolds it).
+    var onGroup: ((Int) -> Void)?
     private(set) var selected: String?
     private(set) var detail: Detail = .near
     let pyramid: MapPyramid
@@ -924,7 +926,19 @@ final class MapSurface: NSView {
             if event.clickCount == 2 { onOpen?(screens[i].lineage) } else { select(screens[i].lineage, reveal: false) }
             return
         }
+        if let g = groupTitle(at: convert(event.locationInWindow, from: nil)) { onGroup?(g); return }
         panStart = (event.locationInWindow, enclosingScrollView?.contentView.bounds.origin ?? .zero)
+    }
+
+    /// The group whose title is at `p`: the words, a little around them, while titles are showing.
+    private func groupTitle(at p: NSPoint) -> Int? {
+        guard onGroup != nil, detail <= .middle else { return nil }
+        let k = max(1, 1 / magnification)
+        for (i, (t, g)) in zip(groupTitles, groups).enumerated() where !t.isHidden {
+            let r = CGRect(x: g.frame.minX, y: g.frame.minY - 34 * k, width: t.bounds.width * k + 12 * k, height: 42 * k)
+            if r.contains(p) { return i }
+        }
+        return nil
     }
 
     override func mouseDragged(with event: NSEvent) {
