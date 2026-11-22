@@ -56,6 +56,25 @@ version of it and adds the workbench.
   hidden device of its own, then walks the whole app on that device's signed-in data (one device, as the crawler
   walks kept data). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.
   A script that fails stops the walk with its last line.
+- **Map history**: every walk of a committed, clean build is kept as a snapshot of the app's screens for that commit,
+  with each capture stored once however many commits show it. The Screen Map opens a branch's map against the
+  snapshot of its merge base with the base branch (or the nearest earlier commit that has one, and says how far
+  behind it is): screens added in green, removed in red, modified in amber with why (pixels, structure, text,
+  routes). A screen whose layout changed is followed as the same screen, not as one gone and one new. A strip across
+  the top holds the stored snapshots; drag its two handles to compare any two, a release candidate against the last
+  one included. The map opens on what changed and its neighbours, folds the rest, groups screens by the section they
+  hang from, and has filters, search (⌘F) and a minimap; it stays quick at a few thousand screens and zooms to the
+  capture's own pixels. A screen's column shows base, head and the difference, what text and controls changed, and
+  the screen's captures over time. Changes answers from stored snapshots with no walk when both builds have one.
+  "Export…" writes a folder with one `index.html` that shows the same comparison in any browser, for people without
+  Greenroom. With "Share screen maps through git" on for a workspace (off by default), snapshots are kept in the
+  repository under `refs/greenroom/maps` and pushed to origin: outside every branch and pull request, not fetched by
+  a normal clone, and found by teammates' Greenroom, also for a squash-merged commit with the same tree.
+  `action/` holds a GitHub Action that walks the base branch on CI and pushes the same refs. With an engine that
+  records what each screen depends on (apksim 0.58 and later), a walk redoes only the screens a commit's changed
+  files could touch and carries the rest, falling back to a full walk for build files, the manifest, app start-up
+  code and release builds whose classes name no source file (docs/MAP-IMPACT.md). docs/MAP-HISTORY-PLAN.md has the
+  design.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
 - **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.

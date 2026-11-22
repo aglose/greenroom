@@ -1,7 +1,37 @@
 # Map history: the screen map over time, and what a change did to it
 
-Status (2026-11-21): P0 is done (`MapSnapshot.swift`, `MapFixtures.swift`, `Greenroom --map-contract-check [DIR]`).
-Everything else is plan.
+Status (2026-11-22): every package of the table below is built and merged, each with its check, except what "Not
+yet" lists. The engine half (E1, E2) is on apksim branches that are not released, so incremental walks wait for
+apksim 0.58 and an `engine.lock` bump; until then every walk is a full walk.
+
+Not yet:
+
+- The GitHub Action (`action/`) has never run on GitHub (spike MS6); only its script is checked.
+- Incremental walks inside the app against a released engine; they were run live against a local build of the engine.
+- A real app with hundreds of screens. See "What the first real apps showed".
+
+## What the first real apps showed (2026-11-22)
+
+Two open-source apps from apksim's corpus list, walked with the unreleased engine; `Greenroom --map-walks` put the
+walks through import, pairing, the diff and the export.
+
+- **Markor** stops at its introduction: each page of the pager has the same structure, so "Next" reads as staying on
+  the screen, and the walk ends with one screen. An app behind a paged introduction needs a start past it: a deep
+  link, or a script as a sign-in uses.
+- **Wikipedia** needs data taken past its onboarding (the last page's "Skip" is text the tree does not mark as
+  clickable; and once onboarding is done a restart no longer shows it, so routes through it stop replaying). From
+  there a walk reaches 10 screens and 42 transitions in about 130 s and meets 7 crashes, an `IllegalAccessError` in
+  the engine's translated code, not the app's own fault.
+- **The same build twice is the same map**: two walks, each on its own clone of the same data, gave the same 10
+  screen ids and 42 edges, and the diff reported nothing added, removed or modified. Walking twice on one data slot
+  without cloning it gave 5 ids in common of 11 and 15, because the first walk changes what the second starts from:
+  the clone per walk that Evidence makes is what keeps a history comparable.
+- **Most of its screens never settle** (7 of 10: a feed that keeps loading), so their pixels are not compared, and
+  only 4 of 10 screens had a capture that replayed. On an app like this the map and its routes are trustworthy and
+  the picture comparison says little.
+- **A release build names no source files** (R8 strips them unless `-keepattributes SourceFile` is kept): the engine
+  says so (`deps_unreliable`) and incremental walks fall back to full walks. They pay off on debug builds.
+- Size was never tested by a real app: thousands of screens are covered by the generated maps only.
 
 The screen map today is one walk of one build, kept in a folder that is pruned after five runs, and Changes walks
 two builds side by side every time it is asked. This plan turns the map into a record: a snapshot of the app's
