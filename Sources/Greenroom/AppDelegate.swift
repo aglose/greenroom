@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var scriptsMenu = ScriptsMenu { [weak self] in self?.workbench }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        AppIcon.apply()
         Updates.shared.start()
         Reports.shared.start()
         buildMenus()
