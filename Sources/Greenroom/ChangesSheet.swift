@@ -143,16 +143,9 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private var sideBySide = NSStackView()
     private var wipeBox = NSStackView()
 
-    // Map tab.
-    let canvas = MapCanvas(frame: .zero)
-    private let mapScroll = NSScrollView()
-    private let mapPicture = SnapshotPicture()
-    private let mapTitle = NSTextField(labelWithString: "")
-    private let mapStatus = NSTextField(wrappingLabelWithString: "")
-    private let mapRoute = NSStackView()
-    private let mapGo = GlassButton(symbol: "arrow.forward.circle.fill", title: "Go there", label: "Open this screen on the session's simulator", style: .accent, target: nil, action: nil)
-    private let mapDetail = NSStackView()
-    private var mapPictureHeight: NSLayoutConstraint!
+    // Map tab: the navigator and the detail column (MapHost), fed from the comparison's snapshots.
+    let mapHost = MapHost()
+    private var mapGeneration = 0
 
     // Video tab.
     private let baseVideo = AVPlayerView(), headVideo = AVPlayerView()
@@ -398,18 +391,6 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     }
 
     private func buildMap() {
-        mapScroll.documentView = canvas
-        mapScroll.drawsBackground = false
-        mapScroll.hasVerticalScroller = true
-        mapScroll.hasHorizontalScroller = true
-        mapScroll.autohidesScrollers = true
-        mapScroll.allowsMagnification = true
-        mapScroll.minMagnification = 0.3
-        mapScroll.maxMagnification = 2
-        mapScroll.borderType = .noBorder
-        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
-        canvas.onSelect = { [weak self] id in self?.showMapDetail(id) }
-        canvas.onOpen = { [weak self] id in self?.go(id) }
         let mapWell = NSView()
         mapWell.wantsLayer = true
         mapWell.layer?.backgroundColor = NSColor(white: 0, alpha: 0.22).cgColor
@@ -418,59 +399,14 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         mapWell.layer?.masksToBounds = true
         let grid = StageBackground(frame: .zero)
         pin(grid, in: mapWell)
-        pin(mapScroll, in: mapWell)
-        let fitButton = GlassButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Fit the map", target: self, action: #selector(fitMap))
-        let legend = NSStackView(views: [dotLabel("new", ChangeStatus.new.color), dotLabel("changed", ChangeStatus.changed.color), dotLabel("gone", ChangeStatus.gone.color)])
-        legend.spacing = 10
-        for v in [legend, fitButton] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; mapWell.addSubview(v) }
-        NSLayoutConstraint.activate([legend.leadingAnchor.constraint(equalTo: mapWell.leadingAnchor, constant: 12), legend.bottomAnchor.constraint(equalTo: mapWell.bottomAnchor, constant: -10),
-                                     fitButton.trailingAnchor.constraint(equalTo: mapWell.trailingAnchor, constant: -8), fitButton.bottomAnchor.constraint(equalTo: mapWell.bottomAnchor, constant: -8)])
-
-        mapTitle.font = .systemFont(ofSize: 15, weight: .semibold)
-        mapTitle.textColor = Design.ink
-        mapTitle.lineBreakMode = .byTruncatingTail
-        mapStatus.font = .systemFont(ofSize: 12)
-        mapStatus.textColor = Design.mute
-        mapStatus.maximumNumberOfLines = 2
-        mapPicture.translatesAutoresizingMaskIntoConstraints = false
-        mapPictureHeight = mapPicture.heightAnchor.constraint(equalToConstant: 300)
-        mapPictureHeight.isActive = true
-        mapGo.target = self; mapGo.action = #selector(mapGoPressed)
-        mapRoute.orientation = .vertical
-        mapRoute.alignment = .leading
-        mapRoute.spacing = 3
-        let routeHead = label("ROUTE", size: 10, weight: .semibold)
-        for v in [mapPicture, mapTitle, mapStatus, mapGo, routeHead, mapRoute] as [NSView] { mapDetail.addArrangedSubview(v) }
-        mapDetail.orientation = .vertical
-        mapDetail.alignment = .leading
-        mapDetail.spacing = 6
-        mapDetail.setCustomSpacing(12, after: mapPicture)
-        mapDetail.setCustomSpacing(12, after: mapStatus)
-        mapDetail.setCustomSpacing(14, after: mapGo)
-        mapPicture.widthAnchor.constraint(equalTo: mapDetail.widthAnchor).isActive = true
-        mapDetail.isHidden = true
-        let detailWell = wellView()
-        mapDetail.translatesAutoresizingMaskIntoConstraints = false
-        detailWell.addSubview(mapDetail)
-        let mapEmpty = label("Pick a screen on the map", size: 12)
-        mapEmpty.translatesAutoresizingMaskIntoConstraints = false
-        detailWell.addSubview(mapEmpty)
-        NSLayoutConstraint.activate([
-            mapDetail.topAnchor.constraint(equalTo: detailWell.topAnchor, constant: 14), mapDetail.leadingAnchor.constraint(equalTo: detailWell.leadingAnchor, constant: 14),
-            mapDetail.trailingAnchor.constraint(equalTo: detailWell.trailingAnchor, constant: -14), mapDetail.bottomAnchor.constraint(lessThanOrEqualTo: detailWell.bottomAnchor, constant: -12),
-            mapEmpty.centerXAnchor.constraint(equalTo: detailWell.centerXAnchor), mapEmpty.centerYAnchor.constraint(equalTo: detailWell.centerYAnchor),
-            detailWell.widthAnchor.constraint(equalToConstant: 330),
-        ])
-        mapEmptyLabel = mapEmpty
-        let row = NSStackView(views: [mapWell, detailWell])
-        row.spacing = 14
-        row.alignment = .top
-        row.distribution = .fill
-        mapWell.heightAnchor.constraint(equalTo: row.heightAnchor).isActive = true
-        detailWell.heightAnchor.constraint(equalTo: row.heightAnchor).isActive = true
-        pin(row, in: mapView)
+        pin(mapHost, in: mapWell)
+        mapHost.onGo = { [weak self] lineage in
+            guard let self, let id = self.mapHost.source?.head.screens.first(where: { $0.lineage == lineage })?.id else { return }
+            self.go(id)
+        }
+        mapHost.onCopyRoute = { [weak self] text in self?.onSay?("Route copied: \(text.split(separator: "\n").count) control commands", false) }
+        pin(mapWell, in: mapView)
     }
-    private var mapEmptyLabel: NSTextField?
 
     private func dotLabel(_ text: String, _ color: NSColor) -> NSView {
         let dot = NSView()
@@ -579,7 +515,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             Design.animate(Design.arrive, {
                 self.animator().alphaValue = 1
                 self.panel.layer?.setAffineTransform(.identity)
-            }, done: { if self.tab == .map { self.fitMap() } })
+            }, done: { if self.tab == .map { self.mapHost.settle() } })
             onToggle?()
         }
         if compareNow, !(run?.isActive ?? false), changeSet == nil { self.compare(base: baseRef, name: baseName) }
@@ -719,7 +655,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         selectedScreen = nil
         shown = []
         collection.reloadData()
-        canvas.clear()
+        mapGeneration += 1
+        mapHost.clear()
         unloadVideo()
     }
 
@@ -856,7 +793,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private func showTab(_ t: Tab?) {
         let views = [summaryView, screensView, mapView, videoView, liveView]
         for (i, v) in views.enumerated() { v.isHidden = t?.rawValue != i }
-        if t == .map { DispatchQueue.main.async { self.fitMap() } }
+        if t == .map { DispatchQueue.main.async { self.mapHost.settle() } }
     }
 
     // MARK: Filling the tabs
@@ -869,11 +806,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         selectedScreen = nil
         showDetail(nil)
         if let first = shown.first { selectScreen(first.id) }
-        canvas.marks = set.marks
-        canvas.show(set.merged, animated: false)
-        canvas.comboIndex = 0
-        mapDetail.isHidden = true
-        mapEmptyLabel?.isHidden = false
+        showMap(set)
         fillLive()
         refreshVideo()
         refreshHeader()
@@ -1044,7 +977,6 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     @objc private func wipeMoved() { wipe.position = CGFloat(wipeSlider.doubleValue) }
 
     @objc private func goPressed() { if let id = selectedScreen { go(id) } }
-    @objc private func mapGoPressed() { if let id = canvas.selected { go(id) } }
 
     /// Opens a screen of the head on the session's simulator: the route as the map's "Go there" replays it.
     func go(_ id: String) {
@@ -1063,48 +995,29 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
 
     // MARK: Map tab
 
-    @objc private func fitMap() {
-        let size = canvas.bounds.size, view = mapScroll.bounds.size
-        guard size.width > 0, size.height > 0, view.width > 0 else { return }
-        let m = max(mapScroll.minMagnification, min(1, view.width / size.width, view.height / size.height))
-        mapScroll.setMagnification(m, centeredAt: NSPoint(x: size.width / 2, y: size.height / 2))
-    }
-
-    private func showMapDetail(_ id: String?) {
-        guard let set = changeSet, let id, let s = set.merged.screen(id) else { mapDetail.isHidden = true; mapEmptyLabel?.isHidden = false; return }
-        mapDetail.isHidden = false
-        mapEmptyLabel?.isHidden = true
-        let c = set.screen(id)
-        mapTitle.stringValue = s.label
-        let status = c?.status ?? .same
-        mapStatus.stringValue = (status == .same ? "The same in both builds" : status.word.capitalized + "  ·  " + (c?.detail ?? "")) + "  ·  " + s.activity
-        mapStatus.textColor = status.color
-        mapGo.isHidden = status == .gone
-        let file = (status == .gone ? c?.base : c?.head) ?? s.captures.first?.file
-        if let file {
-            SnapshotImages.load(file, maxPixel: 900) { [weak self] img in
-                guard let self, self.canvas.selected == id else { return }
-                let room = max(180, self.mapDetail.bounds.height * 0.5)
-                if let img { self.mapPictureHeight.constant = min(room, 302 * CGFloat(img.height) / CGFloat(max(1, img.width))) }
-                self.mapPicture.show(img, empty: "No capture")
-            }
-        } else { mapPictureHeight.constant = 90; mapPicture.show(nil, empty: "No capture") }
-        mapRoute.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let startText = s.start.map { "Open \($0)" } ?? "Launch the app"
-        for (i, step) in ([startText] + s.steps.map(ScreenMap.describe)).enumerated() {
-            let n = label(i == 0 ? "●" : "\(i)", size: 10.5, weight: .semibold, color: i == 0 ? Design.accent : Design.mute)
-            n.alignment = .right
-            n.widthAnchor.constraint(equalToConstant: 16).isActive = true
-            let t = label(step, size: 12, color: Design.ink)
-            t.lineBreakMode = .byTruncatingTail
-            let row = NSStackView(views: [n, t])
-            row.spacing = 8
-            mapRoute.addArrangedSubview(row)
+    /// The comparison on the map: its two snapshots (from the history, or made from the walk's folder when the comparison
+    /// came from a `--base` walk), the head's lineages paired with the base's, changes first.
+    private func showMap(_ set: ChangeSet) {
+        mapGeneration += 1
+        let mine = mapGeneration
+        mapHost.clear()
+        Task { @MainActor [weak self] in
+            let src = await Task.detached { set.mapSource ?? History.pairSource(folder: set.folder) }.value
+            guard let self, self.mapGeneration == mine, let src else { return }
+            self.mapHost.show(src)
+            if self.tab == .map { self.mapHost.settle() }
         }
     }
 
     /// For checks: the colour label of a screen's card on the map.
-    var mapMarks: [String: MapMark] { canvas.marks }
+    var mapMarks: [String: MapMark] { changeSet?.marks ?? [:] }
+
+    /// For checks: the card of the head's screen with this id (the Map tab's key into the comparison): its frame on the map.
+    func mapFrame(of id: String) -> CGRect? { mapHost.source?.lineage(ofHeadScreen: id).flatMap { mapHost.navigator.surface.frame(of: $0) } }
+    /// For checks: selects it, and the detail column fills.
+    func mapSelect(_ id: String) { mapHost.source?.lineage(ofHeadScreen: id).map { mapHost.select($0, reveal: false) } }
+    var mapDetailLineage: String? { mapHost.detail.isHidden ? nil : mapHost.detail.lineage }
+    var mapIsReady: Bool { mapHost.source != nil && !mapHost.navigator.busy }
 
     // MARK: Live tab
 

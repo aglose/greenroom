@@ -196,6 +196,26 @@ enum MapNavigatorCheck {
             let aboveHold = all.layout.groups.prefix { $0.id != open.id }.allSatisfy { g in g.members.allSatisfy { before[$0] == after[$0] } }
             expect(aboveHold, "the groups above it did not move")
             capture("4-group-folded.png")
+            // The tile close up: its name, count, changes and first pictures, not a card with a missing picture.
+            nav.scroll.magnification = 1
+            if let f = nav.surface.frame(of: open.id) {
+                let clip = nav.scroll.contentView
+                clip.scroll(to: clip.constrainBoundsRect(NSRect(x: f.minX - 400, y: f.minY - 300, width: clip.bounds.width, height: clip.bounds.height)).origin)
+                nav.scroll.reflectScrolledClipView(clip)
+                nav.surface.update()
+            }
+            settle(2.5)
+            capture("4b-group-tile.png")
+            if let root = window.contentView?.layer {   // the layers as they stand, for when the screen capture is of a window not yet redrawn
+                let scale = window.backingScaleFactor, size = window.contentView!.bounds.size
+                if let ctx = MapPyramid.context(Int(size.width * scale), Int(size.height * scale)) {
+                    ctx.setFillColor(Design.stage.cgColor)
+                    ctx.fill(CGRect(x: 0, y: 0, width: size.width * scale, height: size.height * scale))
+                    ctx.scaleBy(x: scale, y: scale)
+                    root.render(in: ctx)
+                    if let image = ctx.makeImage() { try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("4c-group-tile-layers.png")) }
+                }
+            }
             nav.toggleGroup(open.id)
             settle(0.1)
             let back = frames(nav.plan!)

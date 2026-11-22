@@ -15,6 +15,19 @@ struct MapSurfaceScreen {
     var crashes = 0
     var exits = 0
     var loops = 0
+    /// Set for a folded group: drawn as a wide tile (its name, counts and a few pictures), not as a card.
+    var tile: MapSurfaceTile?
+}
+
+/// What a folded group's tile says: the group's name, how many screens it holds and how many of them the comparison
+/// changed, and the captures of its first few screens (each by combination, as a card's).
+struct MapSurfaceTile {
+    var name: String
+    var count: Int
+    var added = 0, removed = 0, modified = 0
+    var pictures: [[String: String]] = []
+    static let width: CGFloat = 214
+    static let shown = 4
 }
 
 /// A route between two screens, carrying every control that makes it. `change` is what a comparison says of the route
@@ -139,6 +152,11 @@ final class MapSurface: NSView {
         var labelled = -1
         var wanted: MapPyramid.Tier?
         var ticket: MapPyramid.Ticket?
+        /// A folded group's tile: its little pictures and the words under them.
+        var thumbs: [CALayer] = []
+        var thumbTickets: [MapPyramid.Ticket] = []
+        let words = CALayer()
+        var isTile = false
     }
     private var live: [Int: Card] = [:]
     private var pool: [Card] = []
@@ -266,7 +284,11 @@ final class MapSurface: NSView {
         combo = input.combo
         screens = input.screens.filter { input.placement.frames[$0.lineage] != nil }
         indexOf = Dictionary(screens.enumerated().map { ($1.lineage, $0) }, uniquingKeysWith: { a, _ in a })
-        cardFrames = screens.map { input.placement.frames[$0.lineage]! }
+        cardFrames = screens.map { s in
+            let f = input.placement.frames[s.lineage]!
+            // A folded group is a wide tile: it stands where its slot is and reaches into the gap beside it.
+            return s.tile == nil ? f : CGRect(x: f.minX, y: f.minY, width: max(f.width, MapSurfaceTile.width), height: f.height)
+        }
         captureFrames = cardFrames.map { CGRect(x: $0.minX, y: $0.minY, width: $0.width, height: max(1, $0.height - 40)) }
         status = screens.map { input.changes[$0.lineage]?.status }
         badges = screens.indices.map { i in
@@ -571,6 +593,7 @@ final class MapSurface: NSView {
         c.wanted = nil
         c.index = -1
         c.root.contents = nil
+        clearTile(c)
         c.root.removeFromSuperlayer()
         c.badge.removeFromSuperlayer()
         c.label.contents = nil
@@ -600,6 +623,8 @@ final class MapSurface: NSView {
     private func configure(_ c: Card, _ i: Int) {
         let f = captureFrames[i]
         c.root.frame = f
+        if let tile = screens[i].tile { configureTile(c, i, tile); return }
+        clearTile(c)
         let color: NSColor? = switch status[i] {
         case .added?: Design.accent
         case .removed?: Design.record
@@ -631,6 +656,108 @@ final class MapSurface: NSView {
         }
         style(c, i)
         want(c, i, detail == .middle ? .small : .large)
+    }
+
+
+    // MARK: A folded group's tile
+
+    private func clearTile(_ c: Card) {
+        guard c.isTile || !c.thumbs.isEmpty else { return }
+        c.thumbTickets.forEach { $0.cancel() }
+        c.thumbTickets = []
+        c.thumbs.forEach { $0.removeFromSuperlayer(); $0.contents = nil }
+        c.thumbs = []
+        c.words.removeFromSuperlayer()
+        c.words.contents = nil
+        c.isTile = false
+        c.root.cornerRadius = 12
+        c.root.backgroundColor = NSColor(white: 1, alpha: 0.06).cgColor
+    }
+
+    /// The tile: a few small pictures in a row along its top, its name, its screen count and its changes in the status
+    /// colours under them. Not a card, so it never reads as a screen whose picture is missing.
+    private func configureTile(_ c: Card, _ i: Int, _ tile: MapSurfaceTile) {
+        clearTile(c)
+        c.isTile = true
+        let f = captureFrames[i]
+        let color: NSColor? = switch status[i] {
+        case .modified?: Design.warning
+        default: nil
+        }
+        c.root.frame = CGRect(x: f.minX, y: f.minY, width: max(f.width, MapSurfaceTile.width), height: f.height)
+        c.root.cornerRadius = 16
+        c.root.backgroundColor = NSColor(srgbRed: 0.145, green: 0.155, blue: 0.175, alpha: 1).cgColor
+        c.root.contents = nil
+        c.root.borderWidth = color == nil ? 1.5 : 2.5
+        c.root.borderColor = (color ?? NSColor(white: 1, alpha: 0.22)).cgColor
+        c.root.shadowOpacity = detail >= .near ? 0.55 : 0
+        c.root.shadowPath = nil
+        c.label.removeFromSuperlayer()
+        c.labelled = -1
+        c.badge.removeFromSuperlayer()
+        style(c, i)
+
+        let w = c.root.bounds.width, h = c.root.bounds.height
+        let pad: CGFloat = 12, gap: CGFloat = 6
+        let n = MapSurfaceTile.shown
+        let tw = (w - 2 * pad - CGFloat(n - 1) * gap) / CGFloat(n)
+        let th = min(tw * 2.17, h - 100)
+        for k in 0..<n {
+            let t = CALayer()
+            t.frame = CGRect(x: pad + CGFloat(k) * (tw + gap), y: pad, width: tw, height: th)
+            t.cornerRadius = 6
+            t.cornerCurve = .continuous
+            t.masksToBounds = true
+            t.contentsGravity = .resizeAspectFill
+            t.backgroundColor = NSColor(white: 1, alpha: k < tile.pictures.count ? 0.08 : 0.025).cgColor
+            c.root.addSublayer(t)
+            c.thumbs.append(t)
+            guard k < tile.pictures.count, let blob = tile.pictures[k][combo] ?? tile.pictures[k].values.sorted().first else { continue }
+            t.contents = pyramid.best(blob, upTo: .small)?.contents
+            if let ticket = pyramid.request(blob, .small, done: { [weak t] image in
+                guard let t else { return }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                t.contents = image.contents
+                CATransaction.commit()
+            }) { c.thumbTickets.append(ticket) }
+        }
+
+        let scale = (window?.backingScaleFactor ?? 2) * textScale
+        let textHeight = h - th - 2 * pad - 8
+        var changes: [(String, NSColor)] = []
+        if tile.added > 0 { changes.append(("\(tile.added) new", Design.accent)) }
+        if tile.modified > 0 { changes.append(("\(tile.modified) changed", Design.warning)) }
+        if tile.removed > 0 { changes.append(("\(tile.removed) gone", Design.record)) }
+        let name = Self.fit(tile.name, NSFont.systemFont(ofSize: 14, weight: .semibold), w - 2 * pad)
+        let count = "\(tile.count) screen\(tile.count == 1 ? "" : "s")"
+        let picture = MapPicture.draw(Int(((w - 2 * pad) * scale).rounded(.up)), Int((textHeight * scale).rounded(.up))) { ctx in
+            ctx.scaleBy(x: scale, y: scale)
+            func line(_ parts: [(String, NSFont, NSColor)], baseline: CGFloat) {
+                var x: CGFloat = 0
+                for (text, font, color) in parts {
+                    let l = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color]))
+                    ctx.textPosition = CGPoint(x: x, y: baseline)
+                    CTLineDraw(l, ctx)
+                    x += CTLineGetTypographicBounds(l, nil, nil, nil)
+                }
+            }
+            line([(name, .systemFont(ofSize: 14, weight: .semibold), Design.ink)], baseline: textHeight - 22)
+            line([(count, .systemFont(ofSize: 11.5), Design.mute)], baseline: textHeight - 42)
+            if changes.isEmpty {
+                line([("none changed", .systemFont(ofSize: 11.5), Design.mute)], baseline: textHeight - 62)
+            } else {
+                var parts: [(String, NSFont, NSColor)] = []
+                for (k, ch) in changes.enumerated() {
+                    if k > 0 { parts.append(("  ·  ", .systemFont(ofSize: 11.5), Design.mute)) }
+                    parts.append((ch.0, .systemFont(ofSize: 11.5, weight: .semibold), ch.1))
+                }
+                line(parts, baseline: textHeight - 62)
+            }
+        }
+        c.words.frame = CGRect(x: pad, y: pad + th + 8, width: w - 2 * pad, height: textHeight)
+        c.words.contents = picture?.contents
+        c.root.addSublayer(c.words)
     }
 
     /// Asks for the card's picture at `tier`, showing the best one already in memory until it comes.

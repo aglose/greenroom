@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import UniformTypeIdentifiers
 
 /// The main window: running simulators and recent APKs in a sidebar, the selected simulator beside it,
@@ -677,6 +678,31 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         screenMap.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         screenMap.onToggle = { [weak self] in self?.updateChrome() }
         screenMap.onGo = { [weak self] screen, map in self?.goThere(screen, map) }
+        screenMap.context = { [weak self] apk in await self?.mapContext(for: apk) }
+    }
+
+    /// The history a walk of this APK is filed in: the session whose newest build it is (the same bytes), that build's clean
+    /// commit, and the baseline rule (History.baseline) against the workspace's base ref. Nil when no session built it
+    /// or the build has no clean commit.
+    func mapContext(for apk: URL) async -> MapContext? {
+        let key = await Task.detached { Workbench.fileKey(apk) }.value
+        guard let key, let session = sessions.sessions.first(where: { (sessions.builds[$0.worktree.path] ?? $0.build)?.key == key }),
+              let build = sessions.builds[session.worktree.path] ?? session.build, History.fileable(build), let sha = build.sha,
+              let workspace = sessions.workspaces.first(where: { $0.root.path == session.workspace.path }),
+              let (commit, tree) = await History.resolve(sha, in: workspace.root) else { return nil }
+        let store = History.store(stateRoot: sessions.evidence.store.root, workspace: workspace.root)
+        return MapContext(store: store, commit: commit, tree: tree, engine: Engine.shared.version) { profile in
+            await History.baseline(commit: commit, mainRef: workspace.baseRef, in: workspace.root, store: store, profile: profile.id)
+        }
+    }
+
+    /// The first 16 hex digits of a file's SHA-256: a build's key.
+    nonisolated static func fileKey(_ url: URL) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        var hasher = SHA256()
+        while let chunk = try? h.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        return String(hasher.finalize().map { String(format: "%02x", $0) }.joined().prefix(16))
     }
 
     @objc func toggleMap(_ sender: Any?) { if screenMap.isOpen { screenMap.close() } else { showMap() } }

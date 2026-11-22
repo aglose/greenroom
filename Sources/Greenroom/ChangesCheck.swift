@@ -217,10 +217,13 @@ enum ChangesCheck {
             sheet.setMode(wipe: false)
 
             sheet.selectTab(.map)
+            let mapReady = await wait("the map", 30) { sheet.mapIsReady }
+            expect(mapReady, "the Map tab holds the two walks as snapshots and has drawn them")
             await sleep(1)
             if let id = changed?.id {
-                expect(sheet.mapMarks[id]?.label == "changed" && sheet.canvas.frame(of: id) != nil, "the Map marks the screen as changed")
-                sheet.canvas.select(id, reveal: false)
+                expect(sheet.mapMarks[id]?.label == "changed" && sheet.mapFrame(of: id) != nil, "the Map marks the screen as changed")
+                sheet.mapSelect(id)
+                expect(sheet.mapDetailLineage != nil, "selecting it fills the detail column")
                 await sleep(1.5)
             }
             shot("4-map.png")

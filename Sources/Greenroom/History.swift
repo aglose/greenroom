@@ -288,12 +288,19 @@ enum History {
               p.store.snapshot(profile: profile.id, commit: p.commit) == nil,
               let data = try? Data(contentsOf: folder.appendingPathComponent("crawl.json")),
               let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        guard let stage = stagePair(folder: folder, raw: raw, side: side, stateRoot: stateRoot) else { return }
+        defer { try? FileManager.default.removeItem(at: stage) }
+        _ = await fileWalk(stage, place: p, profile: profile, engine: engine)
+    }
+
+
+    /// One side of a pair walk's crawl.json as a walk folder of its own, in a staging folder (the caller removes it).
+    private static func stagePair(folder: URL, raw: [String: Any], side: Side, stateRoot: URL) -> URL? {
         let isBase = side == .base
-        guard let screens = raw[isBase ? "base_screens" : "screens"] as? [[String: Any]] else { return }
+        guard let screens = raw[isBase ? "base_screens" : "screens"] as? [[String: Any]] else { return nil }
         let fm = FileManager.default
         let stage = stateRoot.appendingPathComponent("history-staging/\(UUID().uuidString)", isDirectory: true)
-        defer { try? fm.removeItem(at: stage) }
-        do { try fm.createDirectory(at: stage, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) } catch { return }
+        do { try fm.createDirectory(at: stage, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) } catch { return nil }
         for s in screens {
             for rel in ((s["captures"] as? [String: String]) ?? [:]).values {
                 let from = folder.appendingPathComponent(rel)
@@ -308,8 +315,26 @@ enum History {
         let json: [String: Any] = ["combos": raw["combos"] ?? [], "screens": screens, "edges": raw[isBase ? "base_edges" : "edges"] ?? [],
                                    "findings": findings, "incomplete": incomplete, "seconds": raw["seconds"] ?? [:]]
         guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
-              (try? out.write(to: stage.appendingPathComponent("crawl.json"))) != nil else { return }
-        _ = await fileWalk(stage, place: p, profile: profile, engine: engine)
+              (try? out.write(to: stage.appendingPathComponent("crawl.json"))) != nil else { try? fm.removeItem(at: stage); return nil }
+        return stage
+    }
+
+    /// The two snapshots of a pair walk's folder (`crawl.py HEAD --base BASE`), for a map that has no history behind it:
+    /// each side imported into a store inside the folder, so the map has the same one input a stored comparison has.
+    /// Nil when the folder is not a pair walk's. Off the main thread.
+    static func pairSource(folder: URL) -> MapSource? {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("crawl.json")),
+              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], raw["base_screens"] != nil else { return nil }
+        let root = folder.appendingPathComponent("pair-snapshots", isDirectory: true)
+        let store = MapStore(root: root, repo: "pair")
+        let profile = MapProfile()
+        func side(_ side: Side, _ commit: String) -> MapSnapshot? {
+            guard let stage = stagePair(folder: folder, raw: raw, side: side, stateRoot: root) else { return nil }
+            defer { try? FileManager.default.removeItem(at: stage) }
+            return store.importWalk(stage, commit: commit, tree: "", profile: profile, engine: "pair", walked: Date())
+        }
+        guard let head = side(.head, "head"), let base = side(.base, "base") else { return nil }
+        return MapSource.make(head: head, base: base, history: [base, head], blobURL: { store.blobURL($0) })
     }
 
     // MARK: Lookup
@@ -437,8 +462,10 @@ enum History {
         }
         let headFindings = head.findings.map { MapFinding(kind: $0.kind, detail: $0.detail, steps: $0.steps) }
         let unfinished = head.incomplete.map { ChangeSet.unfinishedLine($0) } + base.incomplete.map { ChangeSet.unfinishedLine("base: " + $0) }
-        return ChangeSet.assemble(folder: folder, screens: screens, baseToMerged: baseToMerged, headMap: headMap, baseMap: baseMap, headFindings: headFindings,
-                                  crashes: crashes, unfinished: unfinished)
+        var set = ChangeSet.assemble(folder: folder, screens: screens, baseToMerged: baseToMerged, headMap: headMap, baseMap: baseMap, headFindings: headFindings,
+                                     crashes: crashes, unfinished: unfinished)
+        set.mapSource = MapSource.make(head: head, base: base, history: [base, head], blobURL: { store.blobURL($0) })
+        return set
     }
 
     private typealias DiffEdgeStatus = MapDiff.EdgeChange.Status
