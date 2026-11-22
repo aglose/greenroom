@@ -40,6 +40,10 @@ if let i = arguments.firstIndex(of: "--map-export-check"), i + 1 < arguments.cou
 if let i = arguments.firstIndex(of: "--map-navigator-check"), i + 1 < arguments.count { MapNavigatorCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --map-detail-check DIR`: the map's detail column and time strip on a made-up history (MapDetailCheck).
 if let i = arguments.firstIndex(of: "--map-detail-check"), i + 1 < arguments.count { MapDetailCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-walks DIR WALK_A WALK_B`: two finished walks through import, pairing, diff and the HTML export (MapWalksTool).
+if let i = arguments.firstIndex(of: "--map-walks"), i + 3 < arguments.count {
+    MapWalksTool.run(dir: URL(fileURLWithPath: arguments[i + 1]), a: URL(fileURLWithPath: arguments[i + 2]), b: URL(fileURLWithPath: arguments[i + 3]))
+}
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
