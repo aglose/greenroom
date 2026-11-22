@@ -168,6 +168,8 @@ final class MapSurface: NSView {
     private(set) var drawnRoutes: [EdgeStyle: Int] = [:]
     var liveCards: Int { live.count }
     var pooledCount: Int { pool.count }
+    /// Live cards in view whose layer holds a picture now.
+    var picturedCards: Int { live.filter { lastVisible.intersects(cardFrames[$0.key]) && $0.value.root.contents != nil }.count }
     var imagesInMemory: Int { pyramid.imagesInMemory }
     /// Every layer under this view's, itself included: what Core Animation has to keep.
     var layerCount: Int {
