@@ -327,6 +327,9 @@ enum History {
     static func changeSet(head: Build, base: Build, workspace: URL, profile: MapProfile, stateRoot: URL, folder: URL) async -> ChangeSet? {
         guard let h = await snapshot(of: head, workspace: workspace, profile: profile, stateRoot: stateRoot),
               let b = await snapshot(of: base, workspace: workspace, profile: profile, stateRoot: stateRoot) else { return nil }
+        // Two different builds that find the same stored snapshot (one commit, or one tree, built twice) cannot be told
+        // apart from history: whatever differs between them is not in the commit. The pair is walked instead.
+        if head.key != base.key, h.commit == b.commit { return nil }
         return changeSet(head: h, base: b, store: store(stateRoot: stateRoot, workspace: workspace), folder: folder)
     }
 

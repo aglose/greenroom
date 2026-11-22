@@ -180,7 +180,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
     var evidenceFolder: URL { store.root.appendingPathComponent("evidence", isDirectory: true) }
     var changesFolder: URL { store.root.appendingPathComponent("changes", isDirectory: true) }
     func mapFolder(for key: String) -> URL { evidenceFolder.appendingPathComponent(key, isDirectory: true).appendingPathComponent("map", isDirectory: true) }
-    func changesFolder(head: String, base: String) -> URL { changesFolder.appendingPathComponent("\(head)-\(base)", isDirectory: true) }
+    func changesFolder(head: String, base: String, start: String? = nil, baseOption: String = "") -> URL {
+        changesFolder.appendingPathComponent(Self.pairName(head: head, base: base, start: start, baseOption: baseOption), isDirectory: true)
+    }
+
+    /// A comparison's folder name: the two keys, and when it has its own start or base option a hash of them, so a run
+    /// with either is never answered from one made without (or with others).
+    static func pairName(head: String, base: String, start: String?, baseOption: String) -> String {
+        let extra = (start ?? "") + "\u{0}" + baseOption
+        return "\(head)-\(base)" + (extra == "\u{0}" ? "" : "-o" + String(MapJSON.sha256(extra).prefix(8)))
+    }
 
     private func hasCrawl(_ folder: URL) -> Bool { fm.fileExists(atPath: folder.appendingPathComponent("crawl.json").path) }
 
@@ -468,8 +477,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
     func changes(head: Build, base: Build, start: String? = nil, baseOption: String = "", progress: ((CrawlRun.Event) -> Void)? = nil,
                  completion: @escaping (Result<ChangesResult, Failure>) -> Void) -> Token {
         let token = Token()
-        let folder = changesFolder(head: head.key, base: base.key)
-        let owner = "changes:\(head.key)-\(base.key)"
+        let name = Self.pairName(head: head.key, base: base.key, start: start, baseOption: baseOption)
+        let folder = changesFolder.appendingPathComponent(name, isDirectory: true)
+        let owner = "changes:" + name
         if hasCrawl(folder), let data = ScreenMapData.read(folder) {
             DispatchQueue.main.async { completion(.success(ChangesResult(folder: folder, map: data, summary: Self.summary(of: folder)))) }
             return token
@@ -479,7 +489,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         else if let queued = queue.first(where: { $0.owner == owner }) { job = queued }
         else {
             job = Job(owner: owner, build: head, kind: .changes(base: base),
-                      part: changesFolder.appendingPathComponent("\(head.key)-\(base.key).part", isDirectory: true), final: folder)
+                      part: changesFolder.appendingPathComponent(name + ".part", isDirectory: true), final: folder)
             job.start = start
             job.baseOption = baseOption
             queue.append(job)
@@ -796,7 +806,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             switch job.kind {
             case .walk: out.insert(evidenceFolder.appendingPathComponent(job.build.key).path)
             case .changes(let base):
-                out.insert(changesFolder.appendingPathComponent("\(job.build.key)-\(base.key)").path)
+                out.insert(job.final.path)
                 out.insert(job.part.path)
             }
         }
