@@ -228,6 +228,20 @@ enum ChangesCheck {
             }
             shot("4-map.png")
 
+            // Export: the map on the sheet as a folder with an index.html, written with no panel.
+            do {
+                let out = base.appendingPathComponent("export", isDirectory: true)
+                var done: Result<URL, Error>?
+                sheet.exportNow(to: out) { done = $0 }
+                let wrote = await wait("the export", 60) { done != nil }
+                let index = out.appendingPathComponent("index.html")
+                let size = (try? fm.attributesOfItem(atPath: index.path)[.size] as? Int) ?? 0
+                expect(wrote && fm.fileExists(atPath: index.path) && size > 1000 && fm.fileExists(atPath: out.appendingPathComponent(MapExport.dataName).path), "Export writes index.html (\(size) bytes) and \(MapExport.dataName)")
+                let data = (try? String(contentsOf: out.appendingPathComponent(MapExport.dataName), encoding: .utf8)) ?? ""
+                expect(data.contains(changed?.title ?? "?") && ((try? fm.contentsOfDirectory(atPath: out.appendingPathComponent("img").path)) ?? []).count >= 2, "the export names the changed screen and holds its pictures")
+                expect(sheet.exportStatus.hasPrefix("Exported to"), "the sheet says so: \(sheet.exportStatus.suffix(40))")
+            }
+
             sheet.selectTab(.live)
             await sleep(0.5)
             shot("6-live.png")
