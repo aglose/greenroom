@@ -1,0 +1,73 @@
+name: Greenroom map snapshot
+description: >
+  Walks the app's screens in the engine's Linux image and files the map as hidden git refs
+  (refs/greenroom/maps/*), once per tree. For pushes to the default branch.
+  NEEDS `contents: write` for the workflow's token (it pushes refs/greenroom/maps/* and nothing else).
+  UNVERIFIED on GitHub: see action/README.md.
+
+inputs:
+  apk:
+    description: Path of the APK the workflow built (debug build, installable).
+    required: true
+  profile-file:
+    description: The walk's settings, the same file Greenroom reads.
+    default: .greenroom/map.json
+  engine-image:
+    description: The engine's Linux image, with crawl.py at /engine/scripts/crawl.py. The tag is the engine version.
+    required: true
+  engine-version:
+    description: Recorded in the snapshot; a new engine version starts a full walk. Defaults to the image's tag.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the maps already filed
+      shell: bash
+      run: git fetch --no-tags --no-recurse-submodules --refmap= origin 'refs/greenroom/maps/*:refs/greenroom/maps/*' || true
+
+    - name: Is this tree already walked?
+      id: has
+      shell: bash
+      run: |
+        if python3 "${{ github.action_path }}/../scripts/map-snapshot.py" --has "$GITHUB_SHA" --repo . --profile-file "${{ inputs.profile-file }}"; then
+          echo "walked=true" >> "$GITHUB_OUTPUT"; echo "This tree already has a map: nothing to walk."
+        else
+          echo "walked=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Refuse a signed-in profile (its captures can show an account)
+      if: steps.has.outputs.walked == 'false'
+      shell: bash
+      run: |
+        if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("signIn") else 1)' "${{ inputs.profile-file }}"; then
+          echo "::error::the profile signs in; this Action walks signed-out profiles only (see action/README.md)"; exit 1
+        fi
+
+    - name: Walk the app in the engine's image
+      if: steps.has.outputs.walked == 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/greenroom-walk"; mkdir -p "$out"
+        prof() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2], sys.argv[3]))' "${{ inputs.profile-file }}" "$@"; }
+        depth=$(prof depth 2); seconds=$(prof seconds 120)
+        combos=$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1])).get("combos", ["light"])))' "${{ inputs.profile-file }}")
+        docker run --rm -v "$(dirname "$(realpath "${{ inputs.apk }}")")":/in:ro -v "$out":/out "${{ inputs.engine-image }}" \
+          python3 /engine/scripts/crawl.py "/in/$(basename "${{ inputs.apk }}")" --out /out \
+          --max-depth "$depth" --max-seconds "$seconds" --matrix "appearance=$combos"
+
+    - name: File the map
+      if: steps.has.outputs.walked == 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="${{ inputs.engine-version }}"; image="${{ inputs.engine-image }}"
+        python3 "${{ github.action_path }}/../scripts/map-snapshot.py" "$RUNNER_TEMP/greenroom-walk" --repo . --commit "$GITHUB_SHA" \
+          --profile-file "${{ inputs.profile-file }}" --engine "${version:-${image##*:}}" \
+          --walked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --write-refs > /dev/null
+
+    - name: Push the maps (never forced, nothing but refs/greenroom/maps/*)
+      if: steps.has.outputs.walked == 'false'
+      shell: bash
+      run: git push --no-verify origin 'refs/greenroom/maps/*:refs/greenroom/maps/*'
