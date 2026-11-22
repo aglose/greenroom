@@ -268,7 +268,11 @@ final class ScriptRun {
         do { helper = try Scripts.installHelper() } catch { return Outcome(code: nil, timedOut: false, cancelled: false, failure: "Could not write the gr helper: \(error.localizedDescription)", output: []) }
         let (base, _) = LoginEnvironment.resolve()
         var full = base
-        let vars = Variables.shared.all()   // one read of the Keychain
+        // One read of the Keychain, then 1Password for any reference (it may ask the person to approve).
+        let vars: [Variables.Variable]
+        do { vars = try Variables.resolved(Variables.shared.all(), env: base) } catch {
+            return Outcome(code: nil, timedOut: false, cancelled: false, failure: error.localizedDescription, output: [])
+        }
         let secrets = Variables.secrets(of: vars)
         for v in vars { full[v.name] = v.value }
         for (k, v) in env { full[k] = v }

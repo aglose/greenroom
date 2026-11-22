@@ -77,6 +77,41 @@ enum ScriptsCheck {
                 expect("... and says why", o.output.contains { $0.contains("did not appear within 2 s") }, o.output.joined(separator: "\n"))
             } else { expect("the failing script starts", false) }
 
+            // 2b. A 1Password reference is read by `op` when the script starts (a stand-in op here), masked like any
+            //     secret; one that cannot be read stops the script before it starts; builds never get one.
+            let fakeOp = scripts.appendingPathComponent("op")
+            try? fm.removeItem(at: fakeOp)
+            fm.createFile(atPath: fakeOp.path, contents: Data(#"""
+                #!/bin/bash
+                [ "$1 $2" = "read --no-newline" ] || { echo "[ERROR] 2026/11/21 10:00:00 unexpected arguments" >&2; exit 2; }
+                case $3 in
+                  op://Private/Check/password) printf 'from-1password-%s' 4242 ;;
+                  *) echo "[ERROR] 2026/11/21 10:00:00 could not read secret '$3': item not found" >&2; exit 1 ;;
+                esac
+                """#.utf8), attributes: [.posixPermissions: 0o700])
+            OnePassword.cliOverride = fakeOp.path
+            do {
+                try Variables.shared.set(.init(name: "GR_CHECK_OP", value: "op://Private/Check/password", secret: false))
+            } catch { expect("a 1Password reference is stored", false, error.localizedDescription) }
+            let opRow = Variables.shared.names().first { $0.name == "GR_CHECK_OP" }
+            expect("a 1Password reference is kept as one, and secret", opRow?.onePassword == true && opRow?.secret == true)
+            let opScript = write("op.sh", """
+                [ "$GR_CHECK_OP" = "from-1password-4242" ] && echo "resolved=yes value=$GR_CHECK_OP" || echo "resolved=no"
+                """)
+            if let o = await runIt(opScript, on: first) {
+                let out = o.output.joined(separator: "\n")
+                expect("a script gets the value 1Password holds", o.code == 0 && out.contains("resolved=yes"), out)
+                expect("... masked in its output", out.contains("value=••••") && !out.contains("4242"), out)
+            } else { expect("the 1Password script starts", false) }
+            try? Variables.shared.set(.init(name: "GR_CHECK_OP", value: "op://Private/Gone/password", secret: true))
+            if let o = await runIt(opScript, on: first) {
+                expect("a reference 1Password cannot read stops the script before it runs",
+                       o.code == nil && (o.failure ?? "").contains("GR_CHECK_OP could not be read from 1Password: could not read secret") && o.output.isEmpty,
+                       o.failure ?? o.output.joined(separator: "\n"))
+            } else { expect("the failing 1Password script starts", false) }
+            Variables.shared.remove("GR_CHECK_OP")
+            OnePassword.cliOverride = nil
+
             // 3. Approvals follow the file's contents.
             Scripts.approve(good, true)
             expect("an allowed script may be run by agents", Scripts.approval(good) == .yes)
