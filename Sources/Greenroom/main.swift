@@ -22,6 +22,8 @@ if let i = arguments.firstIndex(of: "--map-store-check"), i + 1 < arguments.coun
 if arguments.contains("--map-pairing-check") { MapPairingCheck.run() }
 // `Greenroom --map-layout-check`: the map's layout (MapLayout) on the fixtures.
 if arguments.contains("--map-layout-check") { MapLayoutCheck.run() }
+// `Greenroom --map-git-check DIR`: map snapshots in git refs, between a bare repository and two clones (MapGitCheck).
+if let i = arguments.firstIndex(of: "--map-git-check"), i + 1 < arguments.count { MapGitCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
