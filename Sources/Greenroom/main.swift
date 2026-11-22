@@ -18,6 +18,8 @@ if let i = arguments.firstIndex(of: "--map-contract-check") {
 }
 // `Greenroom --map-store-check DIR`: the map history store, headless, against small walks written into DIR.
 if let i = arguments.firstIndex(of: "--map-store-check"), i + 1 < arguments.count { MapStoreCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-pairing-check`: map history's pairing finds the fixtures' lineages (MapPairing).
+if arguments.contains("--map-pairing-check") { MapPairingCheck.run() }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
