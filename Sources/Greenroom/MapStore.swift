@@ -83,7 +83,9 @@ final class MapStore {
                                 steps: ((f["path"] as? [String: Any])?["steps"] as? [String]) ?? [])
         }
         return MapSnapshot(commit: commit, tree: tree, profile: profile, engine: engine, walked: ISO8601DateFormatter().string(from: walked),
-                           screens: screens, edges: edges, findings: findings, incomplete: (json["incomplete"] as? [String]) ?? [],
+                           screens: screens, edges: edges, findings: findings,
+                           // A seeded walk says what its seed left unfinished as "seed: ...": the same fact for this walk.
+                           incomplete: ((json["incomplete"] as? [String]) ?? []).map { $0.hasPrefix("seed: ") ? String($0.dropFirst(6)) : $0 },
                            seconds: ((json["seconds"] as? [String: Any])?["total"] as? Double) ?? 0,
                            startDeps: MapStore.deps(json["start_deps"]), depsUnreliable: json["deps_unreliable"] as? String).canonical()
     }
@@ -133,8 +135,12 @@ final class MapStore {
             if let n = e.note { o["note"] = n }
             return o
         }
+        // The combinations as the walk named them (the engine's matrix labels, "phone-light-en-US-1"), which the crawler
+        // checks against its own: the profile's names first when they are used, then the rest in order.
+        let used = Set(snapshot.screens.flatMap { $0.captures.keys })
+        let combos = snapshot.profile.combos.filter { used.contains($0) } + used.subtracting(snapshot.profile.combos).sorted()
         var json: [String: Any] = [
-            "combos": snapshot.profile.combos, "screens": screens, "edges": edges,
+            "combos": combos, "screens": screens, "edges": edges,
             "findings": snapshot.findings.map { ["kind": $0.kind, "detail": $0.detail, "path": ["steps": $0.steps]] },
             "incomplete": snapshot.incomplete, "seconds": ["total": snapshot.seconds],
             // Not read by the crawler: what this seed is, for a person looking at the folder.

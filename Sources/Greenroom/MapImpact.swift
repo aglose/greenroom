@@ -338,13 +338,14 @@ extension MapStore {
         return r
     }
 
-    /// Records misses (once each: by screen and quick commit) and adds their files' directories as full-walk patterns.
-    func record(misses: [MapImpact.Miss]) {
+    /// Records misses (once each: by screen and quick commit) and, with `patterns`, adds their files' directories as
+    /// full-walk patterns.
+    func record(misses: [MapImpact.Miss], patterns: Bool = true) {
         guard !misses.isEmpty else { return }
         updateLedger { l in
             for m in misses where !l.misses.contains(where: { $0.screen == m.screen && $0.quickCommit == m.quickCommit }) {
                 l.misses.append(m)
-                for p in MapImpact.patterns(for: m.files) where !l.patterns.contains(p) { l.patterns.append(p) }
+                if patterns { for p in MapImpact.patterns(for: m.files) where !l.patterns.contains(p) { l.patterns.append(p) } }
             }
         }
     }

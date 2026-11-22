@@ -272,7 +272,9 @@ enum History {
             }
         }
         let m = await misses(found, quick: snap, foundBy: "verify", place: p)
-        p.store.record(misses: m)
+        // Kept and shown, but no pattern: a screen reached with no control tried can differ for what the full walk did
+        // before it (a job a button ran), so these are leads, not proof. A full walk's audit makes the patterns.
+        p.store.record(misses: m, patterns: false)
         return (checked, m)
     }
 

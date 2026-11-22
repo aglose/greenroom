@@ -55,7 +55,13 @@ nothing changes: no plan, no note, no extra option, no `greenroom-impact.json`.
 - **Verify carried screens** has no cheap mode in the engine, so it is a walk seeded from the map with `--max-actions
   0` over the carried ids, as the brief allowed; the row says "verified 209 carried screens: all as carried" or names
   the misses. Only the structure (the id) and the captures are compared. It uses the session's data when its walks do,
-  so its profile, and so its snapshot, are the same.
+  so its profile, and so its snapshot, are the same. Its misses are kept and shown but add no full-walk pattern: on
+  the engine's test app, screens whose text depends on what the full walk did before them ("background: job ran")
+  look different when reached with no control tried, so a verification miss is a lead, not proof.
+- **Seeded walks' unfinished lines.** The engine writes what the seed left unfinished as `seed: --max-depth ...`;
+  the import drops the `seed: ` prefix (it is the same fact for the new walk), so a seeded walk is not taken as cut short.
+- **Classes vary between walks** (a lambda of an earlier screen can still run); the rules read only sources and
+  resources, which matched exactly between a full and a seeded walk of the test app.
 - **Status words.** The row's label is "walked 3 of 212 screens" for a quick walk (as before for a full one); its
   detail says "Walked 3 of 212 screens (12 files changed); the other 209 were carried from the walk of 1a2b3c4." or
   "Full walk: build files changed." and, after an audit, "1 screen changed that the last quick walk did not redo; its
@@ -64,7 +70,9 @@ nothing changes: no plan, no note, no extra option, no `greenroom-impact.json`.
 
 ## Tested against what
 
-The rules, the git reading, the seed's round trip, the audit, the plan and verification are checked headless. The
-seeded walk itself has run only against a stand-in `crawl.py` (written by the check) that imitates the arguments and
-crawl.json of the unreleased engine; with `GREENROOM_ENGINE` set to an engine whose crawler offers `--seed` and
-`--record-deps`, `--map-impact-check DIR APK` runs the same live steps on it.
+The rules, the git reading, the seed's round trip, the audit, the plan and verification are checked headless, with a
+stand-in `crawl.py` (written by the check) for the live steps. With `GREENROOM_ENGINE` set to an engine whose crawler
+offers `--seed` and `--record-deps` and an APK, `--map-impact-check DIR APK` runs the live steps on it: on apksim
+0.58.0-crawldeps and its test app, a full walk with deps took 200.8 s (10 screens, 7 with deps, 14 start sources), a
+seeded walk naming one screen 13.9 s, with the same result apart from origin and one recorded class. Evidence's own
+seeded walk (plan, seed, import, row) is wired but has not run end to end inside the app.

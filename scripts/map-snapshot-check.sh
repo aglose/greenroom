@@ -93,7 +93,7 @@ walk("deps2", {
         {"id": "Deps-0009", "activity": "com.example.New", "depth": 1, "origin": "carried", "deps": {"sources": ["com/example/New.kt"]}},
         {"id": "Deps-0010", "activity": "com.example.Walked", "depth": 1, "origin": "walked", "replaces": "Deps-0004", "deps": {"resources": ["layout/w"]}},
     ],
-    "edges": [], "start_deps": {"classes": [], "sources": [], "resources": []}},
+    "edges": [], "start_deps": {"classes": [], "sources": [], "resources": []}, "incomplete": ["seed: --max-depth 3: Deps-0002 not explored", "--max-seconds 9"]},
     {"a.png": png(11)})
 PY
 # the unicode walk's outside.png sits above its folder on purpose; the walk must refuse to read it
@@ -153,7 +153,8 @@ ok = (s["Deps-0001"]["deps"]["sources"] == sorted(s["Deps-0001"]["deps"]["source
       and a["startDeps"]["resources"] == ["mipmap/ic_launcher", "style/Theme.App"] and a["depsUnreliable"].startswith("the probes")
       and t["Deps-0001"]["carriedFrom"] == c7 and t["Deps-0001"]["deps"] == s["Deps-0001"]["deps"]
       and t["Deps-0002"]["carriedFrom"] == "unknown" and t["Deps-0009"]["carriedFrom"] == c7
-      and t["Deps-0009"]["deps"]["sources"] == ["com/example/New.kt"] and "carriedFrom" not in t["Deps-0010"] and "depsUnreliable" not in b)
+      and t["Deps-0009"]["deps"]["sources"] == ["com/example/New.kt"] and "carriedFrom" not in t["Deps-0010"] and "depsUnreliable" not in b
+      and b["incomplete"] == ["--max-depth 3: Deps-0002 not explored", "--max-seconds 9"])
 sys.exit(0 if ok else 1)
 PY
 step "deps, start deps and carried screens read as the contract says" test $? -eq 0

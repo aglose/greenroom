@@ -212,7 +212,7 @@ def import_walk(walk, commit, tree, profile, engine, walked, seed=None):
     edges.sort(key=lambda e: (nfc(e["from"]), e["order"], nfc(e["cmd"])))
     snap = {"schema": SCHEMA, "commit": commit, "tree": tree, "profile": profile, "engine": engine, "walked": walked,
             "screens": screens, "edges": edges, "findings": findings,
-            "incomplete": str_list(data.get("incomplete")) or [], "seconds": Float(seconds)}
+            "incomplete": [x[6:] if x.startswith("seed: ") else x for x in str_list(data.get("incomplete")) or []], "seconds": Float(seconds)}
     start = deps_of(data.get("start_deps"))
     if start is not None: snap["startDeps"] = sorted_deps(start)
     if isinstance(data.get("deps_unreliable"), str): snap["depsUnreliable"] = data["deps_unreliable"]
