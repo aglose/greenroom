@@ -25,33 +25,36 @@ enum T3Reader {
     /// What one read gives, and why there is nothing when there is nothing.
     struct Result { var sessions: [ClaudeSession] = []; var note: String? }
 
-    /// The `t3` program: the login shell's PATH, then where T3 Code's installers put it (`~/.local/bin`, `~/bin`).
+    /// The `t3` program: the login shell's PATH, then where T3 Code puts it (`~/.t3/bin`, the desktop app's command;
+    /// `~/.local/bin` and `~/bin`, its installers').
     static func find() -> (exe: String, env: [String: String])? {
         dispatchPrecondition(condition: .notOnQueue(.main))
         var env = LoginEnvironment.resolve().env
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = pathOverride ?? ([env["PATH"] ?? ""] + ["\(home)/.local/bin", "\(home)/bin"]).joined(separator: ":")
+        let path = pathOverride ?? ([env["PATH"] ?? ""] + ["\(home)/.t3/bin", "\(home)/.local/bin", "\(home)/bin"]).joined(separator: ":")
         if pathOverride != nil { env["PATH"] = path }
         guard let exe = GH.find("t3", in: path) else { return nil }
         return (exe, env)
     }
 
-    struct Run { var status: Int32; var output: String; var timedOut = false }
+    struct Run { var status: Int32; var output: String; var error = ""; var timedOut = false }
 
     /// One `t3` call; its output goes to a file (a grandchild holding a pipe open cannot keep this waiting).
     static func run(_ exe: String, _ args: [String], in dir: URL, env: [String: String]) -> Run {
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("greenroom-t3-\(UUID().uuidString.prefix(8)).out")
         FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        defer { try? FileManager.default.removeItem(at: log) }
-        guard let out = try? FileHandle(forWritingTo: log) else { return Run(status: 126, output: "") }
-        defer { try? out.close() }
+        let errLog = log.appendingPathExtension("err")
+        FileManager.default.createFile(atPath: errLog.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        defer { try? FileManager.default.removeItem(at: log); try? FileManager.default.removeItem(at: errLog) }
+        guard let out = try? FileHandle(forWritingTo: log), let err = try? FileHandle(forWritingTo: errLog) else { return Run(status: 126, output: "") }
+        defer { try? out.close(); try? err.close() }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
         p.environment = env
         p.currentDirectoryURL = dir
         p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
+        p.standardError = err
         p.standardInput = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return Run(status: 126, output: "") }
         let deadline = Date().addingTimeInterval(timeout)
@@ -67,19 +70,22 @@ enum T3Reader {
             }
             usleep(30_000)
         }
-        return Run(status: timedOut ? 124 : p.terminationStatus, output: (try? String(contentsOf: log, encoding: .utf8)) ?? "", timedOut: timedOut)
+        return Run(status: timedOut ? 124 : p.terminationStatus, output: (try? String(contentsOf: log, encoding: .utf8)) ?? "",
+                   error: (try? String(contentsOf: errLog, encoding: .utf8)) ?? "", timedOut: timedOut)
     }
 
     /// Every recent thread of every repository in `roots`. `cache` keeps each thread's details by id and update time.
     static func read(roots: [URL], cache: inout [String: (updated: String, detail: Detail)]) -> Result {
-        guard let (exe, env) = find() else { return Result(note: "T3 Code's t3 command was not found (Settings > About in T3 Code installs it).") }
+        guard let (exe, env) = find() else { return Result(note: "T3 Code's t3 command was not found (opening T3 Code once installs it in ~/.t3/bin).") }
         var out: [ClaudeSession] = []
         var shows = 0
         var reached = false
         var seen = Set<String>()
         for root in roots {
             let r = run(exe, ["thread", "list", "--project", root.path, "--json"], in: root, env: env)
-            guard r.status == 0, let items = parseList(r.output) else { continue }   // no project there, or no server
+            // A repository that is not a T3 Code project has no threads, but T3 Code answered.
+            if r.status != 0, r.error.contains("No T3 Code project matches") { reached = true; continue }
+            guard r.status == 0, let items = parseList(r.output) else { continue }   // no server, or a shape not read
             reached = true
             for item in items {
                 guard let id = string(item["threadId"]), !seen.contains(id) else { continue }
@@ -229,7 +235,7 @@ final class T3Sessions {
                 let r = T3Reader.run(exe, ["app", folder.path], in: folder, env: env)
                 if r.status != 0 { why = "T3 Code did not open it: is its desktop app running?" }
             } else {
-                why = "T3 Code's t3 command was not found (Settings > About in T3 Code installs it)."
+                why = "T3 Code's t3 command was not found (opening T3 Code once installs it in ~/.t3/bin)."
             }
             DispatchQueue.main.async { done(why) }
         }

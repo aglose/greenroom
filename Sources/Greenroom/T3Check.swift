@@ -8,6 +8,20 @@ import Foundation
 /// cached between reads, a thread landing on its worktree's row, and a `t3` that fails (no server) giving no threads.
 /// One `[greenroom] t3: ok|FAIL ...` line per step, then `t3 check: PASS|FAIL`; exits 0 or 1.
 enum T3Check {
+    /// `Greenroom --t3-live REPO`: one read of the person's own T3 Code for REPO, printed (what the rows would get).
+    static func live(repo: URL) -> Never {
+        Thread.detachNewThread {
+            var cache: [String: (updated: String, detail: T3Reader.Detail)] = [:]
+            let r = T3Reader.read(roots: [repo], cache: &cache)
+            print("[greenroom] t3 live: \(r.sessions.count) thread(s)" + (r.note.map { ", note: \($0)" } ?? ""))
+            for s in r.sessions {
+                print("  \(s.id ?? "?") \"\(s.title ?? "")\" \(s.status) running=\(s.running) archived=\(s.archived) branch=\(s.branch ?? "-") folder=\(s.folder.path) prs=\(s.prs.map { "\($0.url.absoluteString) \($0.state.map { "\($0)" } ?? "?")" })")
+            }
+            exit(0)
+        }
+        dispatchMain()
+    }
+
     static func run(dir: URL) -> Never {
         Thread.detachNewThread { body(dir: dir) }
         dispatchMain()
@@ -44,7 +58,9 @@ enum T3Check {
         echo "$*" >> "$D/calls.log"
         if [ -f "$D/down" ]; then echo "No running T3 Code server uses ~/.t3. Start T3 Code, then retry." >&2; exit 1; fi
         case "$1 $2" in
-          "thread list") cat "$D/list.json"; exit 0 ;;
+          "thread list")
+            case "$4" in *other*) echo "No T3 Code project matches '$4'. Pass a project id or a path inside a project." >&2; exit 1 ;; esac
+            cat "$D/list.json"; exit 0 ;;
           "thread show")
             case "$3" in
               t-run) echo '{"threadId":"t-run","worktreePath":"\(wt.path)","branch":"fix-login","archived":false,"pendingRequestCount":0}' ;;
@@ -89,6 +105,12 @@ enum T3Check {
         expect(row.title == "Fix the login screen" && row.hasOpenPR && row.claudeActive, "the row is named by the thread, active, with an open pull request")
         var doneRow = row; doneRow.claude = done
         expect(doneRow.prMerged && !doneRow.claudeActive, "a row whose thread finished with a merged pull request is one to archive")
+
+        // A repository that is not a T3 Code project: no threads from it, and no note (T3 Code answered).
+        let other = base.appendingPathComponent("other", isDirectory: true)
+        try? fm.createDirectory(at: other, withIntermediateDirectories: true)
+        let mixed = T3Reader.read(roots: [other], cache: &cache)
+        expect(mixed.sessions.isEmpty && mixed.note == nil, "a repository T3 Code has no project for gives no threads and no note", mixed.note ?? "")
 
         // No server: nothing, and a line saying so.
         fm.createFile(atPath: base.appendingPathComponent("down").path, contents: Data())

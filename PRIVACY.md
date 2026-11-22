@@ -100,7 +100,7 @@ opened and no process is probed.
 ## T3 Code's threads
 
 If you turn on "Show my T3 Code threads" in Settings (it is off until you do), Greenroom runs your own `t3` command
-(found on your login shell's PATH, or in `~/.local/bin` or `~/bin`, where T3 Code installs it): `t3 thread list
+(found on your login shell's PATH, or in `~/.t3/bin`, `~/.local/bin` or `~/bin`, where T3 Code installs it): `t3 thread list
 --project <folder> --json` for each repository you added to Sessions, and `t3 thread show <id> --json` for threads
 updated in the last 30 days, every 20 seconds while Greenroom is the app in front. `t3` asks the T3 Code server
 running on this Mac, as it does when you type it; Greenroom opens none of T3 Code's files. "Open in T3 Code" on a
