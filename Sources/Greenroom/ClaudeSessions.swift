@@ -34,6 +34,11 @@ struct ClaudeSession: Equatable {
     /// Whether the process of a `~/.claude/sessions/<pid>.json` file is still there.
     var running = false
     var archived = false
+    /// Who keeps it: a Claude Code session, or a T3 Code thread (T3Sessions.swift) shown the same way.
+    enum Source: String { case claude, t3 }
+    var source: Source = .claude
+    /// The T3 Code thread's id (nil for Claude Code's sessions).
+    var id: String?
 
     var pullRequest: URL? { pullRequests.first }
     /// What a row shows: the same session without the time of its last activity, which moves with every write.
@@ -489,10 +494,11 @@ final class ClaudeSessions {
     /// a dozen worktrees, resolving inside the match ran to hundreds of thousands of file system calls on the main
     /// thread at every write Claude Code made.
     func attach(_ rows: [Session]) -> [Session] {
-        guard enabled, !sessions.isEmpty else { return rows.map { var r = $0; r.claude = nil; return r } }
+        let pool = (enabled ? sessions : []) + T3Sessions.shared.sessions   // T3 Code's threads, when its switch is on
+        guard !pool.isEmpty else { return rows.map { var r = $0; r.claude = nil; return r } }
         let paths = rows.map { $0.worktree.resolvingSymlinksInPath().path }
         var byOwner: [String: [ClaudeSession]] = [:]
-        for s in sessions {   // `folder` was resolved when read
+        for s in pool {   // `folder` was resolved when read
             if let o = Self.owner(path: s.folder.path, among: paths) { byOwner[o, default: []].append(s) }
         }
         return zip(rows, paths).map { row, path in

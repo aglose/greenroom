@@ -30,6 +30,7 @@ struct SettingsView: View {
     @State private var usage = Reports.shared.usage
     @State private var waiting: [String] = []
     @State private var claudeSessions = ClaudeSessions.shared.enabled
+    @State private var t3Sessions = T3Sessions.shared.enabled
     @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.autoArchiveKey) as? Bool ?? true
 
     private func refresh() {
@@ -63,10 +64,16 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Archive a session when its pull request merges", isOn: $autoArchive)
                     .onChange(of: autoArchive) { _, on in UserDefaults.standard.set(on, forKey: SessionsController.autoArchiveKey) }
-                    .disabled(!claudeSessions)
+                    .disabled(!claudeSessions && !t3Sessions)
                 Text("Takes it out of the sidebar once every pull request of its branch is closed and one merged, as Claude Code recorded it, and nothing runs in it. The worktree and its data stay; the + menu lists it under Archived.")
                     .font(.caption).foregroundStyle(.secondary)
                 ClaudeConnectView()
+            }
+            Section("T3 Code") {
+                Toggle("Show my T3 Code threads", isOn: $t3Sessions)
+                    .onChange(of: t3Sessions) { _, on in T3Sessions.shared.enabled = on }
+                Text("Threads of the repositories in Sessions name their worktree\u{2019}s row, with their status and pull requests, like Claude Code\u{2019}s sessions, and active ones are suggested. Asked of your own t3 command (t3 thread list and t3 thread show), which asks the T3 Code running on this Mac, every 20 seconds while Greenroom is in front. Nothing is sent anywhere else, and T3 Code\u{2019}s files are never opened.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Privacy") {
                 Toggle("Send crash reports", isOn: $crashes)

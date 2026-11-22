@@ -72,6 +72,10 @@ final class SessionsController {
         claude.workspaceRoots = { [weak self] in self?.workspaces.map(\.root) ?? [] }
         claude.onChange = { [weak self] in self?.applyClaude() }
         claude.changedSwitch()
+        let t3 = T3Sessions.shared   // T3 Code's threads, behind their own switch in Settings
+        t3.workspaceRoots = { [weak self] in self?.workspaces.map(\.root) ?? [] }
+        t3.onChange = { [weak self] in self?.applyClaude() }
+        t3.changedSwitch()
         refresh()
     }
 
@@ -129,6 +133,7 @@ final class SessionsController {
                 self.workspaces.append(Workspace(root: root))
                 self.store.saveWorkspaces(self.workspaces)
                 ClaudeSessions.shared.workspacesChanged()
+                T3Sessions.shared.reload()
                 self.workbench?.toast.show("Added \(root.lastPathComponent)")
                 self.workbench?.showLibrary()
             }
@@ -676,6 +681,7 @@ final class SessionsController {
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 6)
         var tip = [s.branch ?? "detached", s.shortHead + (s.ahead > 0 ? ", \(s.ahead) ahead" : ""), (s.worktree.path as NSString).abbreviatingWithTildeInPath]
+        if s.claude?.source == .t3 { tip.append("T3 Code thread" + (s.claude?.title.map { ": " + $0 } ?? "")) }
         for pr in s.pullRequests { tip.append(pr.url.absoluteString + (pr.state.map { " (\($0.rawValue.lowercased()))" } ?? "")) }
         if s.pullRequests.isEmpty, let pr = s.claude?.pullRequest { tip.append(pr.absoluteString) }
         stack.toolTip = tip.joined(separator: "\n")
