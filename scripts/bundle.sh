@@ -41,6 +41,10 @@ rm -rf "$C/Frameworks/Sparkle.framework/Versions/B/XPCServices" "$C/Frameworks/S
 sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/${GREENROOM_BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}/" \
     -e "s/@ENGINE@/$ENGINE_VERSION/" Resources/Info.plist > "$C/Info.plist"
 [[ -f Resources/AppIcon.icns ]] && cp Resources/AppIcon.icns "$C/Resources/"
+mkdir -p "$C/Resources/Icons"
+for icon in studio-bay liquid-glass spotlight; do
+  [[ -f "Resources/Icons/$icon.icns" ]] && cp "Resources/Icons/$icon.icns" "$C/Resources/Icons/$icon.icns"
+done
 if [[ "$VARIANT" == debug ]]; then
   # Its own app to macOS (bundle id: preferences, permissions), to the person (name, icon) and to Greenroom (the
   # variant key: the state folder and the title badge). No feed: Sparkle would offer the release in its place.
@@ -53,6 +57,9 @@ if [[ "$VARIANT" == debug ]]; then
     $PB -c "Set :CFBundleDocumentTypes:$i:LSHandlerRank Alternate" "$C/Info.plist"; i=$((i+1))
   done
   cp Resources/AppIcon-debug.icns "$C/Resources/AppIcon.icns"
+  for icon in studio-bay liquid-glass spotlight; do
+    [[ -f "Resources/Icons/$icon-debug.icns" ]] && cp "Resources/Icons/$icon-debug.icns" "$C/Resources/Icons/$icon.icns"
+  done
 fi
 cp -Rc "$ENGINE" "$C/Resources/engine"
 cp "$TESTAPP" "$C/Resources/engine-testapp.apk"

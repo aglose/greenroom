@@ -40,6 +40,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            AppIconSection()
             Section("Updates") {
                 if Updates.shared.available {
                     Toggle("Check for updates automatically", isOn: $automatic)

@@ -809,6 +809,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if !matrixSims.isEmpty { add("matrix.close", "Close the matrix wall", "App", "xmark.square") { [weak self] in self?.closeMatrix(nil) } }
         let sample = Engine.shared.root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
         if FileManager.default.fileExists(atPath: sample.path) { add("open.sample", "Open the sample app", "App", "shippingbox") { [weak self] in self?.open(sample) } }
+        for style in AppIconStyle.allCases {
+            add("icon." + style.rawValue, "App icon: \(style.title)", "App", "app.badge", keywords: "app icon dock theme appearance \(style.title)") { [weak self] in
+                AppIcon.current = style
+                self?.toast.show("App icon: \(style.title)")
+            }
+        }
         for url in Recents.all.prefix(8) {
             add("open." + url.path, "Open " + url.deletingPathExtension().lastPathComponent, "Recent", "clock.arrow.circlepath", keywords: url.path) { [weak self] in self?.open(url) }
         }
