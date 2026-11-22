@@ -190,6 +190,11 @@ The approval is the script's SHA-256, kept in the Keychain: a script that has ch
 until the owner allows it again, so an agent cannot edit an allowed script into one that prints a password. Scripts
 in a worktree's `.greenroom/scripts` are the person's to run, never an agent's.
 
+A variable may be a 1Password secret reference (`op://Private/My App/password`, Settings > Variables). The value is
+read by the 1Password CLI (`op read`) when the script starts, so the credentials stay in the owner's vault, and 1Password
+asks the owner to approve. A reference that cannot be read stops `run_script` before the script runs, with the CLI's
+reason, never the value. The agent's view is unchanged: names only, output masked.
+
 ## What an agent cannot do
 
 - Name a file for the engine to read or write. `screenshot` and `logs` answer with their content; nothing else

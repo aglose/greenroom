@@ -346,7 +346,8 @@ final class RecipeRun {
         let (base, note) = LoginEnvironment.resolve()
         var env = base
         // The person's variables (Variables: the Keychain), then the recipe's own contract, which they cannot replace.
-        let vars = Variables.shared.all()   // one read of the Keychain
+        // One read of the Keychain. Not 1Password references: a build runs with nobody there to approve one.
+        let vars = Variables.shared.all().filter { !$0.fromOnePassword }
         for v in vars { env[v.name] = v.value }
         lock.lock(); secrets = Variables.secrets(of: vars); lock.unlock()
         for (k, v) in job.environment { env[k] = v }

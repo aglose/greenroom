@@ -118,6 +118,11 @@ Variables you add in Settings (sign-ins for your scripts) are in your login Keyc
 `<bundle id>.scripts`. Keychain Access shows and deletes them. Their values go only into the environment of the
 scripts and build recipes you run on this Mac; secret ones are replaced by `••••` in the output Greenroom shows.
 
+A variable can instead name a 1Password item's field (`op://Vault/Item/field`). Greenroom keeps only that reference
+and, when a script starts, asks the 1Password CLI on this Mac (`op read`) for the value. 1Password asks you to approve,
+and the value goes only into that script's environment, masked like any secret. Greenroom keeps no 1Password token,
+password or account, and build recipes never get these values.
+
 ## Checking this yourself
 
 Greenroom and its engine are open source. The engine is started from `Sources/Greenroom/Engine.swift`; the app's
