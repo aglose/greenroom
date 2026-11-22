@@ -29,11 +29,19 @@ fi
 ENGINE_VERSION=$(tr -d '[:space:]' < "$ENGINE/work/release")
 
 cd "$ROOT"
-swift build -c release --arch arm64
+swift build -c release --arch arm64 -Xswiftc -g
 if [[ "$VARIANT" == debug ]]; then APP="$ROOT/build/Greenroom Debug.app"; else APP="$ROOT/build/Greenroom.app"; fi; C="$APP/Contents"
 rm -rf "$APP"; mkdir -p "$C/MacOS" "$C/Resources"
 BIN_PATH=$(swift build -c release --arch arm64 --show-bin-path)
 cp "$BIN_PATH/Greenroom" "$C/MacOS/Greenroom"
+if [[ "$VARIANT" == release ]]; then
+  # Extract DWARF symbols for crash offset symbolication (scripts/symbolicate.sh), then strip debug info from the shipped binary.
+  DSYM="$ROOT/build/Greenroom.app.dSYM"
+  rm -rf "$DSYM" "$ROOT/build"/Greenroom-*.dSYM.zip
+  dsymutil "$BIN_PATH/Greenroom" -o "$DSYM"
+  ditto -c -k --norsrc --keepParent "$DSYM" "$ROOT/build/Greenroom-$VERSION.dSYM.zip"
+  strip -S "$C/MacOS/Greenroom"
+fi
 # Sparkle (in-app updates). Its XPC services are only for sandboxed apps; without them it installs through Autoupdate.
 mkdir -p "$C/Frameworks"
 ditto "$BIN_PATH/Sparkle.framework" "$C/Frameworks/Sparkle.framework"
@@ -47,11 +55,12 @@ for icon in studio-bay liquid-glass spotlight; do
 done
 if [[ "$VARIANT" == debug ]]; then
   # Its own app to macOS (bundle id: preferences, permissions), to the person (name, icon) and to Greenroom (the
-  # variant key: the state folder and the title badge). No feed: Sparkle would offer the release in its place.
+  # variant key: the state folder and the title badge). No feed or reports endpoint: debug builds stay local.
   PB=/usr/libexec/PlistBuddy
   $PB -c "Set :CFBundleIdentifier io.github.aglose.greenroom.debug" -c "Set :CFBundleName Greenroom Debug" \
       -c "Set :CFBundleDisplayName Greenroom Debug" -c "Add :GreenroomVariant string debug" \
       -c "Delete :SUFeedURL" -c "Delete :SUPublicEDKey" "$C/Info.plist"
+  $PB -c "Delete :GreenroomReportsURL" "$C/Info.plist" 2>/dev/null || true
   # Opening an .apk or .apkrec by double-click stays the release's: the debug copy only offers itself.
   i=0; while $PB -c "Print :CFBundleDocumentTypes:$i" "$C/Info.plist" >/dev/null 2>&1; do
     $PB -c "Set :CFBundleDocumentTypes:$i:LSHandlerRank Alternate" "$C/Info.plist"; i=$((i+1))

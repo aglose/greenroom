@@ -46,12 +46,15 @@ NOTARY_PROFILE=greenroom scripts/dmg.sh --identity "Developer ID Application" --
 
 ## What the pipeline does
 
-1. `scripts/bundle.sh`: builds the app, puts the apksim release named in `engine.lock` inside it (hash-checked),
-   signs every binary, the libraries inside jars included, with the hardened runtime and a secure timestamp, then
-   the app; verifies the signatures and runs the bundled test app headless through the app.
+1. `scripts/bundle.sh`: builds the app with DWARF debug info, extracts `build/Greenroom-VERSION.dSYM.zip` for crash
+   symbolication (`scripts/symbolicate.sh`) and strips debug symbols from the shipped binary, puts the apksim release
+   named in `engine.lock` inside it (hash-checked), signs every binary, the libraries inside jars included, with the
+   hardened runtime and a secure timestamp, then the app; verifies the signatures and runs the bundled test app
+   headless through the app.
 2. `scripts/dmg.sh --notarize`: sends the app to Apple's notary service and staples the ticket to it, builds the
    disk image with the app and a link to /Applications, signs the image, notarizes and staples it too (so it opens
-   on a Mac that is offline), and writes its SHA-256 beside it.
+   on a Mac that is offline), and writes its SHA-256 beside it. The release job attaches the disk image, its SHA-256,
+   the `.dSYM.zip`, and `appcast.xml` to the draft release.
 
 ## Updates
 

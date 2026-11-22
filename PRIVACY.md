@@ -34,10 +34,14 @@ shows, word for word, every report waiting to be sent. A report holds only:
   from a fixed list of Greenroom's features.
 
 Never anything from an APK: its file name or path, package name, classes, resources, screens, recordings, logs or
-traffic cannot enter a report, because a report has no field that could hold them. A report waits a day on your Mac before it
-is sent, so you can read or discard it first. Reports are sent with no cookies and no stored credentials. This version has no address to send them to: turned on, they wait in
-`~/Library/Application Support/Greenroom/reports` (50 at most), and this file will say where they go before any
-version sends them.
+traffic cannot enter a report, because a report has no field that could hold them. A report waits a day on your Mac
+(in `~/Library/Application Support/Greenroom/reports`, 50 at most) before it is sent, so you can read or discard it
+first. Reports are sent with no cookies and no stored credentials over HTTPS to
+`https://greenroom-reports-426613790001.us-central1.run.app/report` (the service in `backend/reports/`, hosted on
+Google Cloud Run in `us-central1`). The receiver rejects any unexpected field or feature name, does not store your IP
+address or request headers (an in-memory, salted hash is used only for short-term rate limiting), and writes only the
+validated report fields into BigQuery in `us-central1`, where rows expire automatically after 365 days. Debug builds
+(`Greenroom Debug`) omit this address and never send reports.
 
 The engine's one download (a test app it trains its startup cache with) ships inside the app instead.
 

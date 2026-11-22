@@ -1,0 +1,21 @@
+[
+  { "name": "received_at", "type": "TIMESTAMP", "mode": "REQUIRED" },
+  { "name": "kind", "type": "STRING", "mode": "REQUIRED" },
+  { "name": "day", "type": "DATE", "mode": "REQUIRED" },
+  { "name": "app", "type": "STRING", "mode": "REQUIRED" },
+  { "name": "build", "type": "STRING", "mode": "REQUIRED" },
+  { "name": "engine", "type": "STRING", "mode": "REQUIRED" },
+  { "name": "macos", "type": "STRING", "mode": "REQUIRED" },
+  { "name": "signal", "type": "INT64", "mode": "NULLABLE" },
+  { "name": "frames", "type": "STRING", "mode": "REPEATED" },
+  { "name": "status", "type": "INT64", "mode": "NULLABLE" },
+  {
+    "name": "counts",
+    "type": "RECORD",
+    "mode": "REPEATED",
+    "fields": [
+      { "name": "feature", "type": "STRING", "mode": "REQUIRED" },
+      { "name": "count", "type": "INT64", "mode": "REQUIRED" }
+    ]
+  }
+]
