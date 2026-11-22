@@ -119,7 +119,11 @@ enum MapNavigatorCheck {
             expect(universe.subtracting(near).allSatisfy { nav.surface.frame(of: $0) == nil }, "no folded screen has one")
             expect(plan.input.placement.groups.count + plan.collapsed.count == plan.groups.count, "\(plan.groups.count) groups, none folded below 300 shown screens")
             nav.surface.update()
+            // The pictures come from the pyramid off the main thread: give them a moment, then count the cards that have one.
+            let wait = Date().addingTimeInterval(5)
+            while nav.surface.picturedCards < min(nav.surface.liveCards, 6), Date() < wait { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
             settle()
+            expect(nav.surface.detail >= .middle && nav.surface.picturedCards > 0, "cards in view show their pictures: \(nav.surface.picturedCards) of \(nav.surface.liveCards) live cards, at \(nav.surface.detail)")
             capture("1-changes-first.png")
 
             // The removed screen stands in its base place, marked removed.
