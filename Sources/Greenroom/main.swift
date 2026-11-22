@@ -12,6 +12,10 @@ if let i = arguments.firstIndex(of: "--connect-check"), i + 1 < arguments.count 
 if let i = arguments.firstIndex(of: "--t3-check"), i + 1 < arguments.count { T3Check.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --t3-live REPO`: one read of your own T3 Code's threads for REPO, printed.
 if let i = arguments.firstIndex(of: "--t3-live"), i + 1 < arguments.count { T3Check.live(repo: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-contract-check [DIR]`: map history's stored form and its fixtures (MapFixtures).
+if let i = arguments.firstIndex(of: "--map-contract-check") {
+    MapContractCheck.run(dir: i + 1 < arguments.count ? URL(fileURLWithPath: arguments[i + 1]) : nil)
+}
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
