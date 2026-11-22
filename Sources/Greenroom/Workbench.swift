@@ -328,8 +328,6 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if showingDiagnostics { diagnosticsPane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
         reloadSidebar()
-        let alive = sims.filter(\.isAlive).count
-        status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac" + (ClaudeSessions.shared.note.map { "\n" + $0 } ?? "")
         window.toolbar?.validateVisibleItems()
         updateChrome()
     }
@@ -401,6 +399,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             return false
         }) ?? rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) }
         if let want, table.selectedRow != want { table.selectRowIndexes([want], byExtendingSelection: false) }
+        let alive = sims.filter(\.isAlive).count
+        let notes = [ClaudeSessions.shared.note, groups.isEmpty ? nil : T3Sessions.shared.note].compactMap { $0 }
+        status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac" + notes.map { "\n" + $0 }.joined()
     }
 
     /// Which thing a row stands for (not how it looks): rows that keep their identities in place are redrawn one by one.
@@ -1292,6 +1293,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         menu.items.filter { $0.tag == 77 }.forEach { menu.removeItem($0) }
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
+        if let open = menu.items.first(where: { $0.action == #selector(openInClaudeClicked) }) {
+            if case .session(let s) = rows[row], s.claude?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
+        }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
         else if case .pull(let pull) = rows[row] { items = sessions.pullMenuItems(for: pull) + [.separator()] }
@@ -1310,6 +1314,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc private func openInClaudeClicked() {
         let row = table.clickedRow
         guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
+        if session.claude?.source == .t3 {
+            T3Sessions.open(session.worktree) { [weak self] why in if let why { self?.toast.show(why, problem: true) } }
+            return
+        }
         if !ClaudeSessions.openInClaude(session.claude) { toast.show("Claude is not installed on this Mac", problem: true) }
     }
 

@@ -97,6 +97,16 @@ repository's folder name is shown in the sidebar so you can add it. Titles and n
 nowhere: not into crash reports, engine reports or usage counts. With the switch off, none of those folders is
 opened and no process is probed.
 
+## T3 Code's threads
+
+If you turn on "Show my T3 Code threads" in Settings (it is off until you do), Greenroom runs your own `t3` command
+(found on your login shell's PATH, or in `~/.local/bin` or `~/bin`, where T3 Code installs it): `t3 thread list
+--project <folder> --json` for each repository you added to Sessions, and `t3 thread show <id> --json` for threads
+updated in the last 30 days, every 20 seconds while Greenroom is the app in front. `t3` asks the T3 Code server
+running on this Mac, as it does when you type it; Greenroom opens none of T3 Code's files. "Open in T3 Code" on a
+row runs `t3 app <folder>`. Thread titles, statuses and pull request links are shown in the window and go nowhere
+else. With the switch off, `t3` is never run.
+
 ## What stays on your Mac
 
 `~/Library/Application Support/Greenroom`, readable only by your user: the engine's caches, the data of the apps you

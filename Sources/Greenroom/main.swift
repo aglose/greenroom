@@ -8,6 +8,8 @@ let arguments = CommandLine.arguments
 if arguments.contains("--mcp") { AgentShim.run() }
 // `Greenroom --connect-check DIR`: Connect Claude Code against a stand-in `claude` (ConnectCheck).
 if let i = arguments.firstIndex(of: "--connect-check"), i + 1 < arguments.count { ConnectCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --t3-check DIR`: T3 Code's threads through a stand-in `t3` (T3Check).
+if let i = arguments.firstIndex(of: "--t3-check"), i + 1 < arguments.count { T3Check.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
