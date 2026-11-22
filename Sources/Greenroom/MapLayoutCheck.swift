@@ -22,8 +22,21 @@ enum MapLayoutCheck {
             }
             return bad
         }
+        // A column per depth inside each group: left to right by depth, every card the metrics' size.
         func columns(_ s: MapSnapshot, _ l: MapLayout) -> Bool {
-            s.screens.allSatisfy { sc in l.frames[sc.lineage.isEmpty ? sc.id : sc.lineage].map { $0.minX == m.pad + CGFloat(sc.depth) * m.columnPitch && $0.size == CGSize(width: m.cardWidth, height: m.cardHeight) } ?? false }
+            var depthOf: [String: Int] = [:]
+            for sc in s.screens { depthOf[sc.lineage.isEmpty ? sc.id : sc.lineage] = sc.depth }
+            for g in l.groups where !g.collapsed {
+                var xs: [Int: (lo: CGFloat, hi: CGFloat)] = [:]
+                for k in g.members {
+                    guard let f = l.frames[k], let d = depthOf[k], f.size == CGSize(width: m.cardWidth, height: m.cardHeight), f.minX >= g.frame.minX else { return false }
+                    let was = xs[d] ?? (f.minX, f.minX)
+                    xs[d] = (min(was.lo, f.minX), max(was.hi, f.minX))
+                }
+                let ds = xs.keys.sorted()
+                for (a, b) in zip(ds, ds.dropFirst()) where xs[a]!.hi >= xs[b]!.lo { return false }
+            }
+            return true
         }
         func groupsHold(_ l: MapLayout) -> Bool {
             for g in l.groups where !g.collapsed { for k in g.members { guard let f = l.frames[k], g.frame.contains(f) else { return false } } }
@@ -35,7 +48,9 @@ enum MapLayoutCheck {
             let s = MapFixtures.make(screens: n, seed: 7)
             let l = MapLayout.make(s)
             expect(l.frames.count == n && overlaps(l) == 0, "\(n) screens: \(l.frames.count) frames, no two overlap, \(l.groups.count) groups, canvas \(Int(l.size.width)) x \(Int(l.size.height))")
-            expect(columns(s, l), "\(n) screens: each in its depth's column")
+            if n >= 500 { print("[greenroom] map-layout: size \(n) screens: \(Int(l.size.width)) x \(Int(l.size.height)) points, wide over high \(String(format: "%.2f", l.size.width / l.size.height)), wrap \(l.wrapRows) rows, shelf \(l.shelfColumns) columns (stacked in one column: \(Int(MapLayout.make(s, aspect: 0.0001).size.width)) x \(Int(MapLayout.make(s, aspect: 0.0001).size.height)))")
+                expect(l.size.width / l.size.height >= 0.8 && l.size.width / l.size.height <= 3.2, "\(n) screens: width over height between 0.8 and 3.2") }
+            expect(columns(s, l), "\(n) screens: each group has a column per depth, left to right")
             expect(groupsHold(l), "\(n) screens: each group's members are inside its frame, group frames do not overlap")
             expect(MapJSON.encode(MapLayout.make(s)) == MapJSON.encode(l), "\(n) screens: laid out the same way twice")
         }
@@ -58,18 +73,19 @@ enum MapLayoutCheck {
         func groupIds(_ l: MapLayout) -> [String: String] { var r: [String: String] = [:]; for g in l.groups { for k in g.members { r[k] = g.id } }; return r }
         let was = groupIds(before), now = groupIds(after)
         let gained = Set(grown.screens.map { $0.lineage }.filter { before.frames[$0] == nil }.compactMap { now[$0] })
-        var outside = 0, sideways = 0, up = 0, partial = 0, moved = 0
+        var outside = 0, sideways = 0, up = 0, partial = 0, moved = 0, wrapped = 0
         for (k, f) in before.frames {
             guard let g = after.frames[k], g != f else { continue }
             moved += 1
             if !gained.contains(was[k] ?? "") { outside += 1 }
             if g.minX != f.minX { sideways += 1 }
-            if g.minY < f.minY { up += 1 }
+            if g.minX < f.minX || (g.minX == f.minX && g.minY < f.minY) { up += 1 }
             if (g.minY - f.minY).truncatingRemainder(dividingBy: m.rowPitch) != 0 { partial += 1 }
+            if g.minX != f.minX { wrapped += 1 }
         }
         expect(after.frames.count == base.screens.count + 20 && overlaps(after) == 0 && groupsHold(after), "adding 20 screens: \(after.frames.count) frames, none overlap, groups hold")
         expect(outside == 0, "adding 20 screens (\(gained.count) groups gained one): \(moved) moved, \(outside) outside those groups")
-        expect(sideways == 0 && up == 0 && partial == 0, "adding 20 screens: those that moved went down by whole rows (sideways \(sideways), up \(up), partial \(partial))")
+        expect(up == 0 && partial == 0, "adding 20 screens: those that moved went on in their column by whole rows (\(wrapped) onto the next column of their depth; backwards \(up), partial \(partial))")
 
         // Each golden pair: the head laid out from the base's layout keeps what is unchanged.
         for p in MapFixtures.golden() {
@@ -82,7 +98,7 @@ enum MapLayoutCheck {
             for sc in p.head.screens {
                 guard let f = a.frames[sc.lineage], let g = b.frames[sc.lineage] else { continue }
                 if f == g { kept += 1; continue }
-                if room.contains("\(gs[sc.lineage] ?? "")|\(sc.depth)"), g.minX == f.minX, g.minY > f.minY,
+                if room.contains("\(gs[sc.lineage] ?? "")|\(sc.depth)"), (g.minX > f.minX || (g.minX == f.minX && g.minY > f.minY)),
                    (g.minY - f.minY).truncatingRemainder(dividingBy: m.rowPitch) == 0 { displaced += 1 } else { wrong.append(sc.lineage) }
             }
             expect(wrong.isEmpty && overlaps(b) == 0, "\(p.name): head laid out from the base's layout keeps \(kept) of its shared screens, \(displaced) moved down below \(added.count) added, \(wrong.count) elsewhere")
@@ -97,11 +113,12 @@ enum MapLayoutCheck {
                    "collapsing \"\(target.title)\" (\(target.members.count) screens) removes its members' frames")
             expect(tile?.collapsed == true && tile?.frame.size == CGSize(width: m.cardWidth, height: m.cardHeight) && overlaps(shut) == 0,
                    "the collapsed group is one tile, and nothing overlaps it")
-            expect(shut.size.height < full.size.height, "the canvas shrinks: \(Int(full.size.height)) to \(Int(shut.size.height))")
+            expect(shut.size.width * shut.size.height < full.size.width * full.size.height, "the canvas shrinks: \(Int(full.size.width)) x \(Int(full.size.height)) to \(Int(shut.size.width)) x \(Int(shut.size.height))")
             let again = MapLayout.make(base, previous: shut, collapsed: [])
             expect(again.frames.count == full.frames.count && overlaps(again) == 0 && groupsHold(again), "opening it again lays its members out below the others, without overlap")
             let withPrev = MapLayout.make(base, previous: full, collapsed: [target.id])
-            expect(withPrev.size.height < full.size.height && overlaps(withPrev) == 0, "collapsing from the open layout shrinks the canvas too")
+            print("[greenroom] map-layout: size collapsing from the open layout: \(Int(full.size.width)) x \(Int(full.size.height)) to \(Int(withPrev.size.width)) x \(Int(withPrev.size.height))")
+            expect(withPrev.size.width * withPrev.size.height < full.size.width * full.size.height && overlaps(withPrev) == 0, "collapsing from the open layout shrinks the canvas too (by area)")
         } else { expect(false, "a group to collapse") }
 
         let bytes = MapJSON.encode(full)
