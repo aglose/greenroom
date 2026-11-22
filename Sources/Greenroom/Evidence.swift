@@ -139,6 +139,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var note: String?
         /// "Walk again": not satisfied by a map that is there.
         var force = false
+        /// Its data clone is being removed; the end is published when that is done.
+        var finishing = false
         /// "Walk Everything Again": a full walk whatever the impact says.
         var forceFull = false
         /// How it walks (I1), once planned; the folder holding the seed and the only-file.
@@ -666,15 +668,29 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     private enum End { case finished, failed(String), cancelled }
 
+    /// A run's end. Its data clone is removed first, off the main thread, and only then is the result published (the
+    /// row says done, waiters hear, the next walk starts): a walk is not over while its copy of the data is still there.
     private func finish(_ job: Job, _ end: End) {
-        guard current === job else { return }
+        guard current === job, !job.finishing else { return }
+        if let name = job.clone {
+            job.clone = nil
+            job.finishing = true
+            let root = dataRoot
+            DispatchQueue.global(qos: .userInitiated).async {
+                SlotClone.remove(name, in: root)
+                DispatchQueue.main.async { [weak self] in
+                    job.finishing = false
+                    self?.finish(job, end)
+                }
+            }
+            return
+        }
         current = nil
         switch end {
         case .finished: break
         case .failed(let why): NSLog("Greenroom: a walk of \(job.build.key) failed: \(why)")
         case .cancelled: NSLog("Greenroom: the walk of \(job.build.key) was cancelled\(job.stopped ? " (stopped)" : "")")
         }
-        if let name = job.clone { let root = dataRoot; DispatchQueue.global(qos: .utility).async { SlotClone.remove(name, in: root) } }
         if job.verifyOf != nil {
             finishVerify(job, end)
             onChange?()
