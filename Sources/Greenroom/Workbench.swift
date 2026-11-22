@@ -103,12 +103,20 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
+    /// What each row showed when it was drawn (`key(of:)`): a reload redraws only the rows whose key moved.
+    private var rowKeys: [String] = []
+    private var sidebarPending = false
     private(set) var selected: Simulator?
     /// The Sessions section of the sidebar (SessionsController.swift).
     let sessions = SessionsController()
 
     private enum Row {
         case header(String)
+        /// A repository's header, with its + menu; `hidden` is how many of its worktrees the menu holds.
+        case sessionsHeader(String, URL, hidden: Int)
+        /// "Add a session" under a repository that shows none.
+        case addSession(URL, hidden: Int)
+        case suggestion(Session)
         case session(Session)
         case pull(PullRow)
         case simulator(Simulator)
@@ -139,7 +147,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let side = NSSplitViewItem(sidebarWithViewController: sidebarController())
         side.minimumThickness = 200
         side.maximumThickness = 320
-        side.isCollapsed = true   // the stage gets the window; the library slides in when asked for
+        side.isCollapsed = UserDefaults.standard.bool(forKey: Self.sidebarHiddenKey)   // open until the person folds it away
         split.addSplitViewItem(side)
         let content = NSViewController()
         compareBar.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -218,7 +226,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if window.frame.origin == .zero { window.center() }
         Engine.shared.onChange = { [weak self] in self?.reload() }
         reload()
-        sessions.onChange = { [weak self] in self?.reload() }
+        sessions.onChange = { [weak self] in self?.setNeedsSidebar() }   // the rows only: the stage did not change
         sessions.install(workbench: self)
     }
 
@@ -319,16 +327,50 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         testsPane.follow(selected)
         if showingDiagnostics { diagnosticsPane.follow(selected) }
         if showingTimeline { timeline.follow(selected) }
+        reloadSidebar()
+        let alive = sims.filter(\.isAlive).count
+        status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac" + (ClaudeSessions.shared.note.map { "\n" + $0 } ?? "")
+        window.toolbar?.validateVisibleItems()
+        updateChrome()
+    }
+
+    /// Asks for the rows to be worked out again, once, at the end of this turn of the run loop: a build line, a
+    /// walk's progress and a Claude session's write arriving together make one redraw, not three.
+    private func setNeedsSidebar() {
+        guard !sidebarPending else { return }
+        sidebarPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.sidebarPending else { return }
+            self.reloadSidebar()
+        }
+    }
+
+    private static let recentLimit = 3
+
+    /// The sidebar's rows: each repository's sessions (the ones the person added, and any in use), what is worth
+    /// adding, pull requests to review, simulators of no session, and recent APKs. Only rows whose key changed are
+    /// redrawn.
+    private func reloadSidebar() {
+        sidebarPending = false
+        let sims = Engine.shared.simulators
         // Built aside and swapped in at once: groups() can run the run loop (Git.available waits for xcode-select), and
         // the table laying out there would read rows it was never told about.
         var rows: [Row] = []
         let groups = sessions.groups()
-        if !groups.isEmpty && ClaudeUI.offersTitles { rows.append(.claudeTitles) }   // rows read as branches until it is on
+        if !groups.isEmpty && ClaudeUI.offersTitles { rows.append(.claudeTitles) }   // rows read as branches, and nothing is suggested, until it is on
         for group in groups {
-            rows.append(.header(group.header))
+            guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
+            rows.append(.sessionsHeader(group.header, ws, hidden: group.hidden))
+            if group.sessions.isEmpty { rows.append(.addSession(ws, hidden: group.hidden)) }
             rows += group.sessions.map { .session($0) }
         }
-        rows += ClaudeSessions.shared.offers.map { .claudeOffer($0) }   // W1
+        let suggested = sessions.suggestions()
+        let offers = ClaudeSessions.shared.offers
+        if !suggested.isEmpty || !offers.isEmpty {
+            rows.append(.header("Suggested"))
+            rows += suggested.prefix(4).map { .suggestion($0) }   // the rest are in the + menu
+            rows += offers.prefix(2).map { .claudeOffer($0) }   // W1
+        }
         let pullRows = sessions.pullRows()
         if !pullRows.isEmpty {
             rows.append(.header("Review"))
@@ -339,24 +381,56 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             rows.append(.header("Running"))
             rows += loose.map { .simulator($0) }
         }
-        let recents = Recents.all
+        // With sessions in the sidebar, the recent APKs are a short list (all of them are in File > Open Recent).
+        let recents = groups.isEmpty ? Recents.all : Array(Recents.all.prefix(Self.recentLimit))
         if !recents.isEmpty {
             rows.append(.header("Recent"))
             rows += recents.map { .recent($0) }
         }
+        let keys = rows.map(key(of:))
+        let sameShape = keys.count == rowKeys.count && zip(rows, self.rows).allSatisfy { Self.identity($0) == Self.identity($1) }
+        let changed = IndexSet(keys.indices.filter { !sameShape || keys[$0] != rowKeys[$0] })
         self.rows = rows
-        table.reloadData()
-        if let s = selected, let i = rows.firstIndex(where: {
+        self.rowKeys = keys
+        if !sameShape { table.reloadData() }
+        else if !changed.isEmpty { table.reloadData(forRowIndexes: changed, columnIndexes: [0]) }
+        let selected = self.selected
+        let want = selected.flatMap { s in rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }
             if case .pull(let x) = $0 { return x.simulator === s }
             return false
-        }) ?? rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) {
-            table.selectRowIndexes([i], byExtendingSelection: false)
+        }) ?? rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) }
+        if let want, table.selectedRow != want { table.selectRowIndexes([want], byExtendingSelection: false) }
+    }
+
+    /// Which thing a row stands for (not how it looks): rows that keep their identities in place are redrawn one by one.
+    private static func identity(_ row: Row) -> String {
+        switch row {
+        case .header(let t): return "h:" + t
+        case .sessionsHeader(let t, let ws, _): return "sh:" + t + ws.path
+        case .addSession(let ws, _): return "add:" + ws.path
+        case .suggestion(let s): return "sg:" + s.worktree.path
+        case .session(let s): return "s:" + s.worktree.path
+        case .pull(let p): return "p:" + p.pull.id
+        case .simulator(let sim): return "sim:" + String(UInt(bitPattern: ObjectIdentifier(sim).hashValue))
+        case .recent(let u): return "r:" + u.path
+        case .claudeOffer(let o): return "o:" + o.repository.path
+        case .claudeTitles: return "titles"
         }
-        let alive = sims.filter(\.isAlive).count
-        status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac" + (ClaudeSessions.shared.note.map { "\n" + $0 } ?? "")
-        window.toolbar?.validateVisibleItems()
-        updateChrome()
+    }
+
+    /// Everything a row shows.
+    private func key(of row: Row) -> String {
+        switch row {
+        case .sessionsHeader(_, _, let hidden): return Self.identity(row) + "|\(hidden)"
+        case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
+        case .session(let s): return Self.identity(row) + "|" + sessions.rowKey(for: s)
+        case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
+        case .pull(let p): return Self.identity(row) + "|\(p.state)|\(p.build?.key ?? "")|\(p.simulator?.state == .running)|\(p.simulator != nil)|\(p.pull.title)|\(p.repo)"
+        case .simulator(let sim): return Self.identity(row) + "|\(sim.state)|\(sim.deviceSize)|\(sim.name)"
+        case .claudeOffer(let o): return Self.identity(row) + "|\(o.count)"
+        default: return Self.identity(row)
+        }
     }
 
     // MARK: Floating chrome
@@ -966,17 +1040,22 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         timeline.onClose = { [weak self] in self?.setShowingTimeline(false) }
     }
 
+    private static let sidebarHiddenKey = "sidebarHidden"
+
     /// Shows the sidebar if it is folded away.
     func showLibrary() {
         guard let item = splitController.splitViewItems.first, item.isCollapsed else { return }
         item.animator().isCollapsed = false
+        UserDefaults.standard.set(false, forKey: Self.sidebarHiddenKey)
     }
 
     @objc func addRepository(_ sender: Any?) { sessions.chooseRepository() }
 
     @objc func toggleLibrary(_ sender: Any?) {
         guard let item = splitController.splitViewItems.first else { return }
-        item.animator().isCollapsed.toggle()
+        let hide = !item.isCollapsed
+        item.animator().isCollapsed = hide
+        UserDefaults.standard.set(hide, forKey: Self.sidebarHiddenKey)   // remembered: the next window opens the same way
     }
 
     @objc private func showOne(_ sender: Any?) { setSideBySide(false) }
@@ -1041,6 +1120,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Open in Claude", action: #selector(openInClaudeClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Remove from Sidebar", action: #selector(removeSessionClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
         menu.delegate = self
         sessions.evidence.menuItems().forEach(menu.addItem)   // Walk Again, Stop Walking, ... (Evidence.swift)
@@ -1076,12 +1156,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
         if case .header = rows[row] { return true }
+        if case .sessionsHeader = rows[row] { return true }
         return false
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session, .claudeOffer, .claudeTitles, .pull: return true
+        case .simulator, .session, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession: return true
         default: return false
         }
     }
@@ -1100,7 +1181,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         if case .header = rows[row] { return 24 }
-        if case .session = rows[row] { return 42 }
+        if case .sessionsHeader = rows[row] { return 24 }
+        if case .suggestion = rows[row] { return 24 }
+        if case .addSession = rows[row] { return 28 }
+        if case .session = rows[row] { return 40 }
         if case .pull = rows[row] { return 42 }
         return 36
     }
@@ -1112,6 +1196,27 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             label.font = .systemFont(ofSize: 11, weight: .semibold)
             label.textColor = .secondaryLabelColor
             return label
+        case .sessionsHeader(let title, let ws, _):
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            let add = ClosureButton(symbol: "plus", tip: "Add a session from \(ws.lastPathComponent)") {}
+            add.handler = { [weak self, weak add] in
+                guard let self, let add else { return }
+                self.sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 0, y: add.bounds.height + 2), in: add)
+            }
+            add.contentTintColor = .secondaryLabelColor
+            let stack = NSStackView(views: [label, add])
+            stack.spacing = 4
+            stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 6)
+            return stack
+        case .addSession(_, let hidden):
+            return cell(symbol: "plus.circle", tint: .controlAccentColor, title: "Add a session",
+                        detail: hidden == 0 ? "No worktrees yet" : "\(hidden) worktree\(hidden == 1 ? "" : "s") to choose from")
+        case .suggestion(let s):
+            return sessions.suggestionCell(for: s)
         case .session(let session):
             return sessions.cell(for: session)
         case .claudeOffer(let offer):
@@ -1167,6 +1272,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
+        if case .suggestion(let s) = rows[row] { sessions.show(s) }
+        if case .addSession(let ws, _) = rows[row], let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) {
+            sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 8, y: view.bounds.height), in: view)
+        }
         if case .claudeOffer(let offer) = rows[row] { sessions.addRepositories([offer.repository]) }
         if case .claudeTitles = rows[row] { ClaudeSessions.shared.enabled = true; reload() }   // the titles arrive with the read
         if case .pull(let pull) = rows[row] { sessions.openPull(pull) }
@@ -1209,6 +1318,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let row = table.clickedRow
         guard row >= 0, row < rows.count, case .session(let s) = rows[row] else { return nil }
         return s
+    }
+
+    @objc private func removeSessionClicked() {
+        let row = table.clickedRow
+        guard row >= 0, row < rows.count else { return }
+        if case .session(let s) = rows[row] { sessions.remove(s) }
+        if case .suggestion(let s) = rows[row] { sessions.dismiss(s) }
     }
 
     @objc private func removeRepositoryClicked() {
