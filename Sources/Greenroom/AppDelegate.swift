@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
+        mapSignInCheckIfAsked()
         arrangeCheckIfAsked()
         PrivacyCheck.runIfAsked(self)   // scripts/network-check.sh
         matrixCheckIfAsked()

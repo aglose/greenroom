@@ -33,7 +33,7 @@ extension AppDelegate {
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
             let t = Date().timeIntervalSince(started)
             if !shotWalking, t > 14 { shotWalking = true; captureWindow(to: dir.appendingPathComponent("1-walking.png")) }
-            guard map.run == nil || t > 400 else { return }
+            guard !map.isWalking || t > 400 else { return }
             timer.invalidate()
             guard let data = map.data else { expect(false, "the walk finished with a map"); end(); return }
             let transitions = data.edges.filter { if case .screen = $0.to { return true } else { return false } }.count
@@ -68,6 +68,91 @@ extension AppDelegate {
                                     end()
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+extension AppDelegate {
+    /// `Greenroom --map-signin-check DIR APK`: a walk that signs in with a script first. The script opens the test app's
+    /// apksim://slot screen and taps Write (a Settings value that outlives the process, as a sign-in's token does); the
+    /// walk, started at that screen, must then find "setting=written" from app start on, which a walk with no sign-in
+    /// does not. The walk's throwaway slot must be gone afterwards, and a failing script must stop the walk with its
+    /// reason. One `[greenroom] map-signin:` line per step.
+    func mapSignInCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--map-signin-check"), i + 2 < args.count else { return }
+        let dir = URL(fileURLWithPath: args[i + 1])
+        let apk = URL(fileURLWithPath: args[i + 2])
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let map = workbench.screenMap
+        var ok = true
+        func say(_ s: String) { print("[greenroom] map-signin: \(s)"); fflush(stdout) }
+        func expect(_ good: Bool, _ what: String) { if !good { ok = false }; say("\(good ? "ok  " : "FAIL") \(what)") }
+        func script(_ name: String, _ body: String) -> URL {
+            let u = dir.appendingPathComponent(name)
+            try? fm.removeItem(at: u)
+            fm.createFile(atPath: u.path, contents: Data(("#!/bin/bash\nset -euo pipefail\n" + body).utf8), attributes: [.posixPermissions: 0o700])
+            return u
+        }
+        let good = script("sign-in.sh", """
+            gr open "apksim://slot"
+            gr wait "Slot state" 30
+            gr tap-text "Write"
+            gr wait "setting=written" 20
+            echo "signed in"
+            """)
+        let bad = script("bad-sign-in.sh", "echo \"no such account\"\nexit 3\n")
+        let data = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
+        func walkSlots() -> [String] {
+            ((try? fm.contentsOfDirectory(at: data, includingPropertiesForKeys: nil)) ?? []).flatMap { pkg in
+                ((try? fm.contentsOfDirectory(atPath: pkg.path)) ?? []).filter { $0.hasPrefix("evg") }
+            }
+        }
+        let before = Set(walkSlots())
+        func end() {
+            say(ok ? "PASS" : "FAIL")
+            for k in ["mapAPK", "mapRun", "mapDepth", "mapTime", "mapCaptures", "mapStart", "mapSignIn"] { UserDefaults.standard.removeObject(forKey: k) }
+            Engine.shared.stopAll()
+            exit(ok ? 0 : 1)
+        }
+        func walk(_ script: URL?, then: @escaping (ScreenMapData?, Double) -> Void) {
+            map.chooseSignIn(script)
+            let started = Date()
+            guard map.walk() else { expect(false, "the walk starts (Python 3 found)"); end(); return }
+            var sawSignIn = false
+            Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+                if map.statusText.hasPrefix("Signing in") { sawSignIn = true }
+                let t = Date().timeIntervalSince(started)
+                guard !map.isWalking || t > 500 else { return }
+                timer.invalidate()
+                if script != nil { expect(sawSignIn, "the status said it was signing in") }
+                then(map.data, t)
+            }
+        }
+        workbench.showMap()
+        map.setAPK(apk)
+        map.configure(depth: 0, time: 0, captures: 2, start: "apksim://slot")
+        walk(good) { d, t in
+            let first = d?.screens.first
+            say(String(format: "signed-in walk: %d screens in %.0f s; first screen: %@", d?.screens.count ?? 0, t, first?.texts.joined(separator: " | ") ?? "none"))
+            expect(d != nil, "the signed-in walk finished with a map")
+            expect(first?.texts.contains { $0.contains("at app start: setting=written") } == true, "the walk saw what the script did, from app start on")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                expect(Set(walkSlots()).subtracting(before).isEmpty, "the walk's slot is removed afterwards")
+                walk(nil) { d, _ in
+                    expect(d?.screens.first?.texts.contains { $0.contains("setting=written") } == false, "a walk with no sign-in does not see it")
+                    walk(bad) { d, _ in
+                        say("failed sign-in: \(map.statusText)")
+                        expect(d == nil, "a failing script gives no map")
+                        expect(map.statusText.contains("bad-sign-in.sh failed (exit 3): no such account"), "... and says which script failed and why")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                            expect(Set(walkSlots()).subtracting(before).isEmpty, "... and its slot is removed")
+                            end()
                         }
                     }
                 }

@@ -673,6 +673,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         NSLayoutConstraint.activate([screenMap.topAnchor.constraint(equalTo: host.topAnchor), screenMap.bottomAnchor.constraint(equalTo: host.bottomAnchor),
                                      screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
         screenMap.defaultAPK = { [weak self] in self?.selected?.apk }
+        screenMap.worktree = { [weak self] in self?.selected.flatMap { self?.worktree(of: $0) } }
         screenMap.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         screenMap.onToggle = { [weak self] in self?.updateChrome() }
         screenMap.onGo = { [weak self] screen, map in self?.goThere(screen, map) }
@@ -685,7 +686,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if snapshotReview.isOpen { snapshotReview.close() }
         if changesSheet.isOpen { changesSheet.close() }
         screenMap.open()
-        if walk, screenMap.run == nil { screenMap.walk() }
+        if walk, !screenMap.isWalking { screenMap.walk() }
     }
 
     // MARK: Changes
