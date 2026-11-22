@@ -257,7 +257,17 @@ struct MapNavigatorPlan {
             guard let info = groups[g.id] else { continue }
             if g.collapsed {
                 frames[g.id] = g.frame
-                surfaceScreens.append(MapSurfaceScreen(lineage: g.id, id: g.id, title: info.summary, activity: "click to open", depth: g.minDepth, parent: nil, captures: [:]))
+                var tile = MapSurfaceTile(name: info.title, count: info.members.count)
+                for i in members[g.id] ?? [] {
+                    switch m.items[i].status {
+                    case .added: tile.added += 1
+                    case .removed: tile.removed += 1
+                    case .modified: tile.modified += 1
+                    default: break
+                    }
+                }
+                tile.pictures = g.members.compactMap { k in m.index[k].map { m.items[$0].screen.captures } }.filter { !$0.isEmpty }.prefix(MapSurfaceTile.shown).map { $0 }
+                surfaceScreens.append(MapSurfaceScreen(lineage: g.id, id: g.id, title: info.summary, activity: "click to open", depth: g.minDepth, parent: nil, captures: [:], tile: tile))
                 changes[g.id] = MapDiff.ScreenChange(lineage: g.id, base: nil, head: nil, status: info.changed > 0 ? .modified : .same)
             } else {
                 titled.append(g.id)
@@ -584,33 +594,39 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
     /// Shows `head`. With a comparison it opens on the changes and what is one step from them; the screens only the
     /// base has (`base` is needed for them) stand in their base places, marked removed. Layout runs off the main thread,
     /// except when this map has been laid out before: then it is in place when this returns.
-    func show(_ head: MapSnapshot, diff: MapDiff? = nil, base: MapSnapshot? = nil) {
+    func show(_ head: MapSnapshot, diff: MapDiff? = nil, base: MapSnapshot? = nil, keepingPlace: Bool = false) {
         generation += 1
         let gen = generation
-        filter = .all
+        // Re-showing a map the person is looking at (another base or head of the same lineages): the lineages keep
+        // their places and the view stays where it is, so what did not change does not move.
+        let before = keepingPlace ? plan?.layout : nil
+        let keptFilter = keepingPlace ? filter : .all
+        filter = keptFilter
         folded = true
         overrides = [:]
         pendingReveal = nil
-        selectedKey = nil
+        let keptSelection = keepingPlace ? selectedKey : nil
+        selectedKey = keptSelection
         plan = nil
         clearSearch(refocus: false)
         let key = MapNavigatorModel.key(for: head, diff, base)
-        if let cached = MapNavigatorCache.model(key) { adopt(cached, fit: true); return }
+        if let cached = MapNavigatorCache.model(key) { adopt(cached, fit: !keepingPlace, previous: before); return }
         busy = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let m = MapNavigatorModel(head: head, diff: diff, base: base)
             MapNavigatorCache.store(m)
             DispatchQueue.main.async {
                 guard let self, self.generation == gen else { return }
-                self.adopt(m, fit: true)
+                self.adopt(m, fit: !keepingPlace, previous: before)
             }
         }
     }
 
-    private func adopt(_ m: MapNavigatorModel, fit: Bool) {
+    private func adopt(_ m: MapNavigatorModel, fit: Bool, previous: MapLayout? = nil) {
         model = m
+        if !m.hasDiff || (filter.needsDiff && m.counts[filter] == nil) { filter = .all }
         refreshControls()
-        rebuild(previous: nil, fit: fit)
+        rebuild(previous: previous, fit: fit)
     }
 
     /// Makes the plan for the present filter, fold and groups and hands it to the surface.
@@ -767,7 +783,9 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
     override func keyDown(with event: NSEvent) {
         let plain = event.modifierFlags.intersection([.command, .option, .control]).isEmpty
         if event.keyCode == 53 {
-            if !field.stringValue.isEmpty || !resultsScroll.isHidden { clearSearch(refocus: true) } else if selectedKey != nil { surface.select(nil, reveal: false) }
+            if !field.stringValue.isEmpty || !resultsScroll.isHidden { clearSearch(refocus: true) }
+            else if selectedKey != nil { surface.select(nil, reveal: false) }
+            else { super.keyDown(with: event) }   // nothing left to put away: the sheet around it closes
             return
         }
         guard plain, let c = event.charactersIgnoringModifiers?.lowercased() else { super.keyDown(with: event); return }

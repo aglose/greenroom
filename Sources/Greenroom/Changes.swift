@@ -32,7 +32,7 @@ enum ChangeStatus: String {
     var word: String { self == .unreached ? "not reached" : rawValue }
 }
 
-/// What a comparison found for one screen of the map: its edge colour and badge (MapCanvas).
+/// What a comparison found for one screen of the map: its edge colour and badge on the map.
 struct MapMark {
     let label: String
     let color: NSColor
@@ -110,6 +110,8 @@ struct ChangeSet {
     /// What the walks did not finish, in words.
     let unfinished: [String]
     let reportURL: URL?
+    /// The two snapshots the map shows, when the comparison came from the history; else made from the folder on demand.
+    var mapSource: MapSource? = nil
 
     var differing: [ChangeScreen] { screens.filter { $0.status == .new || $0.status == .changed || $0.status == .gone } }
     var isUnchanged: Bool { summary.differing == 0 }

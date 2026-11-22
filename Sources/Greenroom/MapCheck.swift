@@ -4,7 +4,10 @@ extension AppDelegate {
     /// `Greenroom --map-check DIR APK`: opens the app, walks it two taps deep with light and dark captures, and checks
     /// the map: enough screens, the Trips screen among them, routes drawn, the arrow keys move the selection. Then
     /// "Go there" replays the route to Trips on the open device, which must then show a trip. The window is captured
-    /// mid-walk (ghosts), with the map, with a screen selected and after going there. One `[greenroom] map:` line per step.
+    /// mid-walk (ghosts), with the map, with a screen selected and after going there. Then the app is walked again from
+    /// its slot screen with a stand-in history (the first walk imported as the baseline of an invented commit, since the
+    /// test app has no repository) and the window is captured with the comparison: the header, the changes first, the
+    /// strip over two stored snapshots. One `[greenroom] map:` line per step.
     func mapCheckIfAsked() {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--map-check"), i + 2 < args.count else { return }
@@ -19,42 +22,98 @@ extension AppDelegate {
         func expect(_ good: Bool, _ what: String) { if !good { ok = false }; print("[greenroom] map: \(good ? "ok  " : "FAIL") \(what)") }
         func end() {
             print("[greenroom] map check: \(ok ? "PASS" : "FAIL")")
-            for k in ["mapAPK", "mapRun", "mapDepth", "mapTime", "mapCaptures"] { UserDefaults.standard.removeObject(forKey: k) }
+            for k in ["mapAPK", "mapRun", "mapDepth", "mapTime", "mapCaptures", "mapStart"] { UserDefaults.standard.removeObject(forKey: k) }
             fflush(stdout)
             Engine.shared.stopAll()
             exit(ok ? 0 : 1)
         }
         workbench.showMap()
         map.setAPK(apk)
-        map.configure(depth: 1, time: 1, captures: 1)
+        map.configure(depth: 1, time: 1, captures: 1, start: "")   // a start link kept from an earlier run would change what is walked
         let started = Date()
         guard map.walk() else { expect(false, "the walk starts (Python 3 found)"); end(); return }
         var shotWalking = false
+        /// A second walk from the slot screen, compared with the first as if the first were the baseline commit's.
+        func diffWalk(first: ScreenMapData) {
+            let fm = FileManager.default
+            let root = dir.appendingPathComponent("history", isDirectory: true)
+            try? fm.removeItem(at: root)
+            let store = MapStore(root: root, repo: "map-check")
+            map.context = { _ in
+                MapContext(store: store, commit: "2222222222222222222222222222222222222222", tree: "tree2", engine: "check") { profile in
+                    guard let b = store.importWalk(first.folder, commit: "1111111111111111111111111111111111111111", tree: "tree1", profile: profile, engine: "check", walked: Date().addingTimeInterval(-3600)) else { return nil }
+                    let (paired, _) = MapPairing.pair(head: b, base: nil)
+                    store.save(paired)
+                    return (paired, 2)
+                }
+            }
+            map.configure(depth: 1, time: 1, captures: 1, start: "apksim://slot")
+            workbench.showMap()   // "Go there" closed the sheet
+            guard map.walk() else { expect(false, "the second walk starts"); end(); return }
+            let again = Date()
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
+                let t = Date().timeIntervalSince(again)
+                guard (!map.isWalking && (map.snapshot != nil || map.data == nil) && !map.host.navigator.busy) || t > 400 else { return }
+                timer.invalidate()
+                guard let src = map.host.source, map.data != nil else { expect(false, "the second walk finished with a map"); end(); return }
+                expect(src.base?.commit.hasPrefix("1111111") == true && src.diff != nil, "the second walk is compared with the stored baseline")
+                expect(map.statusText != "" && src.head.commit.hasPrefix("2222222"), "and filed under its own commit")
+                expect(store.snapshot(profile: src.head.profile.id, commit: "2222222222222222222222222222222222222222") != nil, "the walk is in the store")
+                let c = src.diff?.counts
+                expect((c?.differing ?? 0) > 0, "the comparison found changes (new \(c?.added ?? 0), changed \(c?.modified ?? 0), gone \(c?.removed ?? 0))")
+                expect(map.compareText.contains("compared with 1111111") && map.compareText.contains("2 commits behind"), "the header says: \(map.compareText)")
+                expect(map.host.navigator.model?.hasDiff == true && map.host.navigator.filter == .all, "the map opens with the comparison, changes first")
+                // The strip over the two stored snapshots; moving a handle re-diffs and redraws in place.
+                let strip = map.timelineControl
+                expect(!strip.isHidden && strip.base?.hasPrefix("1111111") == true && strip.head?.hasPrefix("2222222") == true, "the strip shows the two stored snapshots, base and head at their ends")
+                let moved = src.head.screens.compactMap { s in map.host.navigator.surface.frame(of: s.lineage).map { (s.lineage, $0) } }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                    captureWindow(to: dir.appendingPathComponent("5-diff.png"))
+                    strip.set(base: 1)
+                    let wait = Date()
+                    Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { t in
+                        guard (!map.host.navigator.busy && map.host.source?.base?.commit.hasPrefix("2222222") == true) || Date().timeIntervalSince(wait) > 20 else { return }
+                        t.invalidate()
+                        expect(map.host.source?.diff?.counts.differing == 0, "moving the base handle to the head re-diffs: nothing differs")
+                        // The screens the base alone had are gone from the view, so a card that hung from one slides to the left; it keeps its row.
+                        let kept = moved.filter { l, f in map.host.navigator.surface.frame(of: l).map { $0.minY == f.minY && $0.size == f.size } ?? false }.count
+                        expect(!moved.isEmpty && kept == moved.count, "the card still there keeps its row and size when the pair changes (\(kept) of \(moved.count))")
+                        end()
+                    }
+                }
+            }
+        }
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
             let t = Date().timeIntervalSince(started)
             if !shotWalking, t > 14 { shotWalking = true; captureWindow(to: dir.appendingPathComponent("1-walking.png")) }
-            guard !map.isWalking || t > 400 else { return }
+            guard (!map.isWalking && (map.snapshot != nil || map.data == nil) && !map.host.navigator.busy) || t > 400 else { return }
             timer.invalidate()
             guard let data = map.data else { expect(false, "the walk finished with a map"); end(); return }
             let transitions = data.edges.filter { if case .screen = $0.to { return true } else { return false } }.count
             print(String(format: "[greenroom] map: %d screens, %d transitions, %d curves, %d crashes, %d combos, walked in %.0f s",
-                         data.screens.count, transitions, map.canvas.routeCount, data.crashes.count, data.combos.count, t))
+                         data.screens.count, transitions, map.host.navigator.surface.routeCount, data.crashes.count, data.combos.count, t))
             expect(data.screens.count >= 5, "at least 5 screens")
-            expect(map.canvas.routeCount >= 3, "routes drawn between screens")
+            let surface = map.host.navigator.surface
+            expect(map.snapshot?.screens.count == data.screens.count, "the walk is a snapshot of \(data.screens.count) screens (\(map.snapshot?.screens.count ?? 0))")
+            expect(surface.routeCount >= 3, "routes drawn between screens")
+            expect(!map.host.navigator.isHidden && map.host.ghosts.isHidden, "the map shows and the ghost cards are gone")
             expect(data.screens.allSatisfy { $0.captures.count == 2 }, "every screen captured light and dark")
             let trips = data.screens.first { $0.texts.contains("Tokyo weekend") && $0.depth == 1 }
             expect(trips != nil, "the Trips screen was found one tap in")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
                 captureWindow(to: dir.appendingPathComponent("2-map.png"))
                 guard let trips else { end(); return }
-                map.canvas.select(trips.id)
+                func lineage(_ id: String?) -> String? { id.flatMap { map.host.source?.lineage(ofHeadScreen: $0) } }
+                guard let tripsLineage = lineage(trips.id) else { expect(false, "the Trips screen has a place on the map"); end(); return }
+                map.host.select(tripsLineage)
+                expect(map.host.detail.lineage == tripsLineage && !map.host.detail.isHidden, "selecting a screen fills the detail column")
                 // Right from the start follows the first route out; left comes back.
-                map.canvas.select(data.screens.first?.id)
-                map.canvas.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
-                                                          characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 124)!)
-                let right = map.canvas.selected
-                expect(right != nil && right != data.screens.first?.id, "the right arrow moves to a screen one tap in")
-                map.canvas.select(trips.id)
+                map.host.select(lineage(data.screens.first?.id))
+                surface.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                                                       characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 124)!)
+                let right = surface.selected
+                expect(right != nil && right != lineage(data.screens.first?.id), "the right arrow moves to a screen one tap in")
+                map.host.select(tripsLineage)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
                     captureWindow(to: dir.appendingPathComponent("3-selected.png"))
                     workbench.goThere(trips, data) { arrived in
@@ -65,7 +124,7 @@ extension AppDelegate {
                                 expect(nodes.contains("Tokyo weekend"), "the device shows the Trips screen afterwards")
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
                                     captureWindow(to: dir.appendingPathComponent("4-there.png"))
-                                    end()
+                                    diffWalk(first: data)
                                 }
                             }
                         }
