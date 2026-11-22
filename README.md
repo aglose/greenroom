@@ -96,8 +96,9 @@ the app shows it with `AVSampleBufferDisplayLayer`; input goes back over the eng
 ## Your APKs stay on your Mac
 
 Greenroom never uploads an APK, and collects nothing about one: not its name, package, contents, screens, network
-traffic or logs. Analytics and crash reports do not exist yet; when they do they will be off until you turn them
-on. [PRIVACY.md](PRIVACY.md) has the details and how to check them.
+traffic or logs. Crash reports and usage counts are off until you turn them on, hold no APK data, and wait on your
+Mac a day before they are sent, so you can read or discard each one; debug builds never send them.
+[PRIVACY.md](PRIVACY.md) has the details and how to check them.
 
 ## Requirements
 
