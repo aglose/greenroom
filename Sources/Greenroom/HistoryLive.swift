@@ -104,7 +104,11 @@ enum HistoryLive {
             Task { @MainActor in
                 while sampling {
                     for line in (run("/bin/ps", ["-axo", "command="]) ?? "").split(separator: "\n") where line.contains("scripts/crawl.py") && line.contains(base.path + "/state") {
-                        seen.insert(String(line.prefix(400)))
+                        // One entry per crawl of one build: the walked APK and whether it had --base (the system's python is a shim that
+                        // starts the real one, so a run shows as two processes).
+                        let words = line.split(separator: " ").map(String.init)
+                        guard let at = words.firstIndex(where: { $0.hasSuffix("scripts/crawl.py") }), at + 1 < words.count else { continue }
+                        seen.insert((words[at + 1].components(separatedBy: "/builds/").last ?? "") + (words.contains("--base") ? " --base" : " (no --base)"))
                     }
                     try? await Task.sleep(nanoseconds: 150_000_000)
                 }
@@ -126,7 +130,7 @@ enum HistoryLive {
             let s0 = ev.started
             let one = await compare(a)
             expect(one != nil && ev.started == s0 + 1, "a against the base: one run, the pair walked (runs \(ev.started - s0))")
-            expect(seen.filter { $0.contains(" --base ") }.count >= 1, "that crawl had --base")
+            expect(seen.filter { $0.hasSuffix(" --base") }.count == 1, "that crawl had --base")
             expect(await wait("both snapshots", 60) { snapshots() == 2 }, "both builds were filed (snapshots: \(snapshots()))")
             let seen1 = seen.count
 
@@ -135,7 +139,7 @@ enum HistoryLive {
             let two = await compare(b)
             expect(two != nil && ev.started == s1 + 1, "b against the same base: one run (runs \(ev.started - s1))")
             expect(seen.count == seen1 + 1, "that run was one more crawler command (\(seen.count - seen1))")
-            expect(seen.filter { !$0.contains(" --base ") }.count == 1, "and it had no --base: only b was walked")
+            expect(seen.filter { $0.hasSuffix("(no --base)") }.count == 1, "and it had no --base: only b was walked")
             if let two {
                 expect(!fm.fileExists(atPath: two.folder.appendingPathComponent("crawl.json").path) && two.screens.count > 0,
                        "its result is made from history (no crawl.json in its folder): \(two.screens.count) screens, changed \(two.summary.changed) new \(two.summary.new) gone \(two.summary.gone) same \(two.summary.same)")
@@ -147,11 +151,13 @@ enum HistoryLive {
             let s2 = ev.started, seen2 = seen.count
             let three = await compare(a)
             expect(three != nil && ev.started == s2 && seen.count == seen2, "a against the base again, its folder gone: no run, no crawler (runs \(ev.started - s2))")
-            if let one, let three { expect(three.summary == one.summary, "and the same counts as the walk's (changed \(three.summary.changed) new \(three.summary.new) gone \(three.summary.gone) same \(three.summary.same))") }
+            // A screen that never settles is "not reached" from history (MapDiff does not compare its pixels); the walk's own list calls it same.
+            if let one, let three { expect(three.summary.changed == one.summary.changed && three.summary.new == one.summary.new && three.summary.gone == one.summary.gone
+                                           && three.summary.same + three.unreached == one.summary.same + one.unreached, "and the same counts as the walk's (history: changed \(three.summary.changed) new \(three.summary.new) gone \(three.summary.gone) same \(three.summary.same) not reached \(three.unreached); walk: changed \(one.summary.changed) new \(one.summary.new) gone \(one.summary.gone) same \(one.summary.same) not reached \(one.unreached))") }
 
             sampling = false
             say("crawler commands seen:")
-            for line in seen.sorted() { say("  " + line.replacingOccurrences(of: base.path, with: "<dir>")) }
+            for line in seen.sorted() { say("  " + line) }
             finish()
         }
     }
