@@ -1,18 +1,17 @@
 # Map history: the screen map over time, and what a change did to it
 
 Status (2026-11-22): every package of the table below is built and merged, each with its check, except what "Not
-yet" lists. The engine half (E1, E2) is on apksim branches that are not released, so incremental walks wait for
-apksim 0.58 and an `engine.lock` bump; until then every walk is a full walk.
+yet" lists. The engine half (E1, E2) shipped in apksim 0.58.0, which `engine.lock` names, so incremental walks are
+live.
 
 Not yet:
 
 - The GitHub Action (`action/`) has never run on GitHub (spike MS6); only its script is checked.
-- Incremental walks inside the app against a released engine; they were run live against a local build of the engine.
 - A real app with hundreds of screens. See "What the first real apps showed".
 
 ## What the first real apps showed (2026-11-22)
 
-Two open-source apps from apksim's corpus list, walked with the unreleased engine; `Greenroom --map-walks` put the
+Two open-source apps from apksim's corpus list, walked with a local build of the engine before 0.58.0 was released; `Greenroom --map-walks` put the
 walks through import, pairing, the diff and the export.
 
 - **Markor** stops at its introduction: each page of the pager has the same structure, so "Next" reads as staying on

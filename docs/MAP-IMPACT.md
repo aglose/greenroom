@@ -8,8 +8,8 @@ the git reading, the workspace's ledger), `History.swift` (`plan`, `filed`, the 
 ## Engine support
 
 `crawl.py --help` is read once per crawler (`CrawlRun.support`). A seeded walk needs both `--seed`/`--only-file` and
-`--record-deps`; `--record-deps` alone is passed whenever offered. With the released engine (0.57.1, no such options)
-nothing changes: no plan, no note, no extra option, no `greenroom-impact.json`.
+`--record-deps`; `--record-deps` alone is passed whenever offered. apksim 0.58.0 and later offer them; with an
+older engine (0.57.1 and before) nothing changes: no plan, no note, no extra option, no `greenroom-impact.json`.
 
 ## Decisions the brief left open
 
