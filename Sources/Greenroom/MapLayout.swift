@@ -6,9 +6,11 @@ import Foundation
 // runs off the main thread and its result is cached (it is Codable). The renderer reads `frames` and `groups`.
 //
 // The grid is whole rows and whole columns: a column per depth, and a row is one card and the gap below it. Screens
-// gather into groups, the section each hangs from; a group is a horizontal band of rows, and bands stack down the
-// canvas in a stable order. A band has spare rows below its tallest column, so a screen that appears finds room
-// without moving the next group. Given the previous layout, a lineage keeps its row; a new screen goes beside its
+// gather into groups, the section each hangs from; a group is a band, its depth columns left to right. A column
+// taller than `wrapRows` goes on in a column beside it, and the bands are packed in shelves (left to right, a new
+// shelf below when one is full) in a stable order, with the shelf width and wrap chosen so the canvas comes near the
+// aspect asked for. A band has spare rows below its tallest column, so a screen that appears finds room without
+// moving the next group. Given the previous layout, a lineage keeps its row; a new screen goes beside its
 // parent's other children and moves only the screens below it in its own column, down by whole rows, until a gap
 // (where a screen was removed, or a spare row) takes up the shift.
 
@@ -43,6 +45,10 @@ struct MapLayout: Codable, Equatable {
         /// The band's first row on the canvas, and how many rows it holds (cards, gaps and spare rows).
         var startRow: Int
         var rows: Int
+        /// The band's first column on the canvas, and how many columns each depth has (from `minDepth`; more than one
+        /// when the depth's screens wrap).
+        var col = 0
+        var columns: [Int] = []
     }
 
     var metrics: Metrics
@@ -51,13 +57,18 @@ struct MapLayout: Codable, Equatable {
     /// In stacking order, top to bottom.
     var groups: [Group]
     var size: CGSize
+    /// What the packing chose: rows a column holds before it wraps, and columns a shelf of bands holds. A layout made
+    /// from this one keeps them, so nothing moves for the choice.
+    var wrapRows = 1
+    var shelfColumns = 1
 
     func group(_ id: String) -> Group? { groups.first { $0.id == id } }
 
     /// Lays `snapshot` out. With `previous` (made with the same metrics) the lineages it holds keep their place.
-    /// `compact` forgets the previous rows and packs the groups again, but keeps their order.
-    static func make(_ snapshot: MapSnapshot, previous: MapLayout? = nil, collapsed: Set<String> = [], metrics: Metrics = Metrics(), compact: Bool = false) -> MapLayout {
-        Builder(snapshot, previous: previous, collapsed: collapsed, metrics: metrics, compact: compact).build()
+    /// `compact` forgets the previous rows and packs the groups again, but keeps their order. `aspect` is the canvas's
+    /// width over height the packing aims for.
+    static func make(_ snapshot: MapSnapshot, previous: MapLayout? = nil, collapsed: Set<String> = [], metrics: Metrics = Metrics(), compact: Bool = false, aspect: CGFloat = 1.6) -> MapLayout {
+        Builder(snapshot, previous: previous, collapsed: collapsed, metrics: metrics, compact: compact, aspect: aspect).build()
     }
 
     // MARK: -
@@ -87,6 +98,7 @@ struct MapLayout: Codable, Equatable {
         let collapsed: Set<String>
         let previous: MapLayout?
         let compact: Bool
+        let aspect: CGFloat
         var nodes: [Node] = []
         var bands: [Band] = []
         /// Neighbours over the snapshot's edges, one step in either direction, by node.
@@ -94,7 +106,8 @@ struct MapLayout: Codable, Equatable {
         /// The group each key stood in in the previous layout.
         var prevGroupOf: [String: String] = [:]
 
-        init(_ s: MapSnapshot, previous: MapLayout?, collapsed: Set<String>, metrics: Metrics, compact: Bool) {
+        init(_ s: MapSnapshot, previous: MapLayout?, collapsed: Set<String>, metrics: Metrics, compact: Bool, aspect: CGFloat) {
+            self.aspect = aspect
             self.metrics = metrics
             self.collapsed = collapsed
             self.previous = previous?.metrics == metrics ? previous : nil
@@ -160,15 +173,19 @@ struct MapLayout: Codable, Equatable {
 
             if let prev, let previous, !prev.collapsed, !compact {
                 for i in members {
-                    guard let f = previous.frames[nodes[i].key] else { rest.append(i); continue }
-                    let col = Int(((f.minX - metrics.pad) / metrics.columnPitch).rounded())
+                    guard let f = previous.frames[nodes[i].key], prevGroupOf[nodes[i].key] == prev.id, nodes[i].depth >= prev.minDepth,
+                          nodes[i].depth - prev.minDepth < prev.columns.count else { rest.append(i); continue }
+                    let d = nodes[i].depth
+                    let offset = prev.columns[..<(d - prev.minDepth)].reduce(0, +)
+                    let sub = Int(((f.minX - metrics.pad) / metrics.columnPitch).rounded()) - prev.col - offset
                     let row = Int(((f.minY - metrics.pad) / metrics.rowPitch).rounded()) - prev.startRow
-                    var cell = cells[col] ?? []
-                    if col == nodes[i].depth, row >= 0, row >= cell.count || cell[row] == nil, prevGroupOf[nodes[i].key] == prev.id {
-                        while cell.count <= row { cell.append(nil) }
-                        cell[row] = i
-                        cells[col] = cell
-                        slot[i] = row
+                    let at = sub * previous.wrapRows + row
+                    var cell = cells[d] ?? []
+                    if sub >= 0, sub < prev.columns[d - prev.minDepth], row >= 0, row < previous.wrapRows, at >= cell.count || cell[at] == nil {
+                        while cell.count <= at { cell.append(nil) }
+                        cell[at] = i
+                        cells[d] = cell
+                        slot[i] = at
                     } else { rest.append(i) }
                 }
                 // New screens, column by column so a parent is placed before its children, each next to its siblings.
@@ -232,55 +249,112 @@ struct MapLayout: Codable, Equatable {
             return slot
         }
 
+        /// What a band takes: columns for each depth, and rows.
+        struct Dim { var spans: [Int]; var rows: Int; var width: Int { spans.reduce(0, +) } }
+
+        func dim(_ band: Band, slot: [Int: Int], prev: MapLayout.Group?, collapsed: Bool, wrap r: Int) -> Dim {
+            if collapsed { return Dim(spans: [], rows: 1) }
+            var count = Array(repeating: 0, count: band.maxDepth - band.minDepth + 1)
+            for i in band.nodes { count[nodes[i].depth - band.minDepth] = max(count[nodes[i].depth - band.minDepth], (slot[i] ?? 0) + 1) }
+            var spans = count.map { max(1, ($0 + r - 1) / r) }
+            if let prev { for (k, was) in prev.columns.enumerated() where k < spans.count && prev.minDepth == band.minDepth { spans[k] = max(spans[k], was) } }
+            let need = count.max() ?? 1
+            let rows = prev.map { min(r, max($0.rows, need)) } ?? (need >= r ? r : min(r, need + max(3, need / 8)))
+            return Dim(spans: spans, rows: max(1, rows))
+        }
+
+        /// Shelf packing in the given order: each band's origin, and the whole's columns and rows.
+        func pack(_ dims: [(width: Int, rows: Int)], shelf: Int) -> (at: [(col: Int, row: Int)], cols: Int, rows: Int) {
+            var at: [(col: Int, row: Int)] = []
+            var x = 0, y = 0, high = 0, cols = 0
+            for d in dims {
+                if x > 0, x + d.width > shelf { y += high; x = 0; high = 0 }
+                at.append((x, y))
+                x += d.width
+                high = max(high, d.rows)
+                cols = max(cols, x)
+            }
+            return (at, cols, y + high)
+        }
+
+        func points(cols: Int, rows: Int) -> CGSize {
+            CGSize(width: metrics.pad * 2 + CGFloat(cols) * metrics.cardWidth + CGFloat(max(cols - 1, 0)) * metrics.gapX,
+                   height: metrics.pad * 2 + CGFloat(max(rows, 1)) * metrics.cardHeight + CGFloat(max(rows, 1) - 1) * metrics.gapY)
+        }
+
         func build() -> MapLayout {
             var prevBy: [String: MapLayout.Group] = [:]
             for g in previous?.groups ?? [] { prevBy[g.id] = g }
+            let order = stacking()
 
-            var frames: [String: CGRect] = [:]
-            var groups: [Group] = []
-            var cursor = 0
-            var shift = 0
-            var deepest = 0
-            for g in stacking() {
-                let band = bands[g]
-                deepest = max(deepest, band.maxDepth)
-                let isCollapsed = collapsed.contains(band.id)
-                let prev = compact ? nil : prevBy[band.id]
-                let usable = prev.flatMap { $0.collapsed == isCollapsed ? $0 : nil }
-                let candidate = prev.map { $0.startRow + shift } ?? 0
-                let start = max(cursor, candidate)
+            // Each band's screens' places in its columns; those the previous layout held keep theirs.
+            var slotOf: [Int: [Int: Int]] = [:]
+            var usable: [Int: MapLayout.Group] = [:]
+            for g in order {
+                let isCollapsed = collapsed.contains(bands[g].id)
+                if isCollapsed { continue }
+                let prev = compact ? nil : prevBy[bands[g].id].flatMap { $0.collapsed ? nil : $0 }
+                if let prev { usable[g] = prev }
+                slotOf[g] = slots(of: g, prev: prev)
+            }
 
-                var slot: [Int: Int] = [:]
-                var rows = 1
-                if !isCollapsed {
-                    slot = slots(of: g, prev: usable)
-                    let need = (slot.values.max() ?? 0) + 1
-                    rows = usable.map { max($0.rows, need) } ?? need + max(3, need / 8)
-                    // A collapsed band that opens: its size is its need again, with room.
-                    for i in band.nodes {
-                        let s = slot[i] ?? 0
-                        frames[nodes[i].key] = CGRect(x: metrics.pad + CGFloat(nodes[i].depth) * metrics.columnPitch,
-                                                      y: metrics.pad + CGFloat(start + s) * metrics.rowPitch,
-                                                      width: metrics.cardWidth, height: metrics.cardHeight)
+            func dims(_ r: Int) -> [Dim] {
+                order.map { dim(bands[$0], slot: slotOf[$0] ?? [:], prev: usable[$0], collapsed: collapsed.contains(bands[$0].id), wrap: r) }
+            }
+            var wrap = 1, shelf = 1
+            if let previous, !compact, previous.wrapRows > 0 {
+                wrap = previous.wrapRows
+                shelf = previous.shelfColumns
+            } else {
+                // The wrap and shelf width whose canvas is nearest the aspect asked for, then the smaller.
+                let tallest = max(1, slotOf.values.flatMap { $0.values }.max().map { $0 + 1 } ?? 1)
+                var wraps: [Int] = [], r = 2
+                while r < tallest { wraps.append(r); r = max(r + 1, r * 5 / 4) }
+                wraps.append(max(tallest, 2))
+                var best = (score: Double.infinity, wrap: wraps[0], shelf: 1)
+                for r in wraps {
+                    let d = dims(r).map { (width: $0.width == 0 ? 1 : $0.width, rows: $0.rows) }
+                    let widest = d.map(\.width).max() ?? 1, total = d.map(\.width).reduce(0, +)
+                    var shelves = Set<Int>([widest, total])
+                    var w = Double(widest)
+                    while w < Double(total) { shelves.insert(Int(w.rounded())); w *= 1.15 }
+                    for sh in shelves.sorted() {
+                        let packed = pack(d, shelf: sh), size = points(cols: packed.cols, rows: packed.rows)
+                        let score = abs(log(Double(size.width / size.height) / Double(aspect))) + 0.25 * log(Double(size.width * size.height) / 1e6)
+                        if score < best.score { best = (score, r, sh) }
                     }
                 }
+                wrap = best.wrap
+                shelf = best.shelf
+            }
+
+            let sized = dims(wrap)
+            let packed = pack(sized.map { (width: $0.width == 0 ? 1 : $0.width, rows: $0.rows) }, shelf: shelf)
+            var frames: [String: CGRect] = [:]
+            var groups: [Group] = []
+            for (n, g) in order.enumerated() {
+                let band = bands[g], dim = sized[n], origin = packed.at[n]
+                let isCollapsed = collapsed.contains(band.id)
+                let slot = slotOf[g] ?? [:]
+                var offsets: [Int] = []
+                var run = 0
+                for w in dim.spans { offsets.append(run); run += w }
+                for i in band.nodes where !isCollapsed {
+                    let s = slot[i] ?? 0, d = nodes[i].depth - band.minDepth
+                    frames[nodes[i].key] = CGRect(x: metrics.pad + CGFloat(origin.col + offsets[d] + s / wrap) * metrics.columnPitch,
+                                                  y: metrics.pad + CGFloat(origin.row + s % wrap) * metrics.rowPitch,
+                                                  width: metrics.cardWidth, height: metrics.cardHeight)
+                }
                 let ordered = band.nodes.sorted { (nodes[$0].depth, slot[$0] ?? 0, nodes[$0].key) < (nodes[$1].depth, slot[$1] ?? 0, nodes[$1].key) }
-                let left = metrics.pad + CGFloat(band.minDepth) * metrics.columnPitch
-                let right = metrics.pad + CGFloat(band.maxDepth) * metrics.columnPitch + metrics.cardWidth
-                let top = metrics.pad + CGFloat(start) * metrics.rowPitch
+                let left = metrics.pad + CGFloat(origin.col) * metrics.columnPitch, top = metrics.pad + CGFloat(origin.row) * metrics.rowPitch
                 let frame = isCollapsed
                     ? CGRect(x: left, y: top, width: metrics.cardWidth, height: metrics.cardHeight)
-                    : CGRect(x: left - metrics.inset, y: top - metrics.inset, width: right - left + 2 * metrics.inset,
-                             height: CGFloat(rows - 1) * metrics.rowPitch + metrics.cardHeight + 2 * metrics.inset)
+                    : CGRect(x: left - metrics.inset, y: top - metrics.inset, width: CGFloat(dim.width - 1) * metrics.columnPitch + metrics.cardWidth + 2 * metrics.inset,
+                             height: CGFloat(dim.rows - 1) * metrics.rowPitch + metrics.cardHeight + 2 * metrics.inset)
                 groups.append(Group(id: band.id, title: band.title, frame: frame, members: ordered.map { nodes[$0].key }, minDepth: band.minDepth,
-                                    maxDepth: band.maxDepth, collapsed: isCollapsed, startRow: start, rows: rows))
-                if let prev { shift = start - prev.startRow + rows - prev.rows }
-                cursor = start + rows
+                                    maxDepth: band.maxDepth, collapsed: isCollapsed, startRow: origin.row, rows: dim.rows, col: origin.col, columns: dim.spans))
             }
-            let columns = deepest + 1
-            let size = CGSize(width: metrics.pad * 2 + CGFloat(columns) * metrics.cardWidth + CGFloat(columns - 1) * metrics.gapX,
-                              height: metrics.pad * 2 + CGFloat(max(cursor, 1)) * metrics.cardHeight + CGFloat(max(cursor, 1) - 1) * metrics.gapY)
-            return MapLayout(metrics: metrics, frames: frames, groups: groups, size: size)
+            return MapLayout(metrics: metrics, frames: frames, groups: groups, size: points(cols: packed.cols, rows: packed.rows), wrapRows: wrap, shelfColumns: shelf)
         }
     }
 }
