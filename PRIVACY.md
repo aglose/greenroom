@@ -6,7 +6,8 @@
 
 An APK you open is read, translated and run on your Mac by the bundled engine. Greenroom does not send, to us or to
 anyone, an APK or anything derived from one: its file name or path, package name, classes, resources, screens,
-recordings, logs, or the network traffic it makes.
+recordings, logs, or the network traffic it makes. The one exception is yours to make: a repository's screen maps,
+pushed to that repository's own git remote when you turn on "Share screen maps through git" (below).
 
 ## What Greenroom itself sends
 
@@ -107,6 +108,24 @@ running on this Mac, as it does when you type it; Greenroom opens none of T3 Cod
 row runs `t3 app <folder>`. Thread titles, statuses and pull request links are shown in the window and go nowhere
 else. With the switch off, `t3` is never run.
 
+## Sharing screen maps through git
+
+Each walk of a clean commit leaves a screen map on this Mac: the screens it reached, their captures (pictures of the
+app's screens), their texts and routes. If you turn on "Share Screen Maps Through Git" for a repository (the session
+row's menu; it is off until you do), Greenroom stores each walk's map in that repository under `refs/greenroom/maps`
+and pushes it to `origin`, so teammates see a pull request's map without walking it. **Captures of the app's screens
+are uploaded to your git remote**, with `git` and your own credentials for it, as a push of yours would be; whoever
+can read that remote can read them. Greenroom also fetches `refs/greenroom/maps/*` from `origin` (at most every ten
+minutes per repository, and before a walk looks for the map to compare with) and keeps the maps it finds on this Mac.
+Nothing goes anywhere but that repository's `origin`; no branch, tag or file of yours is touched, and pushes are never
+forced.
+
+A map walked on your signed-in data ("Walk with My Signed-In Data") can show your account. It is written in the
+repository on this Mac but not pushed, unless you also turn on "Also Share Maps Walked on Signed-In Data".
+
+With sharing off, no ref is written, nothing is fetched or pushed, and maps make no connection at all. A failure to
+push or fetch is said in the row's detail and never stops a walk.
+
 ## What stays on your Mac
 
 `~/Library/Application Support/Greenroom`, readable only by your user: the engine's caches, the data of the apps you
@@ -132,6 +151,8 @@ connections with any network monitor: with no APK running and no update check un
 CI checks it on every change: `scripts/network-check.sh` captures every packet leaving the Mac, tagged with the
 process that sent it (or asked for the DNS lookup), while the app launches the engine, trains its startup cache,
 streams a simulator, serves an agent and shows every pane, with updates not yet agreed to, and fails if one came from
-Greenroom or its engine. You can run it yourself (`sudo -v && scripts/network-check.sh`).
+Greenroom or its engine. You can run it yourself (`sudo -v && scripts/network-check.sh`). It starts from an empty
+state folder, so no repository is added and map sharing is off, as it is for everyone until turned on; the git it
+would start for sharing counts as Greenroom's if it ever ran.
 
 `scripts/reports-check.sh` shows every kind of report and checks what it holds.

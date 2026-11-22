@@ -96,6 +96,19 @@ final class MapStore {
         return MapSnapshot.Deps(classes: (d["classes"] as? [String]) ?? [], sources: (d["sources"] as? [String]) ?? [], resources: (d["resources"] as? [String]) ?? [])
     }
 
+    /// Keeps a capture given as bytes (a map fetched through git), under the hash of those bytes. Nil when `expected` is
+    /// given and the bytes do not have it, or it could not be written.
+    @discardableResult
+    func importBlob(_ data: Data, expected: String? = nil) -> String? {
+        let hash = MapJSON.sha256(data)
+        if let expected, expected != hash { return nil }
+        lock.lock(); defer { lock.unlock() }
+        let dest = blobFile(hash)
+        if fm.fileExists(atPath: dest.path) { return hash }
+        makeFolder(dest.deletingLastPathComponent())
+        return (try? data.write(to: dest, options: .atomic)) != nil ? hash : nil
+    }
+
     // MARK: Seed
 
     /// Writes a stored snapshot back out as a walk's folder, in the shape `crawl.py` writes and reads (`--seed`):
