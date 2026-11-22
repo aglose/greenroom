@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recipesCheckIfAsked()
         evidenceCheckIfAsked()
         changesCheckIfAsked()
+        historyLiveIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()

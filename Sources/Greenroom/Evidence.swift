@@ -124,6 +124,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         /// A comparison's own start (a deep link) and engine options for the base's launches (a check's changed build).
         var start: String?
         var baseOption = ""
+        /// How a walk was made, for the snapshot it files (set when it starts).
+        var profile: MapProfile?
         /// Where it is made and where it ends up, fixed when the job is made (the store may change meanwhile).
         let part: URL
         let final: URL
@@ -131,6 +133,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
             self.owner = owner; self.build = build; self.kind = kind; self.part = part; self.final = final
         }
         var isChanges: Bool { if case .changes = kind { return true } else { return false } }
+        /// A walk a comparison waits for, or the comparison itself: its progress goes to its waiters.
+        var forwardsProgress: Bool { isChanges || owner.hasPrefix("map:") }
     }
 
     override init() {
@@ -248,6 +252,71 @@ final class Evidence: NSObject, NSMenuItemValidation {
         if let job = current, job.owner == owner { cancel(job) }
     }
 
+    // MARK: Map history
+
+    /// Snapshots being filed, by build key.
+    private var filing: [String: Task<Void, Never>] = [:]
+
+    /// The profile of the walks a comparison makes (and so of the snapshots it files): the queue's budget, light captures,
+    /// no signed-in data.
+    func changesProfile(start: String? = nil) -> MapProfile {
+        Self.profile(depth: budget.depth, seconds: budget.seconds, appearances: ["light"], start: start, signedIn: false, offline: false)
+    }
+
+    static func profile(depth: Int, seconds: Int, appearances: [String], start: String?, signedIn: Bool, offline: Bool) -> MapProfile {
+        MapProfile(depth: depth, seconds: seconds, starts: (start?.isEmpty == false) ? [start!] : [], combos: appearances,
+                   signIn: signedIn ? "session-data" : nil, offline: offline)
+    }
+
+    /// A finished walk of a build that has a clean commit is filed in the history store, off the main thread.
+    private func file(_ job: Job, folder: URL) {
+        guard let profile = job.profile, History.fileable(job.build) else { return }
+        let build = job.build, root = store.root, engine = Engine.shared.version
+        let all = controller?.workspaces ?? []
+        let own = controller?.sessions.first { $0.worktree.path == job.owner }?.workspace.path
+        let candidates = own.map { p in all.filter { $0.root.path == p } } ?? all
+        let key = build.key
+        filing[key] = Task { @MainActor [weak self] in
+            await Task.detached { await History.file(walk: folder, build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine) }.value
+            self?.filing[key] = nil
+        }
+    }
+
+    /// Waits for the snapshot of this build's walk to be filed, when one is being.
+    func awaitFiling(_ build: Build) async {
+        if let t = filing[build.key] { await t.value }
+    }
+
+    /// Walks only `head` (the same budgets), for a comparison whose base is already in the history; the walk files its
+    /// snapshot. Cached: a build that has its map is answered at once. Callers asking for the same build share the run.
+    @discardableResult
+    func walkHead(_ head: Build, progress: ((CrawlRun.Event) -> Void)? = nil, completion: @escaping (Result<ChangesResult, Failure>) -> Void) -> Token {
+        let token = Token()
+        let final = mapFolder(for: head.key)
+        let owner = "map:\(head.key)"
+        if hasCrawl(final), let data = ScreenMapData.read(final) {
+            DispatchQueue.main.async { completion(.success(ChangesResult(folder: final, map: data, summary: Self.summary(of: final)))) }
+            return token
+        }
+        let job: Job
+        if let running = current, running.owner == owner, !running.cancelled { job = running }
+        else if let queued = queue.first(where: { $0.owner == owner }) { job = queued }
+        else {
+            job = walkJob(owner: owner, build: head, slot: nil)
+            queue.append(job)
+        }
+        let waiter = Job.Waiter(completion: completion, progress: progress)
+        job.waiters.append(waiter)
+        token.cancelAction = { [weak self, weak job] in
+            guard let self, let job, let i = job.waiters.firstIndex(where: { $0.id == waiter.id }) else { return }
+            job.waiters.remove(at: i).completion(.failure(Failure(message: "cancelled")))
+            guard job.waiters.isEmpty else { return }
+            if self.current === job { self.cancel(job) } else { self.queue.removeAll { $0 === job } }
+        }
+        pump()
+        return token
+    }
+
     // MARK: Comparisons
 
     /// Walks `head` against `base` (`crawl.py HEAD --base BASE`, the same budgets) and tells the result, on the main
@@ -313,6 +382,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
             if !next.isChanges, !next.force, hasCrawl(next.final), let data = ScreenMapData.read(next.final) {
                 queue.removeFirst()
                 if var e = entries[next.owner], e.key == next.build.key { e.status = Self.done(data); entries[next.owner] = e; onChange?() }
+                let waiters = next.waiters
+                next.waiters.removeAll()
+                for w in waiters { w.completion(.success(ChangesResult(folder: next.final, map: data, summary: Self.summary(of: next.final)))) }
                 continue
             }
             if shouldPause?(next.owner) == true {
@@ -341,6 +413,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         s.appearances = ["light"]
         s.background = true   // evidence walks yield to everything the person is doing
         if case .changes(let base) = job.kind { s.base = base.apk; s.start = job.start; s.baseOption = job.baseOption }
+        else if job.owner.hasPrefix("map:") { s.start = job.start }
         // The clone, and the rest of the set-up, off the main thread (a copy fallback of a big slot takes a while).
         let root = dataRoot
         var slotName: String?
@@ -380,6 +453,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
                 guard let self else { return }
                 job.clone = clone
                 job.note = note
+                // A snapshot's profile is the walk's own settings: signed-in only when the data was really copied.
+                job.profile = Self.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start,
+                                           signedIn: settings.keepData && slotName != nil, offline: settings.offline)
                 if job.cancelled { self.finish(job, .cancelled); return }
                 let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
                 job.run = run
@@ -397,7 +473,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     }
 
     private func event(_ e: CrawlRun.Event, _ job: Job) {
-        if job.isChanges { job.waiters.forEach { $0.progress?(e) }; return }
+        if job.forwardsProgress { job.waiters.forEach { $0.progress?(e) }; return }
         guard var entry = entries[job.owner], entry.key == job.build.key else { return }
         switch e {
         case .level(let depth, _, let known): entry.status = .walking(depth: depth, known: known)
@@ -437,6 +513,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             if (try? fm.moveItem(at: part, to: final)) != nil, let data = ScreenMapData.read(final) {
                 status = Self.done(data)
                 result = .success(ChangesResult(folder: final, map: data, summary: Self.summary(of: final)))
+                if !job.isChanges { file(job, folder: final) }
             } else {
                 status = .failed("The walk finished but its map could not be read.")
                 result = .failure(Failure(message: "the walk's map could not be read"))
