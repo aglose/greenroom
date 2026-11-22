@@ -111,6 +111,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private let basePopup = NSPopUpButton()
     private let compareButton = GlassButton(symbol: "play.fill", title: "Compare", label: "Walk both builds and compare them", style: .accent, target: nil, action: nil)
     private let copyButton = GlassButton(symbol: "doc.on.doc", title: "Copy summary", label: "Copy the summary as Markdown, for a pull request", style: .well, target: nil, action: nil)
+    private let exportButton = GlassButton(symbol: "square.and.arrow.up", title: "Export…", label: "Export the map as a folder with an index.html anyone can open in a browser", style: .well, target: nil, action: nil)
     private let reportButton = GlassButton(symbol: "safari", title: "Open report", label: "Open the crawler's report of this pair", style: .well, target: nil, action: nil)
     private let tabControl = NSSegmentedControl(labels: Tab.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
@@ -222,9 +223,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         compareButton.target = self; compareButton.action = #selector(comparePressed)
         copyButton.target = self; copyButton.action = #selector(copySummary)
         reportButton.target = self; reportButton.action = #selector(openReport)
+        exportButton.target = self; exportButton.action = #selector(exportPressed)
         let close = GlassButton(symbol: "xmark", label: "Close (Esc)", target: self, action: #selector(closePressed))
         let hs = NSView(); hs.setContentHuggingPriority(.init(1), for: .horizontal)
-        let header = NSStackView(views: [title, headLabel, againstLabel, basePopup, hs, compareButton, copyButton, reportButton, close])
+        let header = NSStackView(views: [title, headLabel, againstLabel, basePopup, hs, compareButton, copyButton, exportButton, reportButton, close])
         header.spacing = 10
 
         tabControl.controlSize = .small
@@ -751,6 +753,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         else { headLabel.stringValue = "\(s.branch ?? s.title) \(s.shortHead)" + (controller?.hasBuild(s) == false ? " (no build)" : "") }
         let running = run?.isActive == true
         copyButton.isHidden = changeSet == nil
+        exportButton.isHidden = changeSet == nil
+        exportButton.isEnabled = mapHost.canExport && run?.isActive != true
         reportButton.isHidden = changeSet?.reportURL == nil
         compareButton.isEnabled = true
         basePopup.isEnabled = !running
@@ -772,6 +776,35 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         onSay?("Summary copied: paste it into a pull request", false)
+    }
+
+    // MARK: Export
+
+    private var exportTitle: String { "Changes of " + (session?.branch ?? session?.title ?? "this build") }
+    private var exportNames: (base: String, head: String) { (baseName ?? "base", session?.branch ?? session?.title ?? "this build") }
+
+    @objc private func exportPressed() {
+        guard !(run?.isActive ?? false) else { return }
+        mapHost.exportWithPanel(title: exportTitle, names: exportNames, suggested: "map-export") { [weak self] r in self?.exported(r) }
+    }
+
+    /// For checks: exports to `folder` with no panel.
+    func exportNow(to folder: URL, done: @escaping (Result<URL, Error>) -> Void) {
+        mapHost.export(to: folder, title: exportTitle, names: exportNames) { [weak self] r in self?.exported(r, reveal: false); done(r) }
+    }
+
+    private(set) var exportStatus = ""
+
+    private func exported(_ r: Result<URL, Error>, reveal: Bool = true) {
+        switch r {
+        case .success(let index):
+            exportStatus = "Exported to \(index.deletingLastPathComponent().path)"
+            onSay?("Map exported", false)
+            if reveal { NSWorkspace.shared.activateFileViewerSelecting([index]) }
+        case .failure(let e):
+            exportStatus = "The export failed: \(e.localizedDescription)"
+            onSay?("The export failed", true)
+        }
     }
 
     @objc private func openReport() {
@@ -1005,6 +1038,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             let src = await Task.detached { set.mapSource ?? History.pairSource(folder: set.folder) }.value
             guard let self, self.mapGeneration == mine, let src else { return }
             self.mapHost.show(src)
+            self.refreshHeader()
             if self.tab == .map { self.mapHost.settle() }
         }
     }

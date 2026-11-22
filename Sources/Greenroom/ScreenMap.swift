@@ -55,6 +55,7 @@ final class ScreenMap: NSView {
     private let offline = NSButton(checkboxWithTitle: "Offline", target: nil, action: nil)
     private let startField = NSTextField()
     private let signInPopup = NSPopUpButton()
+    private let exportButton = GlassButton(symbol: "square.and.arrow.up", title: "Export…", label: "Export the map as a folder with an index.html anyone can open in a browser", style: .well, target: nil, action: nil)
     private let walkButton = GlassButton(symbol: "point.3.connected.trianglepath.dotted", title: "Walk the app", label: "Walk every screen the app has", style: .accent, target: nil, action: nil)
     private let summary = NSTextField(labelWithString: "")
     private let crashChip = GlassButton(symbol: "exclamationmark.triangle.fill", title: "", label: "Show where it crashed", style: .record, target: nil, action: nil)
@@ -125,7 +126,9 @@ final class ScreenMap: NSView {
         let close = GlassButton(symbol: "xmark", label: "Close (Esc)", target: self, action: #selector(closePressed))
         walkButton.target = self; walkButton.action = #selector(walkPressed)
         let hs = NSView(); hs.setContentHuggingPriority(.init(1), for: .horizontal)
-        let header = NSStackView(views: [title, appLabel, choose, hs, walkButton, close])
+        exportButton.target = self; exportButton.action = #selector(exportPressed)
+        exportButton.isEnabled = false
+        let header = NSStackView(views: [title, appLabel, choose, hs, exportButton, walkButton, close])
         header.spacing = 10
 
         popup(depthPopup, ["1 tap deep", "2 taps deep", "3 taps deep", "4 taps deep", "6 taps deep"], key: "mapDepth", default: 2)
@@ -289,6 +292,8 @@ final class ScreenMap: NSView {
 
     /// The status line, for checks.
     var statusText: String { summary.stringValue }
+    /// Whether Export… is enabled, for checks.
+    var canExportNow: Bool { exportButton.isEnabled }
     /// The `[head] compared with [base]` line and the strip, for checks.
     var compareText: String { compareLabel.stringValue }
     var timelineControl: MapTimeline { timeline }
@@ -357,6 +362,7 @@ final class ScreenMap: NSView {
         walkButton.title = running ? "Stop" : (data == nil ? "Walk the app" : "Walk again")
         walkButton.style = running ? .record : .accent
         walkButton.isEnabled = running || (effectiveAPK != nil && pythonURL != nil)
+        exportButton.isEnabled = !running && host.canExport
         for c in [depthPopup, timePopup, capturePopup, signInPopup, offline, startField] as [NSControl] { c.isEnabled = !running }
         if pythonURL == nil, !running {
             setSummary("The map needs Python 3, and this Mac has none. Install the command line tools (xcode-select --install in Terminal), then reopen this.", problem: true)
@@ -594,6 +600,38 @@ final class ScreenMap: NSView {
         if isOpen { DispatchQueue.main.async { self.host.settle() } }
         host.select(made.source.head.screens.first?.lineage, reveal: false)
         refresh()
+    }
+
+    // MARK: Export
+
+    /// The two names the export's page shows: the walk (or its commit), and the baseline's commit.
+    private var exportNames: (base: String, head: String) {
+        guard let s = host.source else { return ("", "") }
+        return (s.base.map { String($0.commit.prefix(7)) } ?? "", s.head.commit.hasPrefix("walk") ? "this walk" : String(s.head.commit.prefix(7)))
+    }
+
+    @objc private func exportPressed() {
+        guard !isWalking else { return }
+        let title = (data?.apkName.isEmpty == false ? data!.apkName : effectiveAPK?.lastPathComponent) ?? "App"
+        host.exportWithPanel(title: "Screen map of " + title, names: exportNames, suggested: "map-export") { [weak self] r in self?.exported(r) }
+    }
+
+    /// For checks: exports to `folder` with no panel.
+    func exportNow(to folder: URL, done: @escaping (Result<URL, Error>) -> Void) {
+        let title = (data?.apkName.isEmpty == false ? data!.apkName : effectiveAPK?.lastPathComponent) ?? "App"
+        host.export(to: folder, title: "Screen map of " + title, names: exportNames) { [weak self] r in self?.exported(r, reveal: false); done(r) }
+    }
+
+    private func exported(_ r: Result<URL, Error>, reveal: Bool = true) {
+        switch r {
+        case .success(let index):
+            setSummary("Exported to \(index.deletingLastPathComponent().path)")
+            onSay?("Map exported", false)
+            if reveal { NSWorkspace.shared.activateFileViewerSelecting([index]) }
+        case .failure(let e):
+            setSummary("The export failed: \(e.localizedDescription)", problem: true)
+            onSay?("The export failed", true)
+        }
     }
 
     /// `[head] compared with [base]`, and how far behind the baseline is.

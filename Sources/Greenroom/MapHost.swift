@@ -211,6 +211,39 @@ final class MapHost: NSView {
         navigator.surface.update()
     }
 
+    // MARK: Export
+
+    /// Whether there is a map to export.
+    var canExport: Bool { source != nil }
+
+    /// Writes the HTML export (MapExport) of the map on screen into `folder`: with a comparison, base, head and difference;
+    /// without, the single map. Off the main thread; `done` is called on it with `index.html`, or the error.
+    func export(to folder: URL, title: String, names: (base: String, head: String), done: @escaping (Result<URL, Error>) -> Void) {
+        guard let s = source else { done(.failure(CocoaError(.fileNoSuchFile))); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { () -> URL in
+                try MapExport.write(head: s.head, base: s.base, diff: s.diff, blob: s.blobURL, to: folder, title: title, names: names)
+                return folder.appendingPathComponent("index.html")
+            }
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+
+    /// Asks where (a folder, which the save panel makes) and exports there; a cancelled panel calls nothing.
+    func exportWithPanel(title: String, names: (base: String, head: String), suggested: String, done: @escaping (Result<URL, Error>) -> Void) {
+        guard canExport, let window else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export the map"
+        panel.message = "Makes a folder with an index.html anyone can open in a browser: the map, changes first, with each changed screen's base, head and difference. No Greenroom needed."
+        panel.prompt = "Export"
+        panel.nameFieldStringValue = suggested
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { [weak self] r in
+            guard r == .OK, let url = panel.url else { return }
+            self?.export(to: url, title: title, names: names, done: done)
+        }
+    }
+
     override var acceptsFirstResponder: Bool { true }
     override func becomeFirstResponder() -> Bool { window?.makeFirstResponder(navigator.surface) ?? false }
 }

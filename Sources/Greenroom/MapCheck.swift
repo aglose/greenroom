@@ -69,10 +69,21 @@ extension AppDelegate {
                 let moved = src.head.screens.compactMap { s in map.host.navigator.surface.frame(of: s.lineage).map { (s.lineage, $0) } }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
                     captureWindow(to: dir.appendingPathComponent("5-diff.png"))
+                    // Export, with no panel: index.html and the data, with the comparison.
+                    let out = dir.appendingPathComponent("export", isDirectory: true)
+                    expect(map.canExportNow, "Export is enabled with a map and no walk running")
+                    var exportDone = false
+                    map.exportNow(to: out) { r in
+                        defer { exportDone = true }
+                        let fm = FileManager.default
+                        let ok = (try? r.get()) != nil && fm.fileExists(atPath: out.appendingPathComponent("index.html").path) && fm.fileExists(atPath: out.appendingPathComponent(MapExport.dataName).path)
+                        expect(ok, "Export writes index.html and \(MapExport.dataName) for the comparison")
+                        expect(map.statusText.hasPrefix("Exported to"), "and the status line says so: \(map.statusText.suffix(40))")
+                    }
                     strip.set(base: 1)
                     let wait = Date()
                     Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { t in
-                        guard (!map.host.navigator.busy && map.host.source?.base?.commit.hasPrefix("2222222") == true) || Date().timeIntervalSince(wait) > 20 else { return }
+                        guard (!map.host.navigator.busy && exportDone && map.host.source?.base?.commit.hasPrefix("2222222") == true) || Date().timeIntervalSince(wait) > 20 else { return }
                         t.invalidate()
                         expect(map.host.source?.diff?.counts.differing == 0, "moving the base handle to the head re-diffs: nothing differs")
                         // The screens the base alone had are gone from the view, so a card that hung from one slides to the left; it keeps its row.
