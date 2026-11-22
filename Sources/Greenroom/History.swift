@@ -91,17 +91,189 @@ enum History {
     /// Imports a walk's folder as the snapshot of `build`'s commit, pairs it against the baseline and keeps it. A dirty build
     /// or one with no commit files nothing, nor does a commit that has a snapshot of this profile. Off the main thread.
     @discardableResult
-    static func file(walk: URL, build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String) async -> Bool {
-        guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return false }
-        return await fileWalk(walk, place: p, profile: profile, engine: engine)
+    static func file(walk: URL, build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String, seed: MapSnapshot? = nil) async -> Bool {
+        await filed(walk: walk, build: build, profile: profile, candidates: candidates, stateRoot: stateRoot, engine: engine, seed: seed) != nil
     }
 
-    private static func fileWalk(_ walk: URL, place p: Place, profile: MapProfile, engine: String) async -> Bool {
-        if p.store.snapshot(profile: profile.id, commit: p.commit) != nil { return true }
-        guard let imported = p.store.importWalk(walk, commit: p.commit, tree: p.tree, profile: profile, engine: engine, walked: Date()) else { return false }
+    /// What filing a walk did (package I2): the snapshot kept, and when it was a full walk compared with a quick one,
+    /// that quick walk's commit and the screens it carried that turned out to differ.
+    struct Filed {
+        var snapshot: MapSnapshot
+        var audit: (quick: String, misses: [MapImpact.Miss])?
+    }
+
+    /// `file`, saying what it did. Nil when nothing could be filed. `seed`: the snapshot a seeded walk started from.
+    static func filed(walk: URL, build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String, seed: MapSnapshot? = nil) async -> Filed? {
+        guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return nil }
+        return await fileWalk(walk, place: p, profile: profile, engine: engine, seed: seed)
+    }
+
+    /// A commit's snapshot is kept once, except that a full walk replaces a quick one of the same commit (it is the more
+    /// truthful of the two), after being compared with it. A full walk with no quick one of its commit is compared with
+    /// the nearest earlier snapshot when that one was quick.
+    private static func fileWalk(_ walk: URL, place p: Place, profile: MapProfile, engine: String, seed: MapSnapshot? = nil) async -> Filed? {
+        let existing = p.store.snapshot(profile: profile.id, commit: p.commit)
+        if let existing, !existing.screens.contains(where: { $0.carriedFrom != nil }) { return Filed(snapshot: existing) }
+        guard let imported = p.store.importWalk(walk, commit: p.commit, tree: p.tree, profile: profile, engine: engine, walked: Date(), seed: seed) else {
+            return existing.map { Filed(snapshot: $0) }
+        }
+        let isFull = !imported.screens.contains { $0.carriedFrom != nil }
+        if let existing, !(isFull && existing.screens.contains { $0.carriedFrom != nil }) { return Filed(snapshot: existing) }
         let base = await baseline(commit: p.commit, mainRef: p.workspace.baseRef, in: p.workspace.root, store: p.store, profile: profile.id)
         let (paired, _) = MapPairing.pair(head: imported, base: base?.snapshot)
-        return p.store.save(paired)
+        guard p.store.save(paired) else { return nil }
+        var filed = Filed(snapshot: paired)
+        if isFull { filed.audit = await audit(full: paired, quick: existing, place: p) }
+        return filed
+    }
+
+    // MARK: Walking only what changed (I1, I2)
+
+    /// How a walk is to be made: in full (`seed` nil), or seeded from the baseline with only some screens walked again.
+    struct WalkPlan {
+        /// The baseline written out as a walk's folder, and the ids to walk again (one per line).
+        var seed: URL?
+        var onlyFile: URL?
+        var seedSnapshot: MapSnapshot?
+        var ids: [String] = []
+        /// Screens in the seed, and files changed since its commit.
+        var total = 0
+        var files = 0
+        /// Why the walk is full, in words; nil for a full walk the engine gives no choice about (as before I1).
+        var reason: String?
+        var recordDeps = false
+        var isFull: Bool { seed == nil }
+    }
+
+    /// Decides how to walk `build`: seeded when the engine can, the build has a commit with a stored baseline that
+    /// recorded its dependencies, it is not the tenth walk of main, and `MapImpact` says only some screens. The seed's
+    /// folder and only-file are written into `folder`. Off the main thread.
+    static func plan(build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String, support: CrawlRun.Support,
+                     forceFull: Bool, folder: URL) async -> WalkPlan {
+        var plan = WalkPlan(recordDeps: support.recordDeps)
+        guard support.seed, support.recordDeps else { return plan }
+        guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return plan }
+        if forceFull { plan.reason = "asked to walk everything again"; return plan }
+        // Every tenth walk of a commit on main is full, whatever the impact says.
+        let ref = p.workspace.baseRef
+        var onMain = false
+        for r in [ref, ref.hasPrefix("origin/") ? String(ref.dropFirst(7)) : nil].compactMap({ $0 }) where !onMain {
+            onMain = await Git.run(["merge-base", "--is-ancestor", p.commit, r], in: p.workspace.root) != nil
+        }
+        if onMain {
+            let n = p.store.updateLedger { l -> Int in l.mainWalks[profile.id, default: 0] += 1; return l.mainWalks[profile.id]! }
+            if n % MapImpact.fullEvery == 0 { plan.reason = "every \(MapImpact.fullEvery)th walk of main is a full walk"; return plan }
+        }
+        guard let base = await baseline(commit: p.commit, mainRef: ref, in: p.workspace.root, store: p.store, profile: profile.id) else {
+            plan.reason = "no earlier walk to start from"; return plan
+        }
+        if base.snapshot.commit == p.commit { plan.reason = "this commit was walked before, so it is walked again in full"; return plan }
+        guard let diff = await MapImpact.changes(base: base.snapshot.commit, head: p.commit, in: p.workspace.root) else {
+            plan.reason = "git could not list what changed since the last walk"; return plan
+        }
+        plan.files = diff.changes.count
+        let input = MapImpact.Input(baseline: base.snapshot, changes: diff.changes, valueDiff: diff.valueDiff, engine: engine, profile: profile,
+                                    fullWalkPatterns: p.store.ledger.patterns)
+        switch MapImpact.decide(input) {
+        case .full(let why): plan.reason = why
+        case .screens(let ids, _):
+            let seed = folder.appendingPathComponent("seed", isDirectory: true), only = folder.appendingPathComponent("only.txt")
+            guard p.store.writeSeed(base.snapshot, to: seed),
+                  (try? Data((ids.joined(separator: "\n") + (ids.isEmpty ? "" : "\n")).utf8).write(to: only, options: .atomic)) != nil else {
+                try? FileManager.default.removeItem(at: seed)
+                plan.reason = "the last walk's captures are not all kept"; return plan
+            }
+            plan.seed = seed
+            plan.onlyFile = only
+            plan.seedSnapshot = base.snapshot
+            plan.ids = ids
+            plan.total = base.snapshot.screens.count
+        }
+        return plan
+    }
+
+    /// The files changed from `from` to `to` that could change what the app shows (none when `from` is not a commit).
+    private static func relevantFiles(from: String, to: String, in dir: URL) async -> [String] {
+        guard from != to, from != "unknown", let d = await MapImpact.changes(base: from, head: to, in: dir) else { return [] }
+        return d.changes.map(\.path).filter { MapImpact.kind(of: $0) != .ignored }
+    }
+
+    private static func misses(_ found: [(screen: MapSnapshot.Screen, why: String)], quick: MapSnapshot, foundBy: String, place p: Place) async -> [MapImpact.Miss] {
+        var out: [MapImpact.Miss] = []
+        var filesFrom: [String: [String]] = [:]
+        let now = ISO8601DateFormatter().string(from: Date())
+        for (s, why) in found {
+            let from = s.carriedFrom ?? "unknown"
+            if filesFrom[from] == nil { filesFrom[from] = await relevantFiles(from: from, to: quick.commit, in: p.workspace.root) }
+            out.append(MapImpact.Miss(screen: s.id, title: s.title.isEmpty ? s.activity : s.title, why: why, quickCommit: quick.commit, carriedFrom: from,
+                                      foundBy: foundBy, files: filesFrom[from] ?? [], found: now))
+        }
+        return out
+    }
+
+    /// I2: a full walk compared with what a quick walk carried: `quick` (the same commit's), else the nearest earlier
+    /// snapshot when it is quick. A difference the commits in between explain (the impact of those commits selects the
+    /// screen, or would walk everything) is not a miss. Misses go into the workspace's ledger with their files.
+    private static func audit(full: MapSnapshot, quick: MapSnapshot?, place p: Place) async -> (quick: String, misses: [MapImpact.Miss])? {
+        var q = quick
+        if q == nil {
+            let have = Set(p.store.commits(profile: full.profile.id))
+            if let list = await Git.run(["rev-list", "-n", "500", p.commit], in: p.workspace.root) {
+                for (i, c) in list.split(whereSeparator: \.isNewline).enumerated() where i > 0 && have.contains(String(c)) {
+                    q = p.store.snapshot(profile: full.profile.id, commit: String(c))
+                    break
+                }
+            }
+        }
+        guard let q, q.screens.contains(where: { $0.carriedFrom != nil }) else { return nil }
+        var found = MapImpact.differing(full: full, quick: q)
+        if q.commit != full.commit {
+            guard let d = await MapImpact.changes(base: q.commit, head: full.commit, in: p.workspace.root) else { return nil }
+            switch MapImpact.decide(MapImpact.Input(baseline: q, changes: d.changes, valueDiff: d.valueDiff, engine: full.engine, profile: full.profile)) {
+            case .full: return nil      // everything may have changed since: nothing to tell
+            case .screens(let ids, _): found.removeAll { ids.contains($0.screen.id) }
+            }
+        }
+        let m = await misses(found, quick: q, foundBy: full.commit, place: p)
+        p.store.record(misses: m)
+        return (q.commit, m)
+    }
+
+    /// "Verify carried screens": the snapshot's carried screens, to be reached again and compared (no control tried).
+    /// Writes the seed folder and the only-file into `folder`; nil when nothing is carried or the seed cannot be written.
+    static func verifyPlan(build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, folder: URL) async -> WalkPlan? {
+        guard let p = await place(build, candidates: candidates, stateRoot: stateRoot),
+              let snap = p.store.snapshot(profile: profile.id, commit: p.commit) else { return nil }
+        let ids = snap.screens.filter { $0.carriedFrom != nil }.map(\.id)
+        guard !ids.isEmpty else { return nil }
+        let seed = folder.appendingPathComponent("seed", isDirectory: true), only = folder.appendingPathComponent("only.txt")
+        guard p.store.writeSeed(snap, to: seed), (try? Data((ids.joined(separator: "\n") + "\n").utf8).write(to: only, options: .atomic)) != nil else { return nil }
+        return WalkPlan(seed: seed, onlyFile: only, seedSnapshot: snap, ids: ids, total: snap.screens.count, recordDeps: true)
+    }
+
+    /// The verification walk's result against the snapshot: each carried screen reached again must have its id (its
+    /// structure) and, when both settled, the same captures. Differences are misses, kept in the ledger. Returns how many
+    /// carried screens were reached and compared, and the misses; nil when the walk cannot be read.
+    static func verified(walk: URL, plan: WalkPlan, build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String) async -> (checked: Int, misses: [MapImpact.Miss])? {
+        guard let snap = plan.seedSnapshot, let p = await place(build, candidates: candidates, stateRoot: stateRoot),
+              let again = p.store.importWalk(walk, commit: p.commit, tree: p.tree, profile: profile, engine: engine, walked: Date(), seed: snap) else { return nil }
+        let byID = Dictionary(again.screens.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var found: [(screen: MapSnapshot.Screen, why: String)] = []
+        var checked = 0
+        for s in snap.screens where s.carriedFrom != nil {
+            guard let v = byID[s.id] else {
+                if !again.cutShort { checked += 1; found.append((s, "its structure changed")) }
+                continue
+            }
+            checked += 1
+            let steady = s.settled && v.settled && s.flaky == nil && v.flaky == nil
+            if steady, Set(s.captures.keys).intersection(v.captures.keys).contains(where: { s.captures[$0] != v.captures[$0] }) {
+                found.append((s, "its capture changed"))
+            }
+        }
+        let m = await misses(found, quick: snap, foundBy: "verify", place: p)
+        p.store.record(misses: m)
+        return (checked, m)
     }
 
     enum Side { case head, base }
