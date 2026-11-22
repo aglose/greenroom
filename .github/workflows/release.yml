@@ -67,7 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --draft --title "Greenroom ${GITHUB_REF_NAME#v}" --generate-notes \
-            build/Greenroom-*.dmg build/Greenroom-*.dmg.sha256 build/appcast.xml
+            build/Greenroom-*.dmg build/Greenroom-*.dmg.sha256 build/Greenroom-*.dSYM.zip build/appcast.xml
       - name: Remove the keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true

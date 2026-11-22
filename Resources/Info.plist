@@ -20,6 +20,8 @@
   <key>SUFeedURL</key><string>https://github.com/aglose/greenroom/releases/latest/download/appcast.xml</string>
   <key>SUPublicEDKey</key><string>GSU9x1bVpMXS7mcDMn2jsDlAuytYNrW2WXwcwcoxGso=</string>
   <key>SUEnableSystemProfiling</key><false/>
+  <!-- Opt-in crash reports and daily feature usage counts (Reports.swift, PRIVACY.md). Off unless enabled. -->
+  <key>GreenroomReportsURL</key><string>https://greenroom-reports-426613790001.us-central1.run.app/report</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

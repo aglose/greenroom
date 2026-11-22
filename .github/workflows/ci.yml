@@ -23,5 +23,7 @@ jobs:
         run: scripts/bundle.sh --check
       - name: Disk image
         run: scripts/dmg.sh
+      - name: Reports backend tests
+        run: cd backend/reports && node --test
       - name: No connections of our own (PRIVACY.md)
         run: scripts/network-check.sh
