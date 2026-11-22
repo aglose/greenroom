@@ -20,6 +20,8 @@ if let i = arguments.firstIndex(of: "--map-contract-check") {
 if let i = arguments.firstIndex(of: "--map-store-check"), i + 1 < arguments.count { MapStoreCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --map-pairing-check`: map history's pairing finds the fixtures' lineages (MapPairing).
 if arguments.contains("--map-pairing-check") { MapPairingCheck.run() }
+// `Greenroom --map-layout-check`: the map's layout (MapLayout) on the fixtures.
+if arguments.contains("--map-layout-check") { MapLayoutCheck.run() }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
