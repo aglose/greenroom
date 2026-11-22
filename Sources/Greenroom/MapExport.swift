@@ -267,6 +267,7 @@ h1{font-size:16px;margin:0 0 2px;letter-spacing:.01em}
 .s-added{--c:var(--add)}.s-removed{--c:var(--rem)}.s-modified{--c:var(--mod)}.s-notCompared{--c:var(--nc)}.s-same,.s-plain{--c:var(--same)}
 .dot{background:var(--c)}
 .when{color:var(--mute);font-size:12px;margin:8px 0 0}
+#warns{max-height:min(24vh,220px);overflow:auto}
 .warn{margin:8px 0 0;padding:6px 10px;border-radius:8px;border:1px solid var(--mod);color:var(--ink);font-size:12.5px}
 .warn b{color:var(--mod)}
 .tabs{display:none}
@@ -525,7 +526,9 @@ function draw() {
   });
   if (sel >= 0) { outs[sel].forEach(t => curve(sel, t, C.accent, 1.5, false, true)); ins[sel].forEach(f => curve(f, sel, C.mute, 1.2, false, true)); }
   // screens
-  const pw = S.length ? S[0].w * k : 0, q = matches;
+  // Pictures from 40 px a card; a small map (as many pictures as the cache holds) shows them from 16 px, so it opens
+  // fitted with its pictures instead of as blank cards.
+  const pw = S.length ? S[0].w * k : 0, q = matches, pics = pw >= 40 || (pw >= 16 && N <= 160);
   ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'center';
   for (let i = 0; i < N; i++) {
     const s = S[i]; if (s.x > x1 || s.y > y1 || s.x + s.w < x0 || s.y + s.h < y0 - 20 / k) continue;
@@ -539,7 +542,7 @@ function draw() {
     }
     ctx.globalAlpha = dim ? .28 : s.st === 'removed' ? .75 : 1;
     ctx.fillStyle = C.card; rr(s.x, s.y, s.w, s.h, 8 / k > 6 ? 6 : 8 / k * 1); ctx.fill();
-    if (pw >= 40 && !dim) {
+    if (pics && !dim) {
       const p = cardPath(s), im = p && picture(p);
       if (im) { const pad = 3, r2 = im.width / im.height, bw = s.w - pad * 2, bh = s.h - pad * 2; let dw = bw, dh = bw / r2; if (dh > bh) { dh = bh; dw = bh * r2; } ctx.save(); rr(s.x, s.y, s.w, s.h, 6); ctx.clip(); ctx.drawImage(im, s.x + (s.w - dw) / 2, s.y + (s.h - dh) / 2, dw, dh); ctx.restore(); }
     }
