@@ -7,7 +7,7 @@ argument-hint: "[what to verify]"
 # Verifying a change with Greenroom
 
 Greenroom runs Android APKs in simulators on this Mac, and the person at the Mac sees the same simulators in its
-window. Its tools are this plugin's `greenroom` server (`session`, `build`, `changes`, `launch`, `tap`, `type`,
+window. Its tools are this plugin's `greenroom` server (`session`, `build`, `changes`, `history`, `launch`, `tap`, `type`,
 `check`, `screenshot`, `compare` and more). Use them instead of adb, an emulator or Gradle's install tasks.
 
 What to verify: $ARGUMENTS
@@ -25,11 +25,15 @@ session, with its own build, simulator and app data.
 2. **`build`**: runs the recipe and waits. It answers `built <key> ...`, or the last error lines of the build log:
    fix those and call it again. Skip it only when `session` says the build is `current`.
 3. **`changes`**: the new build against the base, screen by screen. `+ Name (new) [s4]` and `- Name (gone) [s9]` are
-   screens the change added or removed; `~ Name: 4,812 px differ [s3]` is a screen that looks different.
+   screens the change added or removed; `~ Name: 4,812 px differ, 1 route added, 2 texts changed [s3]` is a screen that
+   differs, with why after the colon, and `> Name: "Open Home" now leads to Inbox` is a control that was redirected.
+   When both builds have a stored map the first line says `changes from history` and nothing was walked.
    `screenshot` with `screen: "s3"` and `side: "diff"` (or `head`, `base`) shows where. Screens you did not mean to
    change are the finding. A `not finished: ...` line means the walk of the app stopped early, and
    `? Name (not reached: ...)` is a screen it did not get to: the other lines stand, calling again gives the same
-   answer, so cover the screens you care about yourself in steps 4 to 6.
+   answer, so cover the screens you care about yourself in steps 4 to 6. **`history`** lists the maps stored for earlier
+   commits (what changed at each) and, with `screen`, one screen's lineage; `screenshot` with `screen` and `commit` shows
+   a stored picture.
 4. **`launch`** with no `apk`: the session's simulator, on its newest build, with its data kept.
 5. **`tap`** and **`type`** to reach the screens the change touched.
 6. **`check`**: texts that must be on screen (`visible`) and must not (`absent`), answered `PASS` or

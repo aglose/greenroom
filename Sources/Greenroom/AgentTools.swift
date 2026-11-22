@@ -72,7 +72,7 @@ final class AgentTools {
     /// Tools that wait for builds and walks: they run on their own queue so the others still answer meanwhile.
     static let slow: Set<String> = ["build", "changes"]
 
-    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session", "scripts"]
+    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session", "scripts", "history"]
 
     static let tools: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
@@ -105,10 +105,12 @@ final class AgentTools {
         ("wait_for", "Wait until a text is on screen (or, with gone, no longer is). Answers with what changed.",
          schema(["text": str, "gone": bool, "timeout_ms": int], required: ["text"])),
         ("screenshot", "A picture of the screen, for what the nodes do not show. annotate draws each tappable node's ref on it. "
-            + "With screen (an id from changes) it answers that screen's stored capture instead: side head (default), base, or diff.",
+            + "With screen (an id from changes) it answers that screen's stored capture instead: side head (default), base, or diff. "
+            + "With screen and commit it answers the stored capture of that screen at that commit (see history).",
          schema(["max_size": ["type": "integer", "description": "longest side in pixels (default 1000, 0 for full size)"], "annotate": bool,
-                 "screen": ["type": "string", "description": "a screen id from the last changes answer (worktree sessions only)"],
-                 "side": ["type": "string", "enum": ["head", "base", "diff"]]])),
+                 "screen": ["type": "string", "description": "a screen id from the last changes answer (worktree sessions only), or with commit a screen's title or id"],
+                 "side": ["type": "string", "enum": ["head", "base", "diff"]],
+                 "commit": ["type": "string", "description": "with screen: the stored capture of that screen at this commit (from history)"]])),
         ("compare", "How two simulators' screens differ (two builds, or two devices): - only on the base, + only on the other, > moved; "
             + "and, for screens of one size, the share of pixels that differ. map adds a picture of where.",
          schema(["base": ["type": "string", "description": "simulator id compared against (default: the first running)"],
@@ -121,11 +123,16 @@ final class AgentTools {
             + "(an agent cannot give it); ci never starts a workflow from here.",
          schema(["recipe": ["type": "string", "description": "local, ci, remote or a custom recipe's name (default: the workspace's)"],
                  "timeout_s": ["type": "integer", "description": "how long this call waits, 10-200 s (default 200); the build goes on, and calling build again joins it"]], sim: false)),
-        ("changes", "How this session's newest build differs from a base, as screens: + new, ~ changed (pixels), - gone, then counts, "
-            + "crashes and what the walk did not finish. Walks both builds if this pair has not been compared. Screen ids in [brackets] go to "
-            + "screenshot's screen. An unbuilt base is answered as text saying what would build it; nothing is started.",
-         schema(["base": ["type": "string", "description": "default: the workspace's base branch. Or session:BRANCH, pr:NUMBER, a branch/tag/commit, or the path of an .apk"],
+        ("changes", "How this session's newest build differs from a base, as screens: + new, ~ changed (why: pixels, routes, texts), - gone, "
+            + "> a control that now leads elsewhere, then counts, crashes (new, fixed or still there) and what the walk did not finish. "
+            + "When both builds have a stored map the answer comes from history and its first line says so: no walk is started. Otherwise it walks both builds. "
+            + "Screen ids in [brackets] go to screenshot's screen. An unbuilt base is answered as text saying what would build it; nothing is started.",
+         schema(["base": ["type": "string", "description": "default: the workspace's base branch. Or session:BRANCH, pr:NUMBER, a branch/tag/commit, the path of an .apk, or snapshot:COMMIT (the stored map of that commit; no build needed)"],
                  "timeout_s": ["type": "integer", "description": "how long this call waits, 10-200 s (default 200); the walk goes on, and calling changes again joins it"]], sim: false)),
+        ("history", "The screen maps stored for this session's repository and profile, newest first: commit, date, screens, and what changed "
+            + "against the one before. With screen (a title or id) that screen's lineage over time: each commit that changed it and why. "
+            + "Reads only; nothing is walked. screenshot's screen and commit show a stored picture.",
+         schema(["screen": ["type": "string", "description": "a screen's title or id: its lineage over time"]], sim: false)),
         ("scripts", "The owner's scripts (sign in, seed data, reach a screen) and whether you may run each, and the names of their "
             + "variables. Values are never shown.", schema(sim: false)),
         ("run_script", "Run a script the owner allowed on a simulator and wait for it: answers its exit status, its last output lines "
@@ -166,6 +173,7 @@ final class AgentTools {
             case "session": content = text(try sessionTool(connection))
             case "build": content = text(try buildTool(args, connection))
             case "changes": content = text(try changesTool(args, connection))
+            case "history": content = text(try historyTool(args, connection))
             case "launch": content = text(try launch(args, connection))
             case "simulators": content = text(simulators())
             case "close": content = text(try close(args))
@@ -179,7 +187,7 @@ final class AgentTools {
             case "screen": content = text(try screen(args))
             case "check": content = text(try check(args))
             case "wait_for": content = text(try waitFor(args))
-            case "screenshot": content = args["screen"] != nil ? try changePicture(args, connection) : try screenshot(args)
+            case "screenshot": content = args["screen"] != nil ? (args["commit"] != nil ? try historyPicture(args, connection) : try changePicture(args, connection)) : try screenshot(args)
             case "logs": content = text(try logs(args))
             case "scripts": content = text(scriptsList())
             case "run_script": content = text(try runScript(args))
