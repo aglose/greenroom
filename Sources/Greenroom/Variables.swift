@@ -103,7 +103,7 @@ final class Variables {
     func set(_ v: Variable) throws {
         guard Self.isValid(v.name) else { throw Failure.badName(v.name) }
         var v = v
-        if v.fromOnePassword { v.value = v.value.trimmingCharacters(in: .whitespacesAndNewlines); v.secret = true }
+        if v.fromOnePassword { v.value = OnePassword.normalized(v.value); v.secret = true }   // kept without the quotes it may be pasted in
         if memory { stored[v.name] = v; return }
         let match: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecAttrAccount as String: v.name]

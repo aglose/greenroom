@@ -91,10 +91,16 @@ enum ScriptsCheck {
                 """#.utf8), attributes: [.posixPermissions: 0o700])
             OnePassword.cliOverride = fakeOp.path
             do {
-                try Variables.shared.set(.init(name: "GR_CHECK_OP", value: "op://Private/Check/password", secret: false))
+                // As 1Password's Copy Secret Reference gives it: in quotes, here with a stray space.
+                try Variables.shared.set(.init(name: "GR_CHECK_OP", value: " \"op://Private/Check/password\"", secret: false))
             } catch { expect("a 1Password reference is stored", false, error.localizedDescription) }
             let opRow = Variables.shared.names().first { $0.name == "GR_CHECK_OP" }
             expect("a 1Password reference is kept as one, and secret", opRow?.onePassword == true && opRow?.secret == true)
+            expect("... without the quotes it was pasted in", Variables.shared.value(of: "GR_CHECK_OP") == "op://Private/Check/password",
+                   Variables.shared.value(of: "GR_CHECK_OP") ?? "nil")
+            expect("curly quotes and single quotes come off too, and other values keep theirs",
+                   OnePassword.normalized("\u{201C}op://A/B/c\u{201D}") == "op://A/B/c" && OnePassword.normalized("'op://A/B/c'") == "op://A/B/c"
+                   && OnePassword.normalized("\"hunter2\"") == "\"hunter2\"")
             let opScript = write("op.sh", """
                 [ "$GR_CHECK_OP" = "from-1password-4242" ] && echo "resolved=yes value=$GR_CHECK_OP" || echo "resolved=no"
                 """)

@@ -13,7 +13,18 @@ import Foundation
 enum OnePassword {
     static let prefix = "op://"
 
-    static func isReference(_ value: String) -> Bool { value.hasPrefix(prefix) }
+    static func isReference(_ value: String) -> Bool { normalized(value).hasPrefix(prefix) }
+
+    /// A reference as pasted, made plain: surrounding space, and the quotes 1Password's Copy Secret Reference puts
+    /// around it ("op://Personal/Item/field"; straight or curly, double or single). Anything else is left as it is.
+    static func normalized(_ value: String) -> String {
+        var v = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pairs: [(Character, Character)] = [("\"", "\""), ("'", "'"), ("\u{201C}", "\u{201D}"), ("\u{2018}", "\u{2019}")]
+        while v.count >= 2, let first = v.first, let last = v.last, pairs.contains(where: { $0.0 == first && $0.1 == last }) {
+            v = String(v.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return v.hasPrefix(prefix) ? v : value
+    }
 
     enum Failure: LocalizedError {
         case noCLI, failed(String), timedOut
@@ -42,7 +53,7 @@ enum OnePassword {
         guard let op = cli(path: env["PATH"]) else { return .failure(.noCLI) }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: op)
-        p.arguments = ["read", "--no-newline", reference]
+        p.arguments = ["read", "--no-newline", normalized(reference)]
         p.environment = env
         p.standardInput = FileHandle.nullDevice
         let out = Pipe(), err = Pipe()
