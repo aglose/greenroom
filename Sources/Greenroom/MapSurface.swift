@@ -98,6 +98,8 @@ final class MapSurface: NSView {
         let from: Int, to: Int
         let labels: [String]
         let change: MapSurfaceEdge.Change?
+        /// From a screen to one directly behind it (its parent's route to it).
+        let tree: Bool
         let p0: CGPoint, c0: CGPoint, c1: CGPoint, p1: CGPoint
         let box: CGRect
         var mid: CGPoint {
@@ -145,7 +147,14 @@ final class MapSurface: NSView {
     private var lastVisible = CGRect.zero
     private var magnification: CGFloat = 1
     private var textScale: CGFloat = 1
-    private struct EdgeKey: Equatable { let detail: Detail; let focus: Int?; let weight: CGFloat }
+    private struct EdgeKey: Equatable { let detail: Detail; let focus: Int?; let weight: CGFloat; let all: Bool; let cards: Int }
+    /// Bumped whenever a card comes or goes: near, the tree's routes follow the cards in view.
+    private var liveVersion = 0
+
+    /// Every route faintly behind the cards, as the old canvas drew them. Off, only what says something is drawn:
+    /// the routes that changed, the focused screen's, and near, the tree's routes between the cards in view. Five
+    /// thousand faint routes are a texture, not a map.
+    var showAllEdges = false { didSet { if oldValue != showAllEdges { builtEdges = nil; update() } } }
     private var builtEdges: (region: CGRect, key: EdgeKey)?
     private var dotsFocus: Int?? = .none
     private static var badgeImages: [String: CGImage] = [:]
@@ -286,7 +295,8 @@ final class MapSurface: NSView {
             guard let a = indexOf[e.from], let b = indexOf[e.to], a != b else { continue }
             routesOut[a].append(routes.count)
             routesIn[b].append(routes.count)
-            routes.append(makeRoute(a, b, labels: e.labels, change: e.change ?? (status[b] == .added ? .added : status[b] == .removed ? .removed : nil)))
+            routes.append(makeRoute(a, b, labels: e.labels, change: e.change ?? (status[b] == .added ? .added : status[b] == .removed ? .removed : nil),
+                                    tree: screens[b].parent == screens[a].lineage))
         }
 
         setFrameSize(input.placement.size)
@@ -350,7 +360,7 @@ final class MapSurface: NSView {
 
     /// The old canvas's curve: out of a card's right side into the next one's left, back to an earlier column from the
     /// left side into the right, and a bow out to the right within one column.
-    private func makeRoute(_ ia: Int, _ ib: Int, labels: [String], change: MapSurfaceEdge.Change?) -> Route {
+    private func makeRoute(_ ia: Int, _ ib: Int, labels: [String], change: MapSurfaceEdge.Change?, tree: Bool) -> Route {
         let a = captureFrames[ia], b = captureFrames[ib]
         let p0: CGPoint, p1: CGPoint, c0: CGPoint, c1: CGPoint
         if b.minX > a.maxX {
@@ -375,7 +385,7 @@ final class MapSurface: NSView {
         }
         let xs = [p0.x, c0.x, c1.x, p1.x], ys = [p0.y, c0.y, c1.y, p1.y]
         let box = CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!).insetBy(dx: -12, dy: -12)
-        return Route(from: ia, to: ib, labels: labels, change: change, p0: p0, c0: c0, c1: c1, p1: p1, box: box)
+        return Route(from: ia, to: ib, labels: labels, change: change, tree: tree, p0: p0, c0: c0, c1: c1, p1: p1, box: box)
     }
 
     // MARK: Following the view
@@ -547,6 +557,7 @@ final class MapSurface: NSView {
         configure(c, i)
         cardsLayer.addSublayer(c.root)
         live[i] = c
+        liveVersion += 1
     }
 
     private func release(_ i: Int) {
@@ -562,6 +573,7 @@ final class MapSurface: NSView {
         c.labelled = -1
         c.labelToken += 1
         undecorated.remove(i)
+        liveVersion += 1
         if pool.count < poolLimit { pool.append(c) }
     }
 
@@ -747,13 +759,16 @@ final class MapSurface: NSView {
     }
 
     /// One path per style for the routes that cross the region around the view; rebuilt when the view leaves that
-    /// region, the focus moves or the detail changes. Far away only the lit and changed routes are drawn.
+    /// region, the focus moves or the detail changes. Drawn: the focused screen's routes and the changed ones; near,
+    /// the tree's routes between cards that are both alive (in view or just outside it); everything only with
+    /// `showAllEdges`, and never far away.
     private func buildEdges(_ visible: CGRect, _ m: CGFloat, force: Bool = false) {
         let focus = focusIndex
         // Lines keep at least a pixel's width far out (steps of a quarter keep the rebuilds rare while zooming), and
         // up close they thin by the titles' steps so a route stays a line, not a band.
         let weight = m < 1 ? max(1, ((0.9 / m) * 4).rounded(.up) / 4) : 1 / textScale
-        let key = EdgeKey(detail: detail, focus: focus, weight: weight)
+        let treeNear = detail == .near && !showAllEdges
+        let key = EdgeKey(detail: detail, focus: focus, weight: weight, all: showAllEdges, cards: treeNear ? liveVersion : 0)
         if !force, let b = builtEdges, b.key == key, b.region.contains(visible) { return }
         let region = detail == .far ? CGRect.infinite : visible.insetBy(dx: -visible.width * 0.5, dy: -visible.height * 0.5)
         builtEdges = (region, key)
@@ -773,7 +788,11 @@ final class MapSurface: NSView {
             if let focus { for k in routesOut[focus] + routesIn[focus] { add(routes[k], style(of: routes[k], focus: focus)) } }
             for r in routes where r.change != nil && r.from != focus && r.to != focus { add(r, style(of: r, focus: focus)) }
         } else {
-            for r in routes where r.box.intersects(region) { add(r, style(of: r, focus: focus)) }
+            for r in routes where r.box.intersects(region) {
+                let s = style(of: r, focus: focus)
+                if s == .dim && !showAllEdges && !(treeNear && r.tree && live[r.from] != nil && live[r.to] != nil) { continue }
+                add(r, s)
+            }
         }
         drawnRoutes = counts
         for s in EdgeStyle.allCases {
@@ -781,7 +800,7 @@ final class MapSurface: NSView {
             case .out: Design.accent
             case .into: NSColor(white: 1, alpha: 0.55)
             // Where routes are many they are a texture, not lines to follow: fainter, so the cards stay readable.
-            case .dim: NSColor(white: 1, alpha: focus == nil ? ((counts[.dim] ?? 0) > 400 ? 0.1 : 0.22) : 0.07)
+            case .dim: NSColor(white: 1, alpha: focus != nil ? 0.07 : showAllEdges ? ((counts[.dim] ?? 0) > 400 ? 0.1 : 0.22) : 0.16)
             case .added: Design.accent.withAlphaComponent(focus == nil ? 0.8 : 0.25)
             case .removed: Design.record.withAlphaComponent(focus == nil ? 0.8 : 0.25)
             }
@@ -959,4 +978,9 @@ final class MapSurface: NSView {
         return (routesOut[i].count, routesIn[i].count)
     }
     var routeCount: Int { routes.count }
+    /// Routes a comparison marks (added, removed, retargeted, or into a new or gone screen).
+    var changedRouteCount: Int { routes.filter { $0.change != nil }.count }
+    /// Tree routes whose two cards are alive now.
+    var liveTreeRouteCount: Int { routes.filter { $0.tree && live[$0.from] != nil && live[$0.to] != nil }.count }
+    var drawnRouteCount: Int { drawnRoutes.values.reduce(0, +) }
 }

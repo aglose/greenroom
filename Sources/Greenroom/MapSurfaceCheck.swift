@@ -262,7 +262,7 @@ enum MapSurfaceCheck {
             func shot(_ k: Int) {
                 guard k < plan.count else {
                     expect(surface.detail == .closest && surface.liveCards > 0 && surface.liveCards <= 12, "at 5x only the few cards in view are alive (\(surface.liveCards))")
-                    motions()
+                    edgeCounts { [self] in motions() }
                     return
                 }
                 zoom(plan[k].0, at: focus)
@@ -273,6 +273,32 @@ enum MapSurfaceCheck {
                 }
             }
             shot(0)
+        }
+
+        /// With nothing focused, only changed routes are drawn in the middle, and near the tree's routes between the
+        /// cards alive too; `showAllEdges` draws them all, as before.
+        func edgeCounts(then: @escaping () -> Void) {
+            surface.select(nil, reveal: false)
+            func measure(_ m: CGFloat, _ done: @escaping (Int, Int, Int, Int) -> Void) {
+                zoom(m, at: focus)
+                after(0.6) { [self] in
+                    surface.showAllEdges = true
+                    let all = surface.drawnRouteCount
+                    surface.showAllEdges = false
+                    done(all, surface.drawnRouteCount, surface.changedRouteCount, surface.liveTreeRouteCount)
+                }
+            }
+            measure(0.6) { [self] all, now, changed, tree in
+                expect(surface.detail == .middle && now <= changed && now < all,
+                       "middle, no focus: \(now) routes drawn (all routes: \(all)); at most the \(changed) changed ones, no tree routes")
+                capture("2-middle.png")
+                measure(1.25) { [self] all, now, changed, tree in
+                    expect(surface.detail == .near && now <= changed + tree && now < all,
+                           "near, no focus: \(now) routes drawn (all routes: \(all)); at most the \(changed) changed and \(tree) tree routes between live cards")
+                    capture("3-near.png")
+                    then()
+                }
+            }
         }
 
         // MARK: Motion, frame by frame
@@ -418,6 +444,9 @@ enum MapSurfaceCheck {
                 expect(whole < 1 && scroll.magnification == 1 && surface.detail == .near && surface.liveCards >= inView && inView >= 8,
                        String(format: "a %d-screen map fits at %.2fx and at 1x draws its cards as the old canvas did (%d in view, %d alive, %d layers)",
                               input.screens.count, whole, inView, surface.liveCards, surface.layerCount))
+                let drawn = surface.drawnRouteCount, tree = surface.liveTreeRouteCount, changed = surface.changedRouteCount
+                expect(tree > 0 && drawn <= changed + tree && drawn < surface.routeCount,
+                       "small map at 1x, no focus: \(drawn) of \(surface.routeCount) routes drawn, the \(tree) tree routes between live cards and \(changed) changed")
                 capture("7-small.png")
                 surface.select(input.screens.first { surface.routeCount(of: $0.lineage).out >= 2 }?.lineage, reveal: false)
                 after(0.8) { [self] in
