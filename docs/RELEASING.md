@@ -7,6 +7,9 @@ draft one; publishing the draft is by hand.
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
+The `release` skill (`.claude/skills/release`) runs the whole thing: merge ready PRs, docs, tag, wait, publish. Its
+mechanical steps live in `scripts/release.sh`.
+
 ## One-time setup
 
 Apple will only notarize an app signed with a **Developer ID Application** certificate (an "Apple Development" one,
