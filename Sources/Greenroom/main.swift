@@ -30,6 +30,8 @@ if let i = arguments.firstIndex(of: "--map-git-check"), i + 1 < arguments.count 
 if let i = arguments.firstIndex(of: "--map-import") { MapTool.run(Array(arguments[(i + 1)...])) }
 // `Greenroom --map-surface-check DIR`: the map's renderer on 2,000 made-up screens, in a window of its own (MapSurfaceCheck).
 if let i = arguments.firstIndex(of: "--map-surface-check"), i + 1 < arguments.count { MapSurfaceCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --map-export-check DIR`: the HTML export of the "mixed" and "grow" pairs, headless (MapExportCheck).
+if let i = arguments.firstIndex(of: "--map-export-check"), i + 1 < arguments.count { MapExportCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --map-navigator-check DIR`: getting around the map (filters, changes first, groups, search, minimap, keys) on made-up maps (MapNavigatorCheck).
 if let i = arguments.firstIndex(of: "--map-navigator-check"), i + 1 < arguments.count { MapNavigatorCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --map-detail-check DIR`: the map's detail column and time strip on a made-up history (MapDetailCheck).
