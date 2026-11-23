@@ -444,6 +444,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     // MARK: Floating chrome
 
+    /// An edge of a full-stage sheet that gives way to the window: a sheet that needs more room than a narrow window
+    /// has is clipped, and never holds the window wider than a person drags it (hidden ones included).
+    private static func giving(_ c: NSLayoutConstraint) -> NSLayoutConstraint {
+        c.priority = .dragThatCannotResizeWindow
+        return c
+    }
+
     private func buildChrome(in host: NSView) {
         appChip = GlassButton(symbol: nil, title: "No app", label: "Running apps", style: .well, target: self, action: #selector(showAppMenu(_:)))
         deviceButton = GlassButton(symbol: "iphone", title: "Phone", label: "Switch the device while the app runs", style: .well, target: self, action: #selector(showDeviceMenu(_:)))
@@ -486,6 +493,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
         bar.translatesAutoresizingMaskIntoConstraints = false
+        // A narrow window drops the buttons it can do without (each is in the menus and ⌘K too), then clips, rather
+        // than the bar holding the window wide.
+        bar.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        for (v, p) in [(commands, 300), (mirrorButton, 310), (shot, 320), (recordButton, 330), (deviceButton, 340)] as [(NSView, Float)] {
+            bar.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: p), for: v)
+        }
         header.addSubview(bar)
 
         let rails: [(String, String, String, Selector)] = [
@@ -657,7 +670,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         snapshotReview.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(snapshotReview, positioned: .below, relativeTo: scrim)
         NSLayoutConstraint.activate([snapshotReview.topAnchor.constraint(equalTo: host.topAnchor), snapshotReview.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-                                     snapshotReview.leadingAnchor.constraint(equalTo: host.leadingAnchor), snapshotReview.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+                                     snapshotReview.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(snapshotReview.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         snapshotReview.defaultAPK = { [weak self] in self?.selected?.apk }
         snapshotReview.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         snapshotReview.onToggle = { [weak self] in self?.updateChrome() }
@@ -679,7 +692,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         screenMap.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(screenMap, positioned: .below, relativeTo: scrim)
         NSLayoutConstraint.activate([screenMap.topAnchor.constraint(equalTo: host.topAnchor), screenMap.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-                                     screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+                                     screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         screenMap.defaultAPK = { [weak self] in self?.selected?.apk }
         screenMap.worktree = { [weak self] in self?.selected.flatMap { self?.worktree(of: $0) } }
         screenMap.signInKey = { [weak self] in
@@ -737,7 +750,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         changesSheet.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(changesSheet, positioned: .below, relativeTo: scrim)
         NSLayoutConstraint.activate([changesSheet.topAnchor.constraint(equalTo: host.topAnchor), changesSheet.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-                                     changesSheet.leadingAnchor.constraint(equalTo: host.leadingAnchor), changesSheet.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+                                     changesSheet.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(changesSheet.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         changesSheet.controller = sessions
         changesSheet.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         changesSheet.onToggle = { [weak self] in self?.updateChrome() }

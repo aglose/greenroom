@@ -530,6 +530,11 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
         bar.translatesAutoresizingMaskIntoConstraints = false
+        // A narrow map drops the count, Fit and the arrows (F, N and P still work), then clips, rather than holding the window wide.
+        bar.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        for (v, p) in [(count, 300), (fitButton, 310), (previousButton, 320), (nextButton, 320)] as [(NSView, Float)] {
+            bar.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: p), for: v)
+        }
 
         scroll.translatesAutoresizingMaskIntoConstraints = false
         minimap.translatesAutoresizingMaskIntoConstraints = false
