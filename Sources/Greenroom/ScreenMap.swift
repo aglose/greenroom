@@ -21,6 +21,8 @@ final class ScreenMap: NSView {
     private(set) var isOpen = false
     var onSay: ((String, Bool) -> Void)?
     var onToggle: (() -> Void)?
+    /// How far the running walk has got, each second while it runs; nil when it ends. Shown outside the sheet too.
+    var onProgress: ((WalkProgress?) -> Void)?
     /// The selected simulator's APK, the default for a walk.
     var defaultAPK: () -> URL? = { nil }
     /// Replays a screen's route on the selected device.
@@ -59,6 +61,9 @@ final class ScreenMap: NSView {
     private var startedAt = Date()
     private var shownCombos: [String] = []
     private var lastSignedIn = false
+    /// Whether closing the sheet during this walk has said that it goes on.
+    private var toldBackground = false
+    private(set) var progress: WalkProgress?
 
     private let dim = NSView()
     private let panel = GlassView(radius: 18)
@@ -76,7 +81,8 @@ final class ScreenMap: NSView {
     private let comboControl = NSSegmentedControl(labels: [], trackingMode: .selectOne, target: nil, action: nil)
     private let spinner = NSProgressIndicator()
     let host = MapHost()
-    private let emptyNote = NSTextField(wrappingLabelWithString: "")
+    /// Before the first walk: what a walk does and what decides it (MapOnboarding).
+    let onboarding = MapOnboarding()
     /// `[head] compared with [base]`.
     private let compareLabel = NSTextField(labelWithString: "")
     private let timeline = MapTimeline()
@@ -197,17 +203,16 @@ final class ScreenMap: NSView {
         mapWell.layer?.cornerCurve = .continuous
         mapWell.layer?.masksToBounds = true
         let grid = StageBackground(frame: .zero)
-        emptyNote.font = .systemFont(ofSize: 13)
-        emptyNote.textColor = Design.mute
-        emptyNote.alignment = .center
-        for v in [grid, host, emptyNote] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; mapWell.addSubview(v) }
+        onboarding.onChoose = { [weak self] in self?.chooseAPK() }
+        onboarding.onSignIn = { [weak self] in self?.beginSignInOnce() }
+        onboarding.onWalk = { [weak self] in self?.walk() }
+        for v in [grid, host, onboarding] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; mapWell.addSubview(v) }
         NSLayoutConstraint.activate([
             grid.topAnchor.constraint(equalTo: mapWell.topAnchor), grid.bottomAnchor.constraint(equalTo: mapWell.bottomAnchor),
             grid.leadingAnchor.constraint(equalTo: mapWell.leadingAnchor), grid.trailingAnchor.constraint(equalTo: mapWell.trailingAnchor),
             host.topAnchor.constraint(equalTo: mapWell.topAnchor), host.bottomAnchor.constraint(equalTo: mapWell.bottomAnchor),
             host.leadingAnchor.constraint(equalTo: mapWell.leadingAnchor), host.trailingAnchor.constraint(equalTo: mapWell.trailingAnchor),
-            emptyNote.centerXAnchor.constraint(equalTo: mapWell.centerXAnchor), emptyNote.centerYAnchor.constraint(equalTo: mapWell.centerYAnchor),
-            emptyNote.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+            onboarding.centerXAnchor.constraint(equalTo: mapWell.centerXAnchor), onboarding.centerYAnchor.constraint(equalTo: mapWell.centerYAnchor),
         ])
         host.isHidden = true
         host.onGo = { [weak self] lineage in self?.go(lineage) }
@@ -272,6 +277,10 @@ final class ScreenMap: NSView {
     func close() {
         guard isOpen else { return }
         isOpen = false
+        if isWalking, !toldBackground {
+            toldBackground = true
+            onSay?("The walk goes on in the background. The top bar shows how far it has got.", false)
+        }
         Design.animate(Design.snap, { self.animator().alphaValue = 0 }, done: { if !self.isOpen { self.isHidden = true } })
         onToggle?()
     }
@@ -318,6 +327,7 @@ final class ScreenMap: NSView {
         d.set(timePopup.indexOfSelectedItem, forKey: "mapWalkTime")
         d.set(capturePopup.indexOfSelectedItem, forKey: "mapCaptures")
         d.set(offline.state == .on, forKey: "mapOffline")
+        refresh()
     }
 
     // MARK: Signing in
@@ -369,18 +379,25 @@ final class ScreenMap: NSView {
         }
         if signInPopup.selectedItem?.representedObject as? String == "once" {
             reloadScripts()
-            guard let apk = effectiveAPK, let begin = signInOnce else { return }
-            let name = (apk.deletingPathExtension().lastPathComponent)
-            begin(apk, keptKey(apk), signInKey().map { URL(fileURLWithPath: String($0.dropFirst(5))).lastPathComponent } ?? name) { [weak self] kept in
-                guard let self else { return }
-                if kept { UserDefaults.standard.removeObject(forKey: "mapSignIn") }
-                self.reloadScripts()
-                self.open()
-                if kept { self.setSummary("Sign-in kept. Walk the app to map it signed in.") }
-            }
+            beginSignInOnce()
             return
         }
         UserDefaults.standard.set(signInScript?.name, forKey: "mapSignIn")
+        refresh()
+    }
+
+    /// "Sign In Once…": the app on a device the person can see; when they keep the sign-in, walks start signed in.
+    private func beginSignInOnce() {
+        guard !isWalking, let apk = effectiveAPK, let begin = signInOnce else { return }
+        let name = (apk.deletingPathExtension().lastPathComponent)
+        begin(apk, keptKey(apk), signInKey().map { URL(fileURLWithPath: String($0.dropFirst(5))).lastPathComponent } ?? name) { [weak self] kept in
+            guard let self else { return }
+            if kept { UserDefaults.standard.removeObject(forKey: "mapSignIn") }
+            self.reloadScripts()
+            self.open()
+            if kept { self.setSummary("Sign-in kept. Walk the app to map it signed in.") }
+            self.refresh()
+        }
     }
 
     var isWalking: Bool { signIn != nil || starting || run?.isRunning == true }
@@ -397,7 +414,7 @@ final class ScreenMap: NSView {
         if let apk = effectiveAPK { appLabel.stringValue = apk.lastPathComponent + (apkURL == nil ? "  ·  the selected device's" : "") }
         else { appLabel.stringValue = "No app: open one, or choose an APK" }
         let running = isWalking
-        walkButton.title = running ? "Stop" : (data == nil ? "Walk the app" : "Walk again")
+        walkButton.title = running ? "Stop walk" : (data == nil ? "Walk the app" : "Walk again")
         walkButton.style = running ? .record : .accent
         walkButton.isEnabled = running || (effectiveAPK != nil && pythonURL != nil)
         exportButton.isEnabled = !running && host.canExport
@@ -405,8 +422,25 @@ final class ScreenMap: NSView {
         if pythonURL == nil, !running {
             setSummary("The map needs Python 3, and this Mac has none. Install the command line tools (xcode-select --install in Terminal), then reopen this.", problem: true)
         }
-        emptyNote.isHidden = data != nil || running
-        emptyNote.stringValue = "Greenroom taps through the whole app by itself, a level at a time, and draws every screen it reaches with the way there. It runs its own hidden devices, several at once, so yours are left alone. The first map of a large app can take a while; a walk of a committed build is kept, and later ones are compared with it."
+        onboarding.isHidden = data != nil || running
+        if !onboarding.isHidden { onboarding.show(onboardingState) }
+        walkButton.isHidden = !onboarding.isHidden   // the card has its own Walk: one place to start
+    }
+
+    private var onboardingState: MapOnboarding.State {
+        var s = MapOnboarding.State()
+        s.app = effectiveAPK?.lastPathComponent
+        s.appIsDevice = apkURL == nil
+        if let script = signInScript { s.signIn = .script(script.name) }
+        else if usesKeptSignIn, let k = kept {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .none
+            s.signIn = .kept(f.string(from: k.date))
+        }
+        var reach = [depthPopup, timePopup, capturePopup].compactMap { $0.titleOfSelectedItem }
+        if offline.state == .on { reach.append("offline") }
+        s.reach = reach.joined(separator: ", ")
+        s.noPython = pythonURL == nil
+        return s
     }
 
     private func setSummary(_ text: String, problem: Bool = false) {
@@ -417,10 +451,27 @@ final class ScreenMap: NSView {
     // MARK: Walking
 
     @objc private func walkPressed() {
+        if isWalking, Date().timeIntervalSince(run?.startedAt ?? startedAt) > 15, let w = window {
+            // A long walk is not thrown away by one press: what it found goes with it.
+            let a = NSAlert()
+            a.messageText = "Stop the walk?"
+            a.informativeText = (reached.known > 0 ? "It has found \(reached.known) screen\(reached.known == 1 ? "" : "s") so far. " : "")
+                + "A stopped walk makes no map, and the next one starts from the beginning. Closing the map instead lets it go on in the background."
+            a.addButton(withTitle: "Keep Walking")
+            a.addButton(withTitle: "Stop Walk")
+            a.buttons[1].hasDestructiveAction = true
+            a.beginSheetModal(for: w) { [weak self] r in if r == .alertSecondButtonReturn { self?.stop() } }
+            return
+        }
+        if isWalking { stop(); return }
+        walk()
+    }
+
+    /// Stops the walk (or the sign-in before it), with nothing kept.
+    func stop() {
         if let signIn { signIn.cancel(); return }
         if let run, run.isRunning { run.cancel(); return }
         if starting { starting = false; generation += 1; finished(.cancelled); return }
-        walk()
     }
 
     /// Starts a walk with the settings shown. False when there is nothing to walk or no Python.
@@ -435,6 +486,7 @@ final class ScreenMap: NSView {
         let out = base.appendingPathComponent("run-" + stamp)
         let walkSettings = settings
         lastSignedIn = signInScript != nil
+        toldBackground = false
         data = nil
         reached = (0, 0)
         explored = 0
@@ -442,7 +494,7 @@ final class ScreenMap: NSView {
         snapshot = nil
         host.clear()
         host.isHidden = false
-        emptyNote.isHidden = true
+        onboarding.isHidden = true
         compareLabel.isHidden = true
         timeline.isHidden = true
         crashChip.isHidden = true
@@ -513,21 +565,45 @@ final class ScreenMap: NSView {
     }
 
     private func tick() {
-        if signIn != nil { setSummary(signInStatus); return }
+        if signIn != nil {
+            setSummary(signInStatus)
+            report(WalkProgress(text: "Signing in to walk…", fraction: nil, detail: signInStatus))
+            return
+        }
         guard starting || run?.isRunning == true else { return }
         let s = Int(Date().timeIntervalSince(run?.startedAt ?? startedAt))
         let t = s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
         let signedIn = signedInSlot != nil ? ", signed in" : ""
         let on = devices == 1 ? "1 hidden device" : "\(devices) hidden devices"
         let whole = settings.depth == 0
-        if reached.known == 0 { setSummary(signedInSlot != nil ? "Starting the signed-in device…  \(t)" : "Starting \(on)…  \(t)") }
-        else if reached.depth < 0 { setSummary("Capturing \(reached.known) screens…  \(t)") }
-        else if whole {
+        let screens = "\(reached.known) screen\(reached.known == 1 ? "" : "s")"
+        // The share of the screens found so far that are opened: it can go back as more are found, and is honest about that.
+        let fraction = explored > 0 && reached.known > 0 ? min(1, Double(explored) / Double(reached.known)) : nil
+        let detail: String, short: String
+        if reached.known == 0 {
+            detail = signedInSlot != nil ? "Starting the signed-in device…  \(t)" : "Starting \(on)…  \(t)"
+            short = "Starting the walk…  \(t)"
+        } else if reached.depth < 0 {
+            detail = "Capturing \(screens)…  \(t)"
+            short = "Capturing \(screens)  ·  \(t)"
+        } else if whole {
             // The whole app: how much is found and how much of that is still to open (a count; how long it takes is not known before the end).
-            let left = explored > 0 && explored < reached.known ? ", \(reached.known - explored) to open" : ""
-            setSummary("Mapping the whole app\(signedIn): \(reached.known) screen\(reached.known == 1 ? "" : "s") found\(left)  ·  \(on)  ·  \(t)")
+            let toOpen = explored > 0 && explored < reached.known ? reached.known - explored : 0
+            detail = "Mapping the whole app\(signedIn): \(screens) found" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(on)  ·  \(t)"
+            short = "Mapping: \(screens)" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(t)"
+        } else {
+            let deep = reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"
+            detail = "Walking\(signedIn): \(deep), \(screens) found  ·  \(t)"
+            short = "Walking: \(screens)  ·  \(t)"
         }
-        else { setSummary("Walking\(signedIn): \(reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"), \(reached.known) screen\(reached.known == 1 ? "" : "s") found  ·  \(t)") }
+        setSummary(detail)
+        report(WalkProgress(text: short, fraction: fraction, detail: detail))
+    }
+
+    private func report(_ p: WalkProgress?) {
+        guard p != progress else { return }
+        progress = p
+        onProgress?(p)
     }
 
     private func event(_ e: CrawlRun.Event) {
@@ -550,6 +626,7 @@ final class ScreenMap: NSView {
     private func finished(_ outcome: CrawlRun.Outcome) {
         ticker?.invalidate()
         ticker = nil
+        report(nil)
         spinner.stopAnimation(nil)
         if let slot = signedInSlot {
             signedInSlot = nil
@@ -595,7 +672,7 @@ final class ScreenMap: NSView {
         for (i, c) in combos.enumerated() { comboControl.setLabel(c.contains("dark") ? "Dark" : (c.contains("light") ? "Light" : c), forSegment: i) }
         comboControl.selectedSegment = 0
         comboControl.isHidden = combos.count < 2
-        emptyNote.isHidden = true
+        onboarding.isHidden = true
         host.isHidden = false
         generation += 1
         let mine = generation

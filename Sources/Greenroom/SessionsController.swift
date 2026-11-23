@@ -665,6 +665,8 @@ final class SessionsController {
     func openMap(folder: URL) {
         guard let wb = workbench else { return }
         wb.showMap()
+        // A walk running in the map is never replaced: its map shows when it ends.
+        if wb.screenMap.isWalking { wb.toast.show("A walk is running in the screen map. Its map shows here when it ends."); return }
         if !wb.screenMap.show(folder: folder) { wb.toast.show("That map is not there any more. \"Walk again\" makes it.", problem: true) }
     }
 
