@@ -118,6 +118,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         /// "Add a session" under a repository that shows none.
         case addSession(URL, hidden: Int)
         case suggestion(Session)
+        /// The repository's main, kept built by itself (MainBuild.swift).
+        case main(MainRow)
         case session(Session)
         case pull(PullRow)
         case simulator(Simulator)
@@ -360,7 +362,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         for group in groups {
             guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
             rows.append(.sessionsHeader(group.header, ws, hidden: group.hidden))
-            if group.sessions.isEmpty { rows.append(.addSession(ws, hidden: group.hidden)) }
+            let main = sessions.mainRow(for: ws)
+            if let main { rows.append(.main(main)) }
+            if group.sessions.isEmpty && main == nil { rows.append(.addSession(ws, hidden: group.hidden)) }
             rows += group.sessions.map { .session($0) }
         }
         let suggested = sessions.suggestions()
@@ -375,7 +379,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             rows.append(.header("Review"))
             rows += pullRows.map { .pull($0) }
         }
-        let loose = sims.filter { sessions.session(forSimulator: $0) == nil && !sessions.pulls.owns($0) }   // a session's or pull request's own is on its row
+        let loose = sims.filter { sessions.session(forSimulator: $0) == nil && !sessions.pulls.owns($0) && !sessions.mainBuilds.owns($0) }   // a session's, main's or pull request's own is on its row
         if !loose.isEmpty {
             rows.append(.header("Running"))
             rows += loose.map { .simulator($0) }
@@ -396,6 +400,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let selected = self.selected
         let want = selected.flatMap { s in rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }
+            if case .main(let x) = $0 { return x.simulator === s }
             if case .pull(let x) = $0 { return x.simulator === s }
             return false
         }) ?? rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) }
@@ -412,6 +417,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         case .sessionsHeader(let t, let ws, _): return "sh:" + t + ws.path
         case .addSession(let ws, _): return "add:" + ws.path
         case .suggestion(let s): return "sg:" + s.worktree.path
+        case .main(let m): return "m:" + m.workspace.path
         case .session(let s): return "s:" + s.worktree.path
         case .pull(let p): return "p:" + p.pull.id
         case .simulator(let sim): return "sim:" + String(UInt(bitPattern: ObjectIdentifier(sim).hashValue))
@@ -428,6 +434,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
         case .session(let s): return Self.identity(row) + "|" + sessions.rowKey(for: s)
         case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
+        case .main(let m): return Self.identity(row) + "|" + sessions.mainRowKey(m)
         case .pull(let p): return Self.identity(row) + "|\(p.state)|\(p.build?.key ?? "")|\(p.simulator?.state == .running)|\(p.simulator != nil)|\(p.pull.title)|\(p.repo)"
         case .simulator(let sim): return Self.identity(row) + "|\(sim.state)|\(sim.deviceSize)|\(sim.name)"
         case .claudeOffer(let o): return Self.identity(row) + "|\(o.count)"
@@ -1205,7 +1212,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession: return true
+        case .simulator, .session, .main, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession: return true
         default: return false
         }
     }
@@ -1228,6 +1235,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if case .suggestion = rows[row] { return 24 }
         if case .addSession = rows[row] { return 28 }
         if case .session = rows[row] { return 40 }
+        if case .main = rows[row] { return 40 }
         if case .pull = rows[row] { return 42 }
         return 36
     }
@@ -1262,6 +1270,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             return sessions.suggestionCell(for: s)
         case .session(let session):
             return sessions.cell(for: session)
+        case .main(let m):
+            return sessions.mainCell(m)
         case .claudeOffer(let offer):
             return ClaudeUI.offerCell(offer)
         case .claudeTitles:
@@ -1315,6 +1325,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
+        if case .main(let m) = rows[row] { sessions.openMain(m.workspace) }
         if case .suggestion(let s) = rows[row] { sessions.show(s) }
         if case .addSession(let ws, _) = rows[row], let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) {
             sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 8, y: view.bounds.height), in: view)
@@ -1338,9 +1349,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if let open = menu.items.first(where: { $0.action == #selector(openInClaudeClicked) }) {
             if case .session(let s) = rows[row], s.claude?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
         }
+        // Main's row is not a worktree of the person's: no Claude session, nothing to remove but the repository.
+        var isMain = false
+        if case .main = rows[row] { isMain = true }
+        for item in menu.items where [#selector(openInClaudeClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
         else if case .pull(let pull) = rows[row] { items = sessions.pullMenuItems(for: pull) + [.separator()] }
+        else if case .main(let m) = rows[row] { items = sessions.mainMenuItems(m) + [.separator()] }
         else { return }
         for (i, item) in items.enumerated() { item.tag = 77; menu.insertItem(item, at: i) }
     }
@@ -1350,6 +1366,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { Engine.shared.close(sim) }
         if case .session(let session) = rows[row] { sessions.closeSimulator(of: session) }
+        if case .main(let m) = rows[row] { sessions.closeMain(m.workspace) }
         if case .pull(let pull) = rows[row] { sessions.closePullSimulator(pull) }
     }
 
@@ -1379,7 +1396,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     @objc private func removeRepositoryClicked() {
         let row = table.clickedRow
-        guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
+        guard row >= 0, row < rows.count else { return }
+        if case .main(let m) = rows[row] { sessions.removeWorkspace(at: m.workspace); return }
+        guard case .session(let session) = rows[row] else { return }
         sessions.removeWorkspace(containing: session)
     }
 
