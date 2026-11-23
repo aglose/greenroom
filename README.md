@@ -60,12 +60,12 @@ version of it and adds the workbench.
   the sign-in screen again, Greenroom runs that script on a hidden device, keeps the new sign-in and walks again.
   "Forget Sign-In" deletes the kept data.
 - **Signed-in screen map**: in the Screen Map, pick "Sign in with <script>" and the walk first runs that script on a
-  hidden device of its own, then walks the whole app on that device's signed-in data (one device, as the crawler
-  walks kept data). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.
+  hidden device of its own, then walks the whole app on that device's signed-in data (several devices, each on its own
+  copy). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.
   A script that fails stops the walk with its last line.
 - **Map history**: a walk covers the whole app by default, with no depth or time limit (it stops by itself after four
   hours and says so), on several hidden devices at once: the Mac's performance cores less two, six at most. A walk
-  on signed-in data uses one device. The Screen Map's menus still offer a shallower or shorter walk, and a
+  on signed-in data does the same, each device on its own copy of the data. The Screen Map's menus still offer a shallower or shorter walk, and a
   repository's "Quick Walks Only" (a session row's menu) keeps its own walks to two taps and two minutes. While a
   walk runs, the row and the Screen Map say how many screens are found and how many are still to open, and the map's
   placeholder cards take each screen's title as it is explored. A finished walk says whether it was saved to the
