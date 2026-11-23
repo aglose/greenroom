@@ -51,11 +51,12 @@ runs:
         set -euo pipefail
         out="$RUNNER_TEMP/greenroom-walk"; mkdir -p "$out"
         prof() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2], sys.argv[3]))' "${{ inputs.profile-file }}" "$@"; }
-        depth=$(prof depth 2); seconds=$(prof seconds 120)
+        depth=$(prof depth 0); seconds=$(prof seconds 0)   # 0: the whole app, no time budget (the walk still stops after 4 hours)
+        limits=(--max-seconds "$([ "$seconds" -gt 0 ] && echo "$seconds" || echo 14400)"); [ "$depth" -gt 0 ] && limits+=(--max-depth "$depth")
         combos=$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1])).get("combos", ["light"])))' "${{ inputs.profile-file }}")
         docker run --rm -v "$(dirname "$(realpath "${{ inputs.apk }}")")":/in:ro -v "$out":/out "${{ inputs.engine-image }}" \
           python3 /engine/scripts/crawl.py "/in/$(basename "${{ inputs.apk }}")" --out /out \
-          --max-depth "$depth" --max-seconds "$seconds" --matrix "appearance=$combos"
+          "${limits[@]}" --matrix "appearance=$combos"
 
     - name: File the map
       if: steps.has.outputs.walked == 'false'

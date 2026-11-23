@@ -32,8 +32,27 @@ enum History {
 
     /// A build with a commit and no uncommitted changes: the only kind a snapshot can stand for.
     static func fileable(_ b: Build) -> Bool {
-        guard !b.dirty, let sha = b.sha, !sha.isEmpty, !sha.hasPrefix("-") else { return false }
+        guard !b.dirty || isAccepted(b.key), let sha = b.sha, !sha.isEmpty, !sha.hasPrefix("-") else { return false }
         return true
+    }
+
+    /// Builds made with uncommitted changes that the person said stand for their commit all the same ("Save Map to
+    /// History Anyway": the changes were to files the app is not built from). Kept by build key in the defaults.
+    private static let acceptedLock = NSLock()
+    private static var accepted: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "historyAcceptedBuilds") ?? [])
+    static func isAccepted(_ key: String) -> Bool { acceptedLock.lock(); defer { acceptedLock.unlock() }; return accepted.contains(key) }
+    static func accept(_ key: String) {
+        acceptedLock.lock()
+        accepted.insert(key)
+        let all = Array(accepted).sorted()
+        acceptedLock.unlock()
+        UserDefaults.standard.set(Array(all.suffix(500)), forKey: "historyAcceptedBuilds")
+    }
+    /// Why a build's walk is not kept in the history, in words; nil when it is.
+    static func whyNotFiled(_ b: Build) -> String? {
+        guard let sha = b.sha, !sha.isEmpty, !sha.hasPrefix("-") else { return "this build has no commit (an APK from outside a repository)" }
+        if b.dirty, !isAccepted(b.key) { return "this build was made with uncommitted changes, so it does not stand for commit \(sha.prefix(7))" }
+        return nil
     }
 
     // MARK: Git

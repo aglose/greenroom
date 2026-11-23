@@ -577,6 +577,17 @@ final class SessionsController {
         onChange?()
     }
 
+    /// "Quick Walks Only", saved with the workspace.
+    func walksQuick(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.quickWalk ?? false }
+    func walksQuick(worktree: String) -> Bool { sessions.first { $0.worktree.path == worktree }.map { walksQuick($0) } ?? false }
+
+    func setQuickWalk(_ on: Bool, for s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        workspaces[i].quickWalk = on
+        store.saveWorkspaces(workspaces)
+        onChange?()
+    }
+
     func sharesMaps(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.shareMaps ?? false }
     func sharesSignedInMaps(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.shareSignedInMaps ?? false }
 

@@ -83,7 +83,7 @@ def encode(v):
 
 def profile_object(a):
     """MapProfile's own encoding: optional signIn is left out when unset, as the synthesized Codable does."""
-    p = {"depth": 2, "seconds": 120, "starts": [], "combos": ["light"], "offline": False}
+    p = {"depth": 0, "seconds": 0, "starts": [], "combos": ["light"], "offline": False}
     if a.profile_file:
         with open(a.profile_file, "rb") as f:
             d = json.load(f)

@@ -56,7 +56,15 @@ version of it and adds the workbench.
   hidden device of its own, then walks the whole app on that device's signed-in data (one device, as the crawler
   walks kept data). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.
   A script that fails stops the walk with its last line.
-- **Map history**: every walk of a committed, clean build is kept as a snapshot of the app's screens for that commit,
+- **Map history**: a walk covers the whole app by default, with no depth or time limit (it stops by itself after four
+  hours and says so), on several hidden devices at once: the Mac's performance cores less two, six at most. A walk
+  on signed-in data uses one device. The Screen Map's menus still offer a shallower or shorter walk, and a
+  repository's "Quick Walks Only" (a session row's menu) keeps its own walks to two taps and two minutes. While a
+  walk runs, the row and the Screen Map say how many screens are found and how many are still to open, and the map's
+  placeholder cards take each screen's title as it is explored. A finished walk says whether it was saved to the
+  history; one of a build made with uncommitted changes is not, until "Save Map to History Anyway" says the changes
+  were to files the app is not built from. Every walk of a
+  committed, clean build is kept as a snapshot of the app's screens for that commit,
   with each capture stored once however many commits show it. The Screen Map opens a branch's map against the
   snapshot of its merge base with the base branch (or the nearest earlier commit that has one, and says how far
   behind it is): screens added in green, removed in red, modified in amber with why (pixels, structure, text,

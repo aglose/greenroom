@@ -22,7 +22,7 @@ extension AppDelegate {
         func expect(_ good: Bool, _ what: String) { if !good { ok = false }; print("[greenroom] map: \(good ? "ok  " : "FAIL") \(what)") }
         func end() {
             print("[greenroom] map check: \(ok ? "PASS" : "FAIL")")
-            for k in ["mapAPK", "mapRun", "mapDepth", "mapTime", "mapCaptures", "mapStart"] { UserDefaults.standard.removeObject(forKey: k) }
+            for k in ["mapAPK", "mapRun", "mapWalkDepth", "mapWalkTime", "mapCaptures", "mapStart"] { UserDefaults.standard.removeObject(forKey: k) }
             fflush(stdout)
             Engine.shared.stopAll()
             exit(ok ? 0 : 1)
@@ -186,7 +186,7 @@ extension AppDelegate {
         let before = Set(walkSlots())
         func end() {
             say(ok ? "PASS" : "FAIL")
-            for k in ["mapAPK", "mapRun", "mapDepth", "mapTime", "mapCaptures", "mapStart", "mapSignIn"] { UserDefaults.standard.removeObject(forKey: k) }
+            for k in ["mapAPK", "mapRun", "mapWalkDepth", "mapWalkTime", "mapCaptures", "mapStart", "mapSignIn"] { UserDefaults.standard.removeObject(forKey: k) }
             Engine.shared.stopAll()
             exit(ok ? 0 : 1)
         }

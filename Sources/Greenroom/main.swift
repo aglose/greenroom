@@ -46,6 +46,8 @@ if let i = arguments.firstIndex(of: "--map-detail-check"), i + 1 < arguments.cou
 if let i = arguments.firstIndex(of: "--map-walks"), i + 3 < arguments.count {
     MapWalksTool.run(dir: URL(fileURLWithPath: arguments[i + 1]), a: URL(fileURLWithPath: arguments[i + 2]), b: URL(fileURLWithPath: arguments[i + 3]))
 }
+// `Greenroom --walk-defaults-check DIR`: a walk's defaults (the whole app, devices at once), its events, and what is kept (WalkDefaultsCheck).
+if let i = arguments.firstIndex(of: "--walk-defaults-check"), i + 1 < arguments.count { WalkDefaultsCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {

@@ -43,6 +43,12 @@ final class ScreenMap: NSView {
     private var pythonURL: URL? = SnapshotRun.python()
     private var ticker: Timer?
     private var reached = (depth: 0, known: 0)
+    /// Screens the running walk has finished with (the crawler's `--events`), and the devices it runs on.
+    private var explored = 0
+    private var devices = 1
+    /// Between Walk and the crawler's start (its options are being asked).
+    private var starting = false
+    private var startedAt = Date()
     private var shownCombos: [String] = []
     private var lastSignedIn = false
 
@@ -131,8 +137,8 @@ final class ScreenMap: NSView {
         let header = NSStackView(views: [title, appLabel, choose, hs, exportButton, walkButton, close])
         header.spacing = 10
 
-        popup(depthPopup, ["1 tap deep", "2 taps deep", "3 taps deep", "4 taps deep", "6 taps deep"], key: "mapDepth", default: 2)
-        popup(timePopup, ["1 minute", "3 minutes", "5 minutes", "10 minutes"], key: "mapTime", default: 1)
+        popup(depthPopup, ["1 tap deep", "2 taps deep", "3 taps deep", "4 taps deep", "6 taps deep", "Whole app"], key: "mapWalkDepth", default: 5)
+        popup(timePopup, ["1 minute", "3 minutes", "5 minutes", "10 minutes", "30 minutes", "No time limit"], key: "mapWalkTime", default: 5)
         popup(capturePopup, ["Light captures", "Light and dark", "No captures"], key: "mapCaptures", default: 0)
         offline.controlSize = .small
         offline.font = .systemFont(ofSize: 12)
@@ -274,8 +280,8 @@ final class ScreenMap: NSView {
 
     var settings: CrawlRun.Settings {
         var s = CrawlRun.Settings()
-        s.depth = [1, 2, 3, 4, 6][max(0, depthPopup.indexOfSelectedItem)]
-        s.seconds = [60, 180, 300, 600][max(0, timePopup.indexOfSelectedItem)]
+        s.depth = [1, 2, 3, 4, 6, 0][max(0, depthPopup.indexOfSelectedItem)]   // 0: the whole app
+        s.seconds = [60, 180, 300, 600, 1800, 0][max(0, timePopup.indexOfSelectedItem)]   // 0: no limit
         s.appearances = [["light"], ["light", "dark"], []][max(0, capturePopup.indexOfSelectedItem)]
         s.offline = offline.state == .on
         let start = startField.stringValue.trimmingCharacters(in: .whitespaces)
@@ -300,8 +306,8 @@ final class ScreenMap: NSView {
 
     @objc private func settingChanged() {
         let d = UserDefaults.standard
-        d.set(depthPopup.indexOfSelectedItem, forKey: "mapDepth")
-        d.set(timePopup.indexOfSelectedItem, forKey: "mapTime")
+        d.set(depthPopup.indexOfSelectedItem, forKey: "mapWalkDepth")
+        d.set(timePopup.indexOfSelectedItem, forKey: "mapWalkTime")
         d.set(capturePopup.indexOfSelectedItem, forKey: "mapCaptures")
         d.set(offline.state == .on, forKey: "mapOffline")
     }
@@ -345,7 +351,7 @@ final class ScreenMap: NSView {
         UserDefaults.standard.set(signInScript?.name, forKey: "mapSignIn")
     }
 
-    var isWalking: Bool { signIn != nil || run?.isRunning == true }
+    var isWalking: Bool { signIn != nil || starting || run?.isRunning == true }
 
     @objc private func chooseAPK() {
         let p = NSOpenPanel()
@@ -368,7 +374,7 @@ final class ScreenMap: NSView {
             setSummary("The map needs Python 3, and this Mac has none. Install the command line tools (xcode-select --install in Terminal), then reopen this.", problem: true)
         }
         emptyNote.isHidden = data != nil || running
-        emptyNote.stringValue = "Greenroom taps through the app by itself, a level at a time, and draws every screen it reaches with the way there. It runs its own hidden devices, so yours are left alone."
+        emptyNote.stringValue = "Greenroom taps through the whole app by itself, a level at a time, and draws every screen it reaches with the way there. It runs its own hidden devices, several at once, so yours are left alone. The first map of a large app can take a while; a walk of a committed build is kept, and later ones are compared with it."
     }
 
     private func setSummary(_ text: String, problem: Bool = false) {
@@ -381,6 +387,7 @@ final class ScreenMap: NSView {
     @objc private func walkPressed() {
         if let signIn { signIn.cancel(); return }
         if let run, run.isRunning { run.cancel(); return }
+        if starting { starting = false; generation += 1; finished(.cancelled); return }
         walk()
     }
 
@@ -398,6 +405,7 @@ final class ScreenMap: NSView {
         lastSignedIn = signInScript != nil
         data = nil
         reached = (0, 0)
+        explored = 0
         generation += 1
         snapshot = nil
         host.clear()
@@ -440,23 +448,46 @@ final class ScreenMap: NSView {
     }
 
     private func startCrawl(python: URL, apk: URL, out: URL, settings: CrawlRun.Settings) {
-        let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
-        run = r
-        r.onEvent = { [weak self] e in self?.event(e) }
-        r.onFinish = { [weak self] o in self?.finished(o) }
-        r.start()
+        var settings = settings
+        devices = max(1, settings.jobs)
+        let gen = generation
+        starting = true
+        startedAt = Date()
+        // What this crawler offers is asked off the main thread (its --help, once); the walk starts when that is known.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let events = CrawlRun.support(python: python).events
+            DispatchQueue.main.async {
+                guard let self, gen == self.generation, self.starting, self.run == nil else { return }
+                self.starting = false
+                settings.events = events
+                let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
+                self.run = r
+                r.onEvent = { [weak self] e in self?.event(e) }
+                r.onFinish = { [weak self] o in self?.finished(o) }
+                r.start()
+                self.tick()
+                self.refresh()
+            }
+        }
         tick()
         refresh()
     }
 
     private func tick() {
         if signIn != nil { setSummary(signInStatus); return }
-        guard let run, run.isRunning else { return }
-        let s = Int(Date().timeIntervalSince(run.startedAt))
-        let t = String(format: "%d:%02d", s / 60, s % 60)
+        guard starting || run?.isRunning == true else { return }
+        let s = Int(Date().timeIntervalSince(run?.startedAt ?? startedAt))
+        let t = s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
         let signedIn = signedInSlot != nil ? ", signed in" : ""
-        if reached.known == 0 { setSummary(signedInSlot != nil ? "Starting the signed-in device…  \(t)" : "Starting three hidden devices…  \(t)") }
+        let on = devices == 1 ? "1 hidden device" : "\(devices) hidden devices"
+        let whole = settings.depth == 0
+        if reached.known == 0 { setSummary(signedInSlot != nil ? "Starting the signed-in device…  \(t)" : "Starting \(on)…  \(t)") }
         else if reached.depth < 0 { setSummary("Capturing \(reached.known) screens…  \(t)") }
+        else if whole {
+            // The whole app: how much is found and how much of that is still to open (a count; how long it takes is not known before the end).
+            let left = explored > 0 && explored < reached.known ? ", \(reached.known - explored) to open" : ""
+            setSummary("Mapping the whole app\(signedIn): \(reached.known) screen\(reached.known == 1 ? "" : "s") found\(left)  ·  \(on)  ·  \(t)")
+        }
         else { setSummary("Walking\(signedIn): \(reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"), \(reached.known) screen\(reached.known == 1 ? "" : "s") found  ·  \(t)") }
     }
 
@@ -468,6 +499,10 @@ final class ScreenMap: NSView {
         case .capturing(let screens, _):
             if settings.appearances.isEmpty { return }
             reached = (-1, screens)
+        case .screen(_, let title, let depth, let wasExplored):
+            guard wasExplored else { return }
+            explored += 1
+            host.walkExplored(depth: depth, title: title)
         case .line: return
         }
         tick()
@@ -638,7 +673,8 @@ final class ScreenMap: NSView {
     private func headerText(_ m: Made) -> String {
         let head = m.filed ? "\(String(m.source.head.commit.prefix(7)))" : "this walk"
         guard let base = m.source.base else {
-            return m.filed ? "\(head)  ·  no stored baseline yet: the map is plain" : "\(head)  ·  the build has no clean commit, so the walk is not filed and not compared"
+            return m.filed ? "\(head)  ·  saved to the history  ·  the first map of this app: later walks are compared with it"
+                           : "\(head)  ·  not saved to the history: the build has no commit, or was made with uncommitted changes"
         }
         let behind = m.baselineBehind.map { $0 > 0 ? "  ·  the baseline is \($0) commit\($0 == 1 ? "" : "s") behind" : "" } ?? ""
         let c = m.source.diff?.counts

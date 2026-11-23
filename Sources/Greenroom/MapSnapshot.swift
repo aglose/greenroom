@@ -26,8 +26,9 @@ enum MapJSON {
 /// How a walk was made (`.greenroom/map.json` in the repository). Two snapshots are compared only when their
 /// profiles have the same `id`; another profile is another history.
 struct MapProfile: Codable, Equatable {
-    var depth = 2
-    var seconds = 120
+    /// Taps deep, and the time budget in seconds; 0 is no limit, the whole app.
+    var depth = 0
+    var seconds = 0
     /// Deep links the walk starts from; none is the launcher activity.
     var starts: [String] = []
     /// The capture combinations, in order ("light", "dark").
