@@ -22,7 +22,7 @@ extension AppDelegate {
         func expect(_ good: Bool, _ what: String) { if !good { ok = false }; print("[greenroom] map: \(good ? "ok  " : "FAIL") \(what)") }
         func end() {
             print("[greenroom] map check: \(ok ? "PASS" : "FAIL")")
-            for k in ["mapAPK", "mapRun", "mapWalkDepth", "mapWalkTime", "mapCaptures", "mapStart"] { UserDefaults.standard.removeObject(forKey: k) }
+            for k in ["mapAPK", "mapRun", "mapWalkDepth", "mapWalkTime", "mapCaptures", "mapStart", "mapSignIn"] { UserDefaults.standard.removeObject(forKey: k) }
             fflush(stdout)
             Engine.shared.stopAll()
             exit(ok ? 0 : 1)
@@ -30,6 +30,14 @@ extension AppDelegate {
         workbench.showMap()
         map.setAPK(apk)
         map.configure(depth: 1, time: 1, captures: 1, start: "")   // a start link kept from an earlier run would change what is walked
+        map.chooseSignIn(nil)   // nor would a sign-in left chosen
+        // With no map yet, the sheet opens on the onboarding card: the app chosen, and Walk ready.
+        if map.data == nil {
+            expect(!map.onboarding.isHidden && map.onboarding.state.app == apk.lastPathComponent && map.onboarding.walkEnabled, "before a walk the sheet shows the onboarding card, ready to walk \(apk.lastPathComponent)")
+        }
+        // The card is captured once the sheet has arrived, then the walk starts.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+        if !map.onboarding.isHidden { captureWindow(to: dir.appendingPathComponent("0-onboarding.png")) }
         let started = Date()
         guard map.walk() else { expect(false, "the walk starts (Python 3 found)"); end(); return }
         var shotWalking = false
@@ -49,13 +57,14 @@ extension AppDelegate {
             }
             map.configure(depth: 1, time: 1, captures: 1, start: "apksim://slot")
             workbench.showMap()   // "Go there" closed the sheet
+            map.chooseSignIn(nil)   // opening re-picks a kept sign-in this Mac may have for the app
             guard map.walk() else { expect(false, "the second walk starts"); end(); return }
             let again = Date()
             Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
                 let t = Date().timeIntervalSince(again)
                 guard (!map.isWalking && (map.snapshot != nil || map.data == nil) && !map.host.navigator.busy) || t > 400 else { return }
                 timer.invalidate()
-                guard let src = map.host.source, map.data != nil else { expect(false, "the second walk finished with a map"); end(); return }
+                guard let src = map.host.source, map.data != nil else { expect(false, "the second walk finished with a map (\(map.statusText))"); end(); return }
                 expect(src.base?.commit.hasPrefix("1111111") == true && src.diff != nil, "the second walk is compared with the stored baseline")
                 expect(map.statusText != "" && src.head.commit.hasPrefix("2222222"), "and filed under its own commit")
                 expect(store.snapshot(profile: src.head.profile.id, commit: "2222222222222222222222222222222222222222") != nil, "the walk is in the store")
@@ -96,9 +105,24 @@ extension AppDelegate {
         }
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
             let t = Date().timeIntervalSince(started)
-            if !shotWalking, t > 14 { shotWalking = true; captureWindow(to: dir.appendingPathComponent("1-walking.png")) }
+            if !shotWalking, t > 14, map.isWalking {
+                shotWalking = true
+                captureWindow(to: dir.appendingPathComponent("1-walking.png"))
+                expect(map.onboarding.isHidden, "the onboarding card goes while the walk runs")
+                // Closed, the walk goes on and the top bar shows it; asking for a walk again joins it instead of starting another.
+                let running = map.run
+                map.close()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+                    let chip = workbench.walkChip
+                    expect(map.isWalking && !chip.isHidden && (chip.progress?.text.isEmpty == false), "with the map closed the top bar shows the walk: \(chip.progress?.text ?? "nothing")")
+                    captureWindow(to: dir.appendingPathComponent("1b-closed.png"))
+                    workbench.showMap(walk: true)
+                    expect(map.isOpen && map.run === running, "asking to walk again while one runs reopens it, not a new walk")
+                }
+            }
             guard (!map.isWalking && (map.snapshot != nil || map.data == nil) && !map.host.navigator.busy) || t > 400 else { return }
             timer.invalidate()
+            expect(workbench.walkChip.isHidden, "the top bar's walk chip goes when the walk ends")
             guard let data = map.data else { expect(false, "the walk finished with a map"); end(); return }
             let transitions = data.edges.filter { if case .screen = $0.to { return true } else { return false } }.count
             print(String(format: "[greenroom] map: %d screens, %d transitions, %d curves, %d crashes, %d combos, walked in %.0f s",
@@ -142,6 +166,7 @@ extension AppDelegate {
                     }
                 }
             }
+        }
         }
     }
 }

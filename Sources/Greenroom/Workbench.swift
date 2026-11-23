@@ -98,6 +98,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     let snapshotReview = SnapshotReview(frame: .zero)
     // The screen map (ScreenMap.swift): a full-stage sheet too.
     let screenMap = ScreenMap(frame: .zero)
+    /// The running walk in the top bar, while the map is closed as well as open.
+    let walkChip = WalkProgressChip()
     // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
     let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
@@ -482,7 +484,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), spacer, mirrorButton, group(layoutButtons), shot, recordButton, commands])
+        walkChip.onOpen = { [weak self] in self?.showMap() }
+        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), spacer, walkChip, mirrorButton, group(layoutButtons), shot, recordButton, commands])
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -693,6 +696,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         }
         screenMap.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         screenMap.onToggle = { [weak self] in self?.updateChrome() }
+        screenMap.onProgress = { [weak self] p in self?.walkChip.show(p) }
         screenMap.onGo = { [weak self] screen, map in self?.goThere(screen, map) }
         screenMap.context = { [weak self] apk in await self?.mapContext(for: apk) }
     }
