@@ -216,17 +216,24 @@ enum EvidenceCheck {
             expect(!before.isEmpty, "a has a data folder to protect (\(before.joined(separator: ",")))")
             sessions.walkAgain(a)
             var sawCopy = false
+            var instanceCopies = Set<String>()   // apksim 0.60 clones the walk's copy once per simulator: k<token><i>-0
             let again = await wait("the repeated walk", 420) {
                 if clones().contains(where: { fm.fileExists(atPath: $0.appendingPathComponent(marker).path) }) { sawCopy = true }
+                for pkg in (try? fm.contentsOfDirectory(at: data, includingPropertiesForKeys: nil)) ?? [] {
+                    for f in (try? fm.contentsOfDirectory(at: pkg, includingPropertiesForKeys: nil)) ?? []
+                    where f.lastPathComponent.hasPrefix("k") && !f.lastPathComponent.hasSuffix(".device")
+                        && fm.fileExists(atPath: f.appendingPathComponent(marker).path) { instanceCopies.insert(f.lastPathComponent) }
+                }
                 return ev.started == 3 && isDone(a.worktree.path, keyA)
             }
             expect(again, "\"Walk again\" walks a cached build once more")
             expect(sawCopy, "the walk ran on a copy of the data, which held the marker")
+            expect(instanceCopies.count >= 2, "the signed-in walk ran on more than one simulator, each on its own copy (\(instanceCopies.count) copies seen)")
             let after = slotFolders(a.slot).filter { fm.fileExists(atPath: $0.appendingPathComponent(marker).path) }
             expect(!after.isEmpty && after.allSatisfy { (try? String(contentsOf: $0.appendingPathComponent(marker), encoding: .utf8)) == "kept" },
                    "the marker in the session's data is unchanged after the walk")
             expect(slotFolders(a.slot).map { $0.lastPathComponent }.sorted() == before && clones().isEmpty, "no slot appeared or went, and the copy is deleted")
-            expect(ev.entry(of: a.worktree.path)?.note?.contains("copy of this session's data") == true, "the row's detail says it walked a copy")
+            expect(ev.entry(of: a.worktree.path)?.note?.contains("copies of this session's data") == true, "the row's detail says it walked copies")
 
             // 4. A new build cancels a running walk, and the newer one is walked.
             let cancelledBefore = ev.cancelledRuns

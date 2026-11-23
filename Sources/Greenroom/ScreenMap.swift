@@ -463,7 +463,6 @@ final class ScreenMap: NSView {
                 case .ready(let slot):
                     var ws = walkSettings
                     ws.keepData = true
-                    ws.jobs = 1   // the crawler walks a kept slot with one device
                     ws.engineOptions = ["--data-slots", slot]
                     self.signedInSlot = slot
                     self.startCrawl(python: python, apk: apk, out: out, settings: ws)
@@ -475,7 +474,6 @@ final class ScreenMap: NSView {
             // The kept sign-in: the walk runs on a copy of its data, which goes when the walk ends.
             var ws = walkSettings
             ws.keepData = true
-            ws.jobs = 1   // the crawler walks a kept slot with one device
             ws.engineOptions = ["--data-slots", slot]
             signedInSlot = slot
             lastSignedIn = true

@@ -3,7 +3,7 @@ import AppKit
 
 /// What a signed-in walk does first: a hidden simulator on a throwaway data slot runs one of the person's scripts
 /// (Scripts: their variables, `gr`), then quits, so the slot is left signed in. The crawler then walks that slot as
-/// it is (`--keep-data`, one simulator), and the slot goes when the walk has ended.
+/// it is (`--keep-data`; each simulator of the walk gets its own clone of it), and the slot goes when the walk has ended.
 ///
 /// - The person's own data (`gdphone`, a session's slot) is never touched: the slot is made for this walk.
 /// - The script runs online even when the walk is offline: a sign-in needs its server.

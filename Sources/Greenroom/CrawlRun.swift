@@ -133,7 +133,7 @@ final class CrawlRun {
         var appearances: [String] = ["light"]
         var offline = false
         var start: String?
-        /// Simulators the walk runs at once (the crawler forces 1 with `keepData`).
+        /// Simulators the walk runs at once (with `keepData`, each on its own clone of the slot: apksim 0.60).
         var jobs = CrawlRun.parallel
         /// `--events`: a line of JSON for each screen as it is explored (set when the crawler offers it: `Support.events`).
         var events = false
@@ -263,7 +263,7 @@ final class CrawlRun {
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let meta: [String: Any] = ["apk": apk.path, "depth": settings.depth, "seconds": settings.seconds,
                                    "appearances": settings.appearances, "offline": settings.offline, "start": settings.start ?? "",
-                                   "keptData": settings.keepData]
+                                   "keptData": settings.keepData, "jobs": settings.jobs]
         try? JSONSerialization.data(withJSONObject: meta).write(to: out.appendingPathComponent("greenroom.json"))
         CrawlRun.registry[ObjectIdentifier(self)] = self
     }

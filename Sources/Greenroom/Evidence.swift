@@ -639,10 +639,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
                 case .cloned(let name):
                     clone = name
                     settings.keepData = true
-                    settings.jobs = 1   // the crawler walks a kept slot with one simulator
                     settings.engineOptions = ["--data-slots", name]
-                    note = job.kept ? "walked signed in, on a copy of the kept sign-in with one simulator; the kept sign-in is untouched"
-                                    : "walked signed in, on a copy of this session's data with one simulator; the session's own data is untouched"
+                    note = job.kept ? "walked signed in, on copies of the kept sign-in; the kept sign-in is untouched"
+                                    : "walked signed in, on copies of this session's data; the session's own data is untouched"
                 case .none:
                     clone = fresh
                     settings.engineOptions = ["--data-slots", fresh]
@@ -1154,7 +1153,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
 /// A clone of a session's data slot for a walk to use and lose: the engine keeps a slot as
 /// `cache/data/<package>/<slot>-N` with a `<slot>-N.device` beside it (its /sdcard and Settings values); instance 0
 /// is the session's simulator. Verified by running `crawl.py --keep-data -- --data-slots NAME`: it uses exactly that
-/// slot (one simulator), and the original's files are byte for byte what they were.
+/// slot (each simulator of the walk on its own clone of it, since apksim 0.60), and the original's files are byte for byte what they were.
 enum SlotClone {
     enum Outcome { case cloned(String), none, failed(String) }
 
