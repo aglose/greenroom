@@ -20,7 +20,7 @@ final class SessionsController {
     private var generation = 0
     /// Slots whose simulator is to start as soon as the one that held the slot has exited.
     private var starting = Set<String>()
-    private static let noGit = "Sessions needs git: install the Command Line Tools (xcode-select --install)"
+    static let noGit = "Sessions needs git: install the Command Line Tools (xcode-select --install)"
     /// The modified time of the file each session's simulator was last started from. An event for a file that is
     /// no newer (the system touching a file it has just read or cloned) is not a build.
     private var launched: [String: Date] = [:]
@@ -33,6 +33,8 @@ final class SessionsController {
     private(set) lazy var mainBuilds = MainBuilds(sessions: self)
     /// Sessions clicked with no build: they are being built, and open when the build lands.
     var openWhenBuilt = Set<String>()
+    /// A worktree to build and open once a refresh lists it (a project folder or a clone added from the empty stage).
+    var runWhenListed: String?
     /// The walk and capture queue (Evidence.swift): every new build of a session is walked in the background.
     let evidence = Evidence()
 
@@ -331,6 +333,10 @@ final class SessionsController {
             if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
             self.sessions = ClaudeSessions.shared.attach(all)
             self.watch(all)
+            if let want = self.runWhenListed, let s = self.sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == want }) {
+                self.runWhenListed = nil
+                self.activate(s)
+            }
             if complete { self.autoArchive() }
             self.onChange?()
             self.mainBuilds.ensureAll()   // at most every ten minutes each, unless asked

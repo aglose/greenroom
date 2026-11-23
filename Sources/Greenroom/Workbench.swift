@@ -163,6 +163,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         emptyStage.onOpen = { [weak self] in self?.open($0) }
         DevHooks.shared.install(workbench: self, in: stack, over: grid)   // developer hooks (DevHooks.swift)
         emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
+        emptyStage.onFolder = { [weak self] in self?.sessions.chooseProjectToRun() }
+        emptyStage.onClone = { [weak self] in self?.sessions.askToClone() }
         timeline.isHidden = true
         compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
         timelineHeight = timeline.heightAnchor.constraint(equalToConstant: 0)
