@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mapCheckIfAsked()
         mapSignInCheckIfAsked()
         arrangeCheckIfAsked()
+        resizeCheckIfAsked()
         PrivacyCheck.runIfAsked(self)   // scripts/network-check.sh
         matrixCheckIfAsked()
         PerfCheck.runIfAsked(self)   // `--snapshots-check`, SnapshotCheck.swift
