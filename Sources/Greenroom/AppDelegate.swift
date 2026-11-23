@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionsCheckIfAsked()
         scriptsCheckIfAsked()
         buildsCheckIfAsked()
+        mainCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
         recipesCheckIfAsked()
@@ -509,6 +510,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--builds-check"), i + 2 < args.count else { return }
         BuildsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
+    /// `Greenroom --main-check DIR APK`: see MainCheck.
+    private func mainCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--main-check"), i + 2 < args.count else { return }
+        MainCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
     }
 
     /// `Greenroom --claude-check DIR`: see ClaudeCheck.

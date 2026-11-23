@@ -211,12 +211,17 @@ enum SessionsCheck {
             _ = await wait("c's and d's builds", 30) { row("c")?.outputs != nil && row("d")?.outputs != nil }
             if row("c")?.outputs == nil { sessions.refresh(); _ = await wait("c's and d's builds", 30) { row("c")?.outputs != nil && row("d")?.outputs != nil } }
 
-            // 5b. A click on a session whose build was deleted (gradle clean) says so and opens nothing.
+            // 5b. A click on a session whose build was deleted (gradle clean) builds it, to open when it lands: nothing
+            // opens now. (This repository has no Gradle, so the build fails, and nothing opens later either.)
             guard let d0 = row("d") else { say("FAIL d missing"); failures += 1; finish() }
             try? fm.removeItem(at: apkPath("d"))
             let before = Engine.shared.simulators.count
-            expect(!sessions.activate(d0) && Engine.shared.simulators.count == before && sessions.simulator(for: d0) == nil,
-                   "a click on a session whose APK was deleted starts nothing")
+            let took = sessions.activate(d0)
+            expect(took && sessions.buildQueue.job(for: d0) != nil && Engine.shared.simulators.count == before && sessions.simulator(for: d0) == nil,
+                   "a click on a session whose APK was deleted starts its build, not a simulator")
+            sessions.cancelBuild(d0)
+            _ = await wait("d's build to end", 60) { !(sessions.buildQueue.job(for: d0)?.isActive ?? false) }
+            expect(!sessions.openWhenBuilt.contains(d0.worktree.path), "a build that ended without an APK opens nothing later")
             _ = place(apkPath("d"))
             sessions.refresh()
             _ = await wait("d's build again", 30) { row("d")?.outputs != nil }
