@@ -27,6 +27,14 @@ final class ScreenMap: NSView {
     var onGo: ((MapScreen, ScreenMapData) -> Void)?
     /// The selected simulator's session worktree, whose `.greenroom/scripts` are offered for signing in too.
     var worktree: () -> URL? = { nil }
+    /// The key of the app's kept sign-in (SignIns): the selected session's repository; nil keys it by the APK's name.
+    var signInKey: () -> String? = { nil }
+    /// "Sign In Once…": opens the app on a visible device (apk, key, the app's name; true when a sign-in was kept).
+    var signInOnce: ((URL, String, String, @escaping (Bool) -> Void) -> Void)?
+    private func keptKey(_ apk: URL) -> String { signInKey() ?? SignIns.key(apk: apk) }
+    private var kept: SignIns.Record? { effectiveAPK.flatMap { SignIns.shared.record(keptKey($0)) } }
+    /// The menu's choice is the kept sign-in.
+    var usesKeptSignIn: Bool { signInPopup.selectedItem?.representedObject as? String == "kept" }
     /// The history a walked APK belongs to (see MapContext); nil: not in one.
     var context: (URL) async -> MapContext? = { _ in nil }
 
@@ -323,9 +331,20 @@ final class ScreenMap: NSView {
         signInPopup.addItem(withTitle: "No sign-in")
         for s in scripts { signInPopup.addItem(withTitle: "Sign in with " + s.name + (s.fromWorktree ? " (session)" : "")) }
         signInPopup.menu?.addItem(.separator())
+        // The kept sign-in ("Sign In Once"), when the app has one: the choice unless a script was chosen.
+        var keptAt: Int?
+        if let k = kept {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .none
+            signInPopup.addItem(withTitle: "Signed in (kept \(f.string(from: k.date)))")
+            signInPopup.lastItem?.representedObject = "kept"
+            keptAt = signInPopup.numberOfItems - 1
+        }
+        signInPopup.addItem(withTitle: kept == nil ? "Sign In Once…" : "Sign In Again…")
+        signInPopup.lastItem?.representedObject = "once"
+        signInPopup.lastItem?.toolTip = "Opens the app on a device you can see. Sign in as you would on a phone and press Use This Sign-In: walks then start signed in, on a copy of that device's data."
         signInPopup.addItem(withTitle: "New Sign-in Script…")
         signInPopup.lastItem?.representedObject = "new"
-        let i = scripts.firstIndex { $0.name == wanted }.map { $0 + 1 } ?? 0
+        let i = scripts.firstIndex { $0.name == wanted }.map { $0 + 1 } ?? (wanted == nil ? keptAt : nil) ?? 0
         signInPopup.selectItem(at: i)
     }
 
@@ -346,6 +365,19 @@ final class ScreenMap: NSView {
         if signInPopup.selectedItem?.representedObject as? String == "new" {
             do { NSWorkspace.shared.open(try Scripts.newScript()) } catch { onSay?("Could not write a new script", true) }
             reloadScripts()
+            return
+        }
+        if signInPopup.selectedItem?.representedObject as? String == "once" {
+            reloadScripts()
+            guard let apk = effectiveAPK, let begin = signInOnce else { return }
+            let name = (apk.deletingPathExtension().lastPathComponent)
+            begin(apk, keptKey(apk), signInKey().map { URL(fileURLWithPath: String($0.dropFirst(5))).lastPathComponent } ?? name) { [weak self] kept in
+                guard let self else { return }
+                if kept { UserDefaults.standard.removeObject(forKey: "mapSignIn") }
+                self.reloadScripts()
+                self.open()
+                if kept { self.setSummary("Sign-in kept. Walk the app to map it signed in.") }
+            }
             return
         }
         UserDefaults.standard.set(signInScript?.name, forKey: "mapSignIn")
@@ -439,6 +471,15 @@ final class ScreenMap: NSView {
                 case .cancelled: self.finished(.cancelled)
                 }
             }
+        } else if usesKeptSignIn, let k = kept, case .cloned(let slot) = SlotClone.make(slot: k.slot, in: SignIns.dataRoot) {
+            // The kept sign-in: the walk runs on a copy of its data, which goes when the walk ends.
+            var ws = walkSettings
+            ws.keepData = true
+            ws.jobs = 1   // the crawler walks a kept slot with one device
+            ws.engineOptions = ["--data-slots", slot]
+            signedInSlot = slot
+            lastSignedIn = true
+            startCrawl(python: python, apk: apk, out: out, settings: ws)
         } else {
             startCrawl(python: python, apk: apk, out: out, settings: walkSettings)
         }
@@ -544,7 +585,9 @@ final class ScreenMap: NSView {
         let outOfTime = map.incomplete.contains { $0.hasPrefix("--max-seconds") } ? "stopped at the time limit" : nil
         parts += [unexplored, outOfTime].compactMap { $0 }
         parts.append(String(format: "%.0f s", map.seconds))
-        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  "))
+        // A sign-in the walk met: said after the counts, with what to do about it.
+        let wall = live ? SignInWall.find(map).note(kept: lastSignedIn) : nil
+        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  ") + (wall.map { "\n" + $0.replacingOccurrences(of: "\"Sign In Once…\"", with: "\"Sign In Once…\" in the sign-in menu").replacingOccurrences(of: "\"Sign In Again…\"", with: "\"Sign In Again…\" in the sign-in menu") } ?? ""), problem: wall != nil)
         let crashes = map.crashes.count
         crashChip.isHidden = crashes == 0
         crashChip.title = crashes == 1 ? "1 crash" : "\(crashes) crashes"

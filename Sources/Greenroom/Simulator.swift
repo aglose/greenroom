@@ -30,6 +30,8 @@ final class Simulator {
     static let stateChanged = Notification.Name("GreenroomSimulatorStateChanged")
     /// Called on the main thread.
     var onState: ((State) -> Void)?
+    /// Every input a person makes on this simulator, as it is sent ("Sign In Once" records it).
+    var onPerform: ((SimulatorInput) -> Void)?
     var onSize: ((CGSize) -> Void)?
 
     private let process = Process()

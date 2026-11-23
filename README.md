@@ -52,6 +52,13 @@ version of it and adds the workbench.
   Keychain (needs `brew install 1password-cli` with 1Password > Settings > Developer > Integrate with 1Password CLI;
   Test in Settings checks a reference). Build recipes get the other variables too. An agent can run a script you have switched on for agents in
   Settings, as it was then, and never sees a value.
+- **Sign in once**: when a walk stops at a sign-in (its row reads "needs sign-in" and says why), "Sign In Once…" in
+  the session row's menu or the Screen Map's sign-in menu opens the app on a device you can see. Sign in as you would
+  on a phone and press "Use This Sign-In": that device's data is kept as the repository's sign-in, and every walk
+  starts from a copy of it, so the kept one never changes. What you did is recorded as a script in your scripts
+  folder, with what you typed kept as variables in the Keychain and never in the script; when a later walk opens on
+  the sign-in screen again, Greenroom runs that script on a hidden device, keeps the new sign-in and walks again.
+  "Forget Sign-In" deletes the kept data.
 - **Signed-in screen map**: in the Screen Map, pick "Sign in with <script>" and the walk first runs that script on a
   hidden device of its own, then walks the whole app on that device's signed-in data (one device, as the crawler
   walks kept data). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.
