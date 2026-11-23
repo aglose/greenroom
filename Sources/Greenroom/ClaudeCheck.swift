@@ -55,7 +55,12 @@ enum ClaudeCheck {
             try? fm.createDirectory(at: base, withIntermediateDirectories: true)
             let repo = base.appendingPathComponent("repo", isDirectory: true)
             let other = base.appendingPathComponent("other", isDirectory: true)
-            guard makeRepo(repo), makeRepo(other) else { say("FAIL could not make the repositories (is /usr/bin/git there?)"); failures += 1; finish() }
+            // `other` is an Android app (a Gradle wrapper and an application module): only such a repository is offered.
+            let notes = base.appendingPathComponent("notes", isDirectory: true)
+            guard makeRepo(repo), makeRepo(other), makeRepo(notes) else { say("FAIL could not make the repositories (is /usr/bin/git there?)"); failures += 1; finish() }
+            try? "#!/bin/sh\nexit 1\n".write(to: other.appendingPathComponent("gradlew"), atomically: true, encoding: .utf8)
+            try? fm.createDirectory(at: other.appendingPathComponent("app"), withIntermediateDirectories: true)
+            try? "plugins { id(\"com.android.application\") }\n".write(to: other.appendingPathComponent("app/build.gradle.kts"), atomically: true, encoding: .utf8)
             func wt(_ n: String) -> URL { base.appendingPathComponent("wt-" + n, isDirectory: true) }
             for n in ["live", "desk", "done", "arch", "dead", "sub", "small"] {
                 guard git(["worktree", "add", "-q", "-b", "feat-" + n, wt(n).path], in: repo) else { say("FAIL could not make worktree \(n)"); failures += 1; finish() }
@@ -257,10 +262,12 @@ enum ClaudeCheck {
             // 6. A repository with sessions that was not added is offered; adding it takes the offer away.
             put(json: ["title": "Fixture: other one", "cwd": other.path, "originCwd": other.path, "lastActivityAt": hourAgo], at: full.desktop.appendingPathComponent("local_fixture-other.json"))
             put(["{\"type\":\"user\",\"cwd\":\"\(other.path)\",\"gitBranch\":\"main\"}"].joined(separator: "\n") + "\n", at: full.projects.appendingPathComponent("-fixture-other/cli-other.jsonl"))
+            // A repository that is no Android project, with a session too: never offered.
+            put(json: ["title": "Fixture: notes", "cwd": notes.path, "originCwd": notes.path, "lastActivityAt": hourAgo], at: full.desktop.appendingPathComponent("local_fixture-notes.json"))
             claude.reload()
             let offered = await wait("the offer") { claude.offers.first?.repository == other.resolvingSymlinksInPath() }
             expect(offered && claude.offers.count == 1 && claude.offers.first?.count == 2,
-                   "a repository with 2 Claude sessions that was not added is offered (\(claude.offers.map { "\($0.repository.lastPathComponent) \($0.count)" }.joined(separator: ", ")))")
+                   "a repository with 2 Claude sessions that was not added is offered, one that is no Android project is not (\(claude.offers.map { "\($0.repository.lastPathComponent) \($0.count)" }.joined(separator: ", ")))")
             _ = await sessions.addRepository(other).value
             let gone = await wait("the offer to go") { claude.offers.isEmpty && sessions.sessions.count == 9 }
             expect(gone, "adding it lists its worktree and withdraws the offer (\(sessions.sessions.count) rows)")
