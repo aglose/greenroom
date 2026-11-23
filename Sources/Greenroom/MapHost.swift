@@ -147,6 +147,9 @@ final class MapHost: NSView {
         ghosts.walkReached(depth: depth, exploring: exploring)
     }
 
+    /// A screen the walk has finished with: one ghost of its level stops breathing and takes its title.
+    func walkExplored(depth: Int, title: String) { ghosts.explored(depth: depth, title: title) }
+
     /// The ghosts go and the map shows (a walk is over).
     func endWalk() {
         ghosts.stop()
@@ -255,6 +258,10 @@ final class MapHost: NSView {
 final class MapGhosts: NSView {
     private var levels: [Int: Int] = [:]
     private var layers: [String: CALayer] = [:]
+    /// Explored screens: how many of each level, and the title each settled ghost shows.
+    private var named: [Int: Int] = [:]
+    private var titles: [String: String] = [:]
+    private var labels: [String: CATextLayer] = [:]
     private let metrics = MapLayout.Metrics()
 
     override var isFlipped: Bool { true }
@@ -272,6 +279,14 @@ final class MapGhosts: NSView {
         place()
     }
 
+    /// A screen of level `depth` is explored: the level's next ghost settles and is named.
+    func explored(depth: Int, title: String) {
+        let i = named[depth, default: 0]
+        named[depth] = i + 1
+        titles["\(depth)-\(i)"] = title
+        place()
+    }
+
     /// Hides them, their columns forgotten.
     func stop() {
         isHidden = true
@@ -282,6 +297,32 @@ final class MapGhosts: NSView {
         levels = [:]
         layers.values.forEach { $0.removeFromSuperlayer() }
         layers = [:]
+        named = [:]; titles = [:]; labels = [:]
+    }
+
+    /// A ghost whose screen is explored: steady, a little brighter, its title inside.
+    private func settle(_ g: CALayer, key: String, scale: CGFloat) {
+        guard let title = titles[key] else { return }
+        let label: CATextLayer
+        if let l = labels[key] { label = l } else {
+            g.removeAnimation(forKey: "breathe")
+            g.backgroundColor = NSColor(white: 1, alpha: 0.13).cgColor
+            label = CATextLayer()
+            label.string = title.isEmpty ? "Untitled" : title
+            label.foregroundColor = Design.mute.cgColor
+            label.alignmentMode = .center
+            label.isWrapped = true
+            label.truncationMode = .end
+            label.contentsScale = window?.backingScaleFactor ?? 2
+            label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            g.addSublayer(label)
+            labels[key] = label
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        label.fontSize = max(6, 11 * scale)
+        label.frame = g.bounds.insetBy(dx: 6 * scale, dy: g.bounds.height * 0.38)
+        label.isHidden = g.bounds.width < 44
+        CATransaction.commit()
     }
 
     private func place() {
@@ -300,7 +341,7 @@ final class MapGhosts: NSView {
             for i in 0..<n {
                 let key = "\(d)-\(i)"
                 let frame = CGRect(x: originX + CGFloat(d) * metrics.columnPitch * scale, y: top + CGFloat(i) * metrics.rowPitch * scale, width: w * scale, height: h * scale)
-                if let g = layers[key] { g.frame = frame; continue }
+                if let g = layers[key] { g.frame = frame; settle(g, key: key, scale: scale); continue }
                 let g = CALayer()
                 g.frame = frame
                 g.cornerRadius = 12

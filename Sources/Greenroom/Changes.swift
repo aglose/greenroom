@@ -460,7 +460,7 @@ final class ChangesRun {
                     switch e {
                     case .level(let d, _, let k): depth = d; known = k
                     case .capturing(let n, _): depth = -1; known = n
-                    case .line: return
+                    case .line, .screen: return
                     }
                     self.state = .walking(depth: depth, known: known, since: since)
                 }, completion: { [weak self] result in
@@ -502,7 +502,7 @@ final class ChangesRun {
                 switch e {
                 case .level(let d, _, let k): depth = d; known = k
                 case .capturing(let n, _): depth = -1; known = n
-                case .line: return
+                case .line, .screen: return
                 }
                 self.state = .walking(depth: depth, known: known, since: since)
             }, completion: { c.resume(returning: $0) })

@@ -61,6 +61,7 @@ enum MapFixtures {
         var rng = MapRandom(seed: seed)
         let commit = sha("commit|\(seed)|\(n)"), short = String(commit.prefix(7))
         var profile = MapProfile()
+        profile.depth = 2; profile.seconds = 120   // the fixtures' own budget: their bytes are pinned
         profile.combos = combos
         var screens: [MapSnapshot.Screen] = []
         var edges: [MapSnapshot.Edge] = []

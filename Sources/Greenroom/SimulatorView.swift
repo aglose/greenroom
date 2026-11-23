@@ -12,6 +12,7 @@ enum SimulatorInput {
 
 extension Simulator {
     func perform(_ input: SimulatorInput) {
+        onPerform?(input)
         let size = deviceSize
         func px(_ f: CGPoint) -> (CGFloat, CGFloat) {
             (min(max(f.x * size.width, 0), max(size.width - 1, 0)), min(max(f.y * size.height, 0), max(size.height - 1, 0)))

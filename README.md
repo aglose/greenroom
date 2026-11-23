@@ -52,11 +52,26 @@ version of it and adds the workbench.
   Keychain (needs `brew install 1password-cli` with 1Password > Settings > Developer > Integrate with 1Password CLI;
   Test in Settings checks a reference). Build recipes get the other variables too. An agent can run a script you have switched on for agents in
   Settings, as it was then, and never sees a value.
+- **Sign in once**: when a walk stops at a sign-in (its row reads "needs sign-in" and says why), "Sign In Once…" in
+  the session row's menu or the Screen Map's sign-in menu opens the app on a device you can see. Sign in as you would
+  on a phone and press "Use This Sign-In": that device's data is kept as the repository's sign-in, and every walk
+  starts from a copy of it, so the kept one never changes. What you did is recorded as a script in your scripts
+  folder, with what you typed kept as variables in the Keychain and never in the script; when a later walk opens on
+  the sign-in screen again, Greenroom runs that script on a hidden device, keeps the new sign-in and walks again.
+  "Forget Sign-In" deletes the kept data.
 - **Signed-in screen map**: in the Screen Map, pick "Sign in with <script>" and the walk first runs that script on a
   hidden device of its own, then walks the whole app on that device's signed-in data (one device, as the crawler
   walks kept data). Your own devices' data is never used or changed, and the walk's copy is removed when it ends.
   A script that fails stops the walk with its last line.
-- **Map history**: every walk of a committed, clean build is kept as a snapshot of the app's screens for that commit,
+- **Map history**: a walk covers the whole app by default, with no depth or time limit (it stops by itself after four
+  hours and says so), on several hidden devices at once: the Mac's performance cores less two, six at most. A walk
+  on signed-in data uses one device. The Screen Map's menus still offer a shallower or shorter walk, and a
+  repository's "Quick Walks Only" (a session row's menu) keeps its own walks to two taps and two minutes. While a
+  walk runs, the row and the Screen Map say how many screens are found and how many are still to open, and the map's
+  placeholder cards take each screen's title as it is explored. A finished walk says whether it was saved to the
+  history; one of a build made with uncommitted changes is not, until "Save Map to History Anyway" says the changes
+  were to files the app is not built from. Every walk of a
+  committed, clean build is kept as a snapshot of the app's screens for that commit,
   with each capture stored once however many commits show it. The Screen Map opens a branch's map against the
   snapshot of its merge base with the base branch (or the nearest earlier commit that has one, and says how far
   behind it is): screens added in green, removed in red, modified in amber with why (pixels, structure, text,

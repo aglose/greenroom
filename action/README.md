@@ -24,7 +24,8 @@ jobs:
         with: { apk: app/build/outputs/apk/debug/app-debug.apk, engine-image: "ghcr.io/OWNER/greenroom-engine:1.2.3" }
 ```
 
-The profile is `.greenroom/map.json` (`depth`, `seconds`, `starts`, `combos`, `signIn`, `offline`; all optional).
+The profile is `.greenroom/map.json` (`depth`, `seconds`, `starts`, `combos`, `signIn`, `offline`; all optional). With no
+`depth` and `seconds` the walk covers the whole app, as the app's own walks do; give the job the time for it.
 Other profiles are other histories, so the people on the team need the same file.
 
 **Signed in.** A profile with `signIn` needs credentials on the runner: a sign-in script the engine can run headless,

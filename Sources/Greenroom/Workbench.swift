@@ -682,6 +682,15 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                                      screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
         screenMap.defaultAPK = { [weak self] in self?.selected?.apk }
         screenMap.worktree = { [weak self] in self?.selected.flatMap { self?.worktree(of: $0) } }
+        screenMap.signInKey = { [weak self] in
+            guard let self, let w = self.selected.flatMap({ self.worktree(of: $0) }) else { return nil }
+            return self.sessions.sessions.first { $0.worktree.path == w.path }.map { SignIns.key(workspace: $0.workspace) }
+        }
+        screenMap.signInOnce = { [weak self] apk, key, app, done in
+            guard let self else { return }
+            self.screenMap.close()   // the stage, with the device to sign in on, is under the sheet
+            if !SignInOnce.begin(workbench: self, apk: apk, key: key, app: app, done: done) { done(false) }
+        }
         screenMap.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         screenMap.onToggle = { [weak self] in self?.updateChrome() }
         screenMap.onGo = { [weak self] screen, map in self?.goThere(screen, map) }

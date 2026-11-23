@@ -15,9 +15,11 @@ import AppKit
 /// - Main thread only, except where marked.
 final class Evidence: NSObject, NSMenuItemValidation {
     struct Budget {
-        var depth = 2
-        var seconds = 120
-        var jobs = 2
+        /// The whole app, with no time budget: a build's map is the app's history, so it has to be all of it. The first
+        /// walk of a repository is the long one; later ones redo only the screens a commit's changed files could touch.
+        var depth = 0
+        var seconds = 0
+        var jobs = CrawlRun.parallel
     }
 
     enum Status: Equatable {
@@ -40,6 +42,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var impact: ImpactNote? = nil
         /// What sharing the map through git did, or what went wrong, in words (nil when the workspace does not share).
         var share: String? = nil
+        /// While walking: the screens the walk has finished with (the crawler's `--events`; 0 when it has none).
+        var explored = 0
+        /// While walking: the whole app is being walked, not only what a change could touch.
+        var whole = false
+        /// The finished walk is in the history as its commit's snapshot.
+        var saved = false
+        /// Whether the finished walk met a sign-in (its first screen, or screens inside).
+        var wall = SignInWall.none
+        /// The walk started from the app's kept sign-in.
+        var signedIn = false
     }
 
     /// A walk's plan and what came of it (packages I1, I2), kept beside its map as `greenroom-impact.json`. Absent for a
@@ -84,7 +96,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     }
 
     /// What a walk does not reach, said in the row's detail.
-    static let limits = "The walk taps through the app a level or two deep within a time budget. It does not reach screens behind typed input, a signed-in server state it has no data for, or a gesture it does not try."
+    static let limits = "The walk taps through the whole app, several simulators at once. It does not reach screens behind typed input, a signed-in server state it has no data for, or a gesture it does not try."
 
     var store: SessionStore = .shared {
         didSet {
@@ -143,6 +155,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var finishing = false
         /// "Walk Everything Again": a full walk whatever the impact says.
         var forceFull = false
+        /// The walk starts from the app's kept sign-in (SignIns), not the session's own data.
+        var kept = false
         /// How it walks (I1), once planned; the folder holding the seed and the only-file.
         var plan: History.WalkPlan?
         var workDir: URL?
@@ -278,9 +292,12 @@ final class Evidence: NSObject, NSMenuItemValidation {
         drop(worktree)
         if force { try? fm.removeItem(at: map) }
         // The data of this session is used only when the workspace asked for it.
-        let slot = withData ? (controller?.sessions.first { $0.worktree.path == worktree }?.slot ?? SessionStore.slot(for: URL(fileURLWithPath: worktree))) : nil
+        // The app's kept sign-in ("Sign In Once") comes first; else this session's own data, when the workspace asked for it.
+        let kept = keptSignIn(worktree)?.slot
+        let slot = kept ?? (withData ? (controller?.sessions.first { $0.worktree.path == worktree }?.slot ?? SessionStore.slot(for: URL(fileURLWithPath: worktree))) : nil)
         entries[worktree] = Entry(key: build.key, date: build.date, status: .queued, note: nil)
         let job = walkJob(owner: worktree, build: build, slot: slot)
+        job.kept = kept != nil
         job.force = force
         job.forceFull = fullNext.remove(worktree) != nil
         queue.append(job)
@@ -316,15 +333,40 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     /// A finished walk of a build that has a clean commit is filed in the history store, off the main thread.
     private func file(_ job: Job, folder: URL) {
-        guard let profile = job.profile, History.fileable(job.build) else { return }
-        let build = job.build, root = store.root, engine = Engine.shared.version
-        let candidates = candidates(for: job)
-        let key = build.key, owner = job.owner, seed = job.plan?.seedSnapshot, planProblem = job.plan?.shareProblem
+        guard let profile = job.profile else { return }
+        file(build: job.build, owner: job.owner, profile: profile, folder: folder, candidates: candidates(for: job), seed: job.plan?.seedSnapshot, planProblem: job.plan?.shareProblem)
+    }
+
+    /// "Save Map to History Anyway": the build of the row's finished walk was made with uncommitted changes; the person
+    /// says it stands for its commit, and the walk that is there is filed as that commit's snapshot.
+    @discardableResult
+    func saveToHistoryAnyway(worktree: String) -> Bool {
+        guard let build = lastBuild[worktree], let e = entries[worktree], e.key == build.key, case .done = e.status, build.dirty,
+              let sha = build.sha, !sha.isEmpty, !sha.hasPrefix("-") else { return false }
+        let folder = mapFolder(for: build.key)
+        // The walk's own settings, as it wrote them: the profile is the one the walk was made with.
+        guard let meta = (try? JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("greenroom.json")))) as? [String: Any] else { return false }
+        let profile = Self.profile(depth: meta["depth"] as? Int ?? budget.depth, seconds: meta["seconds"] as? Int ?? budget.seconds,
+                                   appearances: meta["appearances"] as? [String] ?? ["light"], start: (meta["start"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                                   signedIn: meta["keptData"] as? Bool ?? false, offline: meta["offline"] as? Bool ?? false)
+        History.accept(build.key)
+        let all = controller?.workspaces ?? []
+        let own = controller?.sessions.first { $0.worktree.path == worktree }?.workspace.path
+        file(build: build, owner: worktree, profile: profile, folder: folder, candidates: own.map { p in all.filter { $0.root.path == p } } ?? all, seed: nil, planProblem: nil)
+        onChange?()
+        return true
+    }
+
+    private func file(build: Build, owner: String, profile: MapProfile, folder: URL, candidates: [Workspace], seed: MapSnapshot?, planProblem: String?) {
+        guard History.fileable(build) else { return }
+        let root = store.root, engine = Engine.shared.version
+        let key = build.key
         filing[key] = Task { @MainActor [weak self] in
             let filed = await Task.detached {
                 await History.filed(walk: folder, build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine, seed: seed)
             }.value
             self?.filing[key] = nil
+            if let self, filed != nil, var e = self.entries[owner], e.key == key { e.saved = true; self.entries[owner] = e; self.onChange?() }
             // Sharing through git: said on the row, once, in words; it never stops a walk.
             if let self, let filed, filed.shared != nil || filed.shareProblem != nil || planProblem != nil, var e = self.entries[owner], e.key == key {
                 if let why = filed.shareProblem ?? planProblem { e.share = "The map was not shared through git: \(why)" + (filed.shared.map { " (\($0))" } ?? "") }
@@ -404,7 +446,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         guard current?.owner != owner, !queue.contains(where: { $0.owner == owner }) else { return true }
         let dir = evidenceFolder.appendingPathComponent(build.key, isDirectory: true)
         // The same data as the session's walks, so the same profile and so the same snapshot.
-        let slot = withData ? (controller?.sessions.first { $0.worktree.path == worktree }?.slot ?? SessionStore.slot(for: URL(fileURLWithPath: worktree))) : nil
+        let kept = keptSignIn(worktree)?.slot
+        let slot = kept ?? (withData ? (controller?.sessions.first { $0.worktree.path == worktree }?.slot ?? SessionStore.slot(for: URL(fileURLWithPath: worktree))) : nil)
         let job = Job(owner: owner, build: build, kind: .walk(slot: slot), part: dir.appendingPathComponent("verify.part", isDirectory: true),
                       final: dir.appendingPathComponent("verify", isDirectory: true))
         job.force = true
@@ -572,6 +615,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         s.depth = budget.depth
         s.seconds = budget.seconds
         s.jobs = budget.jobs
+        // "Quick Walks Only" for the repository: two taps deep, two minutes.
+        if !job.isChanges, controller?.walksQuick(worktree: job.verifyOf ?? job.owner) == true { s.depth = 2; s.seconds = 120 }
         s.appearances = ["light"]
         s.background = true   // evidence walks yield to everything the person is doing
         if case .changes(let base) = job.kind { s.base = base.apk; s.start = job.start; s.baseOption = job.baseOption }
@@ -596,7 +641,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     settings.keepData = true
                     settings.jobs = 1   // the crawler walks a kept slot with one simulator
                     settings.engineOptions = ["--data-slots", name]
-                    note = "walked signed in, on a copy of this session's data with one simulator; the session's own data is untouched"
+                    note = job.kept ? "walked signed in, on a copy of the kept sign-in with one simulator; the kept sign-in is untouched"
+                                    : "walked signed in, on a copy of this session's data with one simulator; the session's own data is untouched"
                 case .none:
                     clone = fresh
                     settings.engineOptions = ["--data-slots", fresh]
@@ -624,6 +670,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     if job.cancelled { self.finish(job, .cancelled); return }
                     var settings = settings
                     job.plan = plan
+                    settings.events = CrawlRun.knownSupport(python: python)?.events ?? false
+                    if !job.isChanges, var e = self.entries[job.owner], e.key == job.build.key { e.whole = plan?.seed == nil && settings.depth == 0; self.entries[job.owner] = e }
                     if let plan {
                         settings.recordDeps = plan.recordDeps
                         settings.seed = plan.seed
@@ -653,6 +701,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
         switch e {
         case .level(let depth, _, let known): entry.status = .walking(depth: depth, known: known)
         case .capturing(let screens, _): entry.status = .walking(depth: -1, known: screens)
+        case .screen(_, _, _, let explored):
+            guard explored else { return }
+            entry.explored += 1
         case .line: return
         }
         entries[job.owner] = entry
@@ -701,6 +752,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         let part = job.part, final = job.final
         var result: Result<ChangesResult, Failure> = .failure(Failure(message: "cancelled"))
         var status: Status?
+        var wall = SignInWall.none
         switch end {
         case .finished where job.forgotten || job.cancelled:
             try? fm.removeItem(at: part)
@@ -708,6 +760,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             try? fm.removeItem(at: final)
             if (try? fm.moveItem(at: part, to: final)) != nil, let data = ScreenMapData.read(final) {
                 status = Self.done(data)
+                if !job.isChanges, job.verifyOf == nil { wall = SignInWall.find(data) }
                 if let plan = job.plan, !plan.isFull || plan.reason != nil { Self.writeImpactNote(Self.note(plan, walk: final), final) }
                 result = .success(ChangesResult(folder: final, map: data, summary: Self.summary(of: final)))
                 if !job.isChanges { file(job, folder: final) }
@@ -728,8 +781,12 @@ final class Evidence: NSObject, NSMenuItemValidation {
             e.status = status
             e.note = job.note
             e.impact = Self.impactNote(final)
+            e.wall = wall
+            e.signedIn = job.kept
             entries[job.owner] = e
         }
+        // The kept sign-in stopped working and there is a recorded script: sign in again with it, once for a build, and walk again.
+        if !job.isChanges, wall == .atStart, job.kept, !job.cancelled { renewSignIn(worktree: job.owner, build: job.build) }
         let waiters = job.waiters
         job.waiters.removeAll()
         for w in waiters { w.completion(result) }
@@ -867,10 +924,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
     func label(_ e: Entry) -> String {
         switch e.status {
         case .queued: return "walk queued"
-        case .walking(_, let known): return known > 0 ? "walking… \(known) screen\(known == 1 ? "" : "s")" : "walking…"
+        case .walking(let depth, let known):
+            // "mapping": the whole app, the first time or when asked; "walking": only what a change could touch.
+            let verb = e.whole ? "mapping" : "walking"
+            guard known > 0 else { return verb + "…" }
+            if depth < 0 { return "capturing \(known) screen\(known == 1 ? "" : "s")…" }
+            return "\(verb)… \(known) screen\(known == 1 ? "" : "s")" + (e.explored > 0 && e.explored < known ? ", \(known - e.explored) to open" : "")
         case .done(let n, let crashes, let unfinished):
             let screens = e.impact.map { !$0.full ? "walked \($0.walked) of \($0.total) screens" : nil } ?? nil
-            return (screens ?? "\(n) screen\(n == 1 ? "" : "s")") + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : "") + (unfinished ? ", not finished" : "")
+            let signIn = e.wall == .none ? "" : (e.wall == .atStart && e.signedIn ? ", sign-in expired" : ", needs sign-in")
+            return (screens ?? "\(n) screen\(n == 1 ? "" : "s")") + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : "") + (unfinished ? ", not finished" : "") + signIn
         case .failed: return "walk failed"
         case .stopped: return "walk stopped"
         }
@@ -882,9 +945,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case .failed(let why): lines.append(why)
         case .stopped: lines.append("The walk was stopped. \"Walk again\" starts it.")
         case .done(_, _, true): lines.append("The walk ran out of time before it had tried everything. \"Walk again\" tries again.")
+        case .queued, .walking:
+            if e.whole { lines.append("Mapping the whole app, on up to \(budget.jobs) hidden devices at once. This is the long walk: once the app has a map, a new build only redoes the screens its changes could touch.") }
         default: break
         }
+        if case .done = e.status, let w = e.wall.note(kept: e.signedIn) { lines.append(w) }
         if let n = e.note { lines.append(n.prefix(1).uppercased() + n.dropFirst() + ".") }
+        if case .done = e.status, let build = lastBuildFor(e) {
+            if let why = History.whyNotFiled(build) { lines.append("Not saved to the history: \(why)." + (build.dirty && build.sha != nil ? " \"Save Map to History Anyway\" keeps it, if the changes were to files the app is not built from." : "")) }
+            else if e.saved, let sha = build.sha { lines.append("Saved to the history for commit \(sha.prefix(7)).") }
+        }
         if case .done = e.status, let i = e.impact {
             for l in Self.impactLines(i) { lines.append(l) }
         }
@@ -951,8 +1021,15 @@ final class Evidence: NSObject, NSMenuItemValidation {
         let stop = NSMenuItem(title: "Stop Walking", action: #selector(stopMenu(_:)), keyEquivalent: "")
         let auto = NSMenuItem(title: "Walk New Builds Automatically", action: #selector(autoMenu(_:)), keyEquivalent: "")
         let data = NSMenuItem(title: "Walk with My Signed-In Data", action: #selector(dataMenu(_:)), keyEquivalent: "")
-        for i in [again, everything, verify, stop, auto, data, share, shareSignedIn] { i.target = self }
-        return [.separator(), again, everything, verify, stop, auto, data, share, shareSignedIn]
+        let quick = NSMenuItem(title: "Quick Walks Only", action: #selector(quickMenu(_:)), keyEquivalent: "")
+        quick.toolTip = "Off: a walk covers the whole app, which is what its history needs; the first one is long, later ones redo only what changed. On: every walk stops two taps deep after two minutes."
+        let save = NSMenuItem(title: "Save Map to History Anyway", action: #selector(saveAnywayMenu(_:)), keyEquivalent: "")
+        save.toolTip = "This build was made with uncommitted changes, so its map is not kept as its commit's. Choose this when the changes were to files the app is not built from."
+        let signIn = NSMenuItem(title: "Sign In Once…", action: #selector(signInMenu(_:)), keyEquivalent: "")
+        signIn.toolTip = "Opens the app on a device you can see. Sign in as you would on a phone and press Use This Sign-In: every walk of this repository then starts signed in, on a copy of that device's data. What you do is recorded as a script, with what you type kept in your Keychain."
+        let forget = NSMenuItem(title: "Forget Sign-In", action: #selector(forgetSignInMenu(_:)), keyEquivalent: "")
+        for i in [again, everything, verify, stop, save, signIn, forget, auto, data, quick, share, shareSignedIn] { i.target = self }
+        return [.separator(), again, everything, verify, stop, save, .separator(), signIn, forget, data, .separator(), auto, quick, share, shareSignedIn]
     }
 
     @objc private func shareMenu(_ sender: Any?) {
@@ -963,6 +1040,70 @@ final class Evidence: NSObject, NSMenuItemValidation {
         guard let s = clickedSession(), let c = controller else { return }
         c.setShareMaps(c.sharesMaps(s), signedIn: !c.sharesSignedInMaps(s), for: s)
     }
+
+    // MARK: Sign-in
+
+    /// The key of the app's kept sign-in: one for a repository, whatever the worktree.
+    func signInKey(_ worktree: String) -> String? {
+        controller?.sessions.first { $0.worktree.path == worktree }.map { SignIns.key(workspace: $0.workspace) }
+    }
+    func keptSignIn(_ worktree: String) -> SignIns.Record? { SignIns.shared.record(signInKey(worktree)) }
+
+    /// Builds a kept sign-in was already renewed for: once each, so a script that no longer signs in is not run in a loop.
+    private var renewed: Set<String> = []
+    private var renewing: MapSignIn?
+
+    /// The kept sign-in no longer works (a walk from it opened on the sign-in screen): the recorded script signs in
+    /// again on a hidden device, its data becomes the kept sign-in, and the build is walked again. Without a script,
+    /// the row says so and "Sign In Again…" is the way.
+    private func renewSignIn(worktree: String, build: Build) {
+        guard let key = signInKey(worktree), let r = SignIns.shared.record(key), let name = r.script, !renewed.contains(build.key), renewing == nil else { return }
+        let url = Scripts.folder.appendingPathComponent(name)
+        guard FileManager.default.isExecutableFile(atPath: url.path) else { return }
+        renewed.insert(build.key)
+        let s = MapSignIn(apk: build.apk, script: Scripts.Script(url: url, fromWorktree: false), worktree: URL(fileURLWithPath: worktree))
+        renewing = s
+        if var e = entries[worktree], e.key == build.key { e.note = "the kept sign-in stopped working: signing in again with \(name)"; entries[worktree] = e; onChange?() }
+        s.start { [weak self] outcome in
+            guard let self else { return }
+            self.renewing = nil
+            switch outcome {
+            case .ready(let slot):
+                SlotClone.remove(r.slot, in: SignIns.dataRoot)
+                if SignIns.adopt(slot, as: r.slot) {
+                    SignIns.shared.set(SignIns.Record(slot: r.slot, date: Date(), script: name), key: key)
+                    self.request(worktree: worktree, build: build, force: true, walk: true, withData: false)
+                } else { MapSignIn.discard(slot) }
+            case .failed(let why):
+                if var e = self.entries[worktree], e.key == build.key { e.note = "signing in again with \(name) did not work (\(why))"; self.entries[worktree] = e; self.onChange?() }
+            case .cancelled: break
+            }
+        }
+    }
+
+    @objc private func signInMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller, let wb = c.workbench, let build = lastBuild[s.worktree.path] ?? s.build else { return }
+        let key = SignIns.key(workspace: s.workspace), app = s.workspace.lastPathComponent
+        SignInOnce.begin(workbench: wb, apk: build.apk, key: key, app: app) { [weak self] kept in
+            guard kept, let self else { return }
+            // Every session of the repository that has a build is walked again, signed in.
+            for other in c.sessions where other.workspace == s.workspace { self.renewed = []; c.walkAgain(other) }
+        }
+    }
+    @objc private func forgetSignInMenu(_ sender: Any?) {
+        guard let s = clickedSession() else { return }
+        SignIns.shared.forget(SignIns.key(workspace: s.workspace))
+        onChange?()
+    }
+
+    @objc private func quickMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller else { return }
+        c.setQuickWalk(!c.walksQuick(s), for: s)
+    }
+    @objc private func saveAnywayMenu(_ sender: Any?) { clickedSession().map { _ = saveToHistoryAnyway(worktree: $0.worktree.path) } }
+
+    /// The build an entry's walk was of, when it is still the row's newest.
+    private func lastBuildFor(_ e: Entry) -> Build? { lastBuild.values.first { $0.key == e.key } }
 
     @objc private func walkEverythingMenu(_ sender: Any?) {
         guard let s = clickedSession() else { return }
@@ -993,6 +1134,14 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case #selector(stopMenu(_:))?: return isWalking(s.worktree.path)
         case #selector(autoMenu(_:))?: item.state = controller?.auto(of: s) == .off ? .off : .on; return true
         case #selector(dataMenu(_:))?: item.state = controller?.walksWithData(s) == true ? .on : .off; return true
+        case #selector(signInMenu(_:))?:
+            item.title = keptSignIn(s.worktree.path) != nil ? "Sign In Again…" : "Sign In Once…"
+            return controller?.hasBuild(s) == true && !SignInOnce.isRunning
+        case #selector(forgetSignInMenu(_:))?: return keptSignIn(s.worktree.path) != nil
+        case #selector(quickMenu(_:))?: item.state = controller?.walksQuick(s) == true ? .on : .off; return true
+        case #selector(saveAnywayMenu(_:))?:
+            guard let b = lastBuild[s.worktree.path], let e = entries[s.worktree.path], e.key == b.key, case .done = e.status else { return false }
+            return b.dirty && b.sha != nil && !History.isAccepted(b.key)
         case #selector(shareMenu(_:))?: item.state = controller?.sharesMaps(s) == true ? .on : .off; return true
         case #selector(shareSignedInMenu(_:))?:
             item.state = controller?.sharesSignedInMaps(s) == true ? .on : .off
