@@ -113,11 +113,11 @@ scripts/bundle.sh --check
 ```
 
 This downloads the apksim release named in `engine.lock` (checked against the SHA-256 there), builds
-`build/Greenroom.app` with the engine inside, signs it ad hoc and runs a bundled test app headless through it.
+`build/Greenroom.app` with the engine inside, signs it (with this Mac's Apple Development identity if it has one, else ad hoc) and runs a bundled test app headless through it.
 
 | Option | |
 | --- | --- |
-| `--identity NAME` | sign with a real identity (library validation on, secure timestamp) instead of ad hoc |
+| `--identity NAME` | sign with this identity (`-` for ad hoc). By default: the Mac's Apple Development identity, else ad hoc. A team identity lets the Keychain keep trusting each new build with your variables; an ad hoc build asks for every variable again after each rebuild |
 | `--engine DIR --testapp APK` | bundle an unpacked apksim release of your own |
 | `--version X.Y.Z` | the app's version |
 | `--check` | verify the signatures and run the smoke test |
