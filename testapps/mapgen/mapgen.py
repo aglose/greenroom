@@ -486,7 +486,7 @@ fun App() {{
     NavigationBar {{
       sections.forEach {{ s ->
         NavigationBarItem(selected = entry?.destination?.route == s.route, onClick = {{
-          nav.navigate(s.route) {{ popUpTo(nav.graph.findStartDestination().id) {{ saveState = true }}; launchSingleTop = true; restoreState = true }}
+          nav.navigate(s.route) {{ {tabnav} }}
         }}, icon = {{ Icon(s.icon, null) }}, label = {{ Text(s.label) }})
       }}
     }}
@@ -614,7 +614,9 @@ def render(model, a, out):
     routes = "\n".join(f'      composable("{sid}") {{ {fn(sid)}(nav) }}' for sid in model["order"])
     secs = ", ".join(f'Section("{sec["root"]}", {kstr(sec["label"])}, Icons.Filled.{sec["icon"]})' for sec in model["sections"])
     write(os.path.join(kdir, "Main.kt"), MAIN.format(pkg=pkg, imgs=", ".join(f"R.drawable.img_{i:02d}" for i in range(a.images)),
-                                                     sections=secs, start=model["sections"][0]["root"], routes=routes))
+                                                     sections=secs, start=model["sections"][0]["root"], routes=routes,
+                                                     tabnav=("popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true"
+                                                             if a.keep_section_state else "popUpTo(nav.graph.findStartDestination().id); launchSingleTop = true")))
 
 
 def main():
@@ -629,6 +631,9 @@ def main():
     p.add_argument("--images", type=int, default=24, help="distinct pictures in the app (default 24)")
     p.add_argument("--links", type=float, default=0.15, help="share of screens with a link to a screen elsewhere (default 0.15)")
     p.add_argument("--animated", type=int, default=0, help="screens with an endless animation (default 0)")
+    p.add_argument("--keep-section-state", action="store_true",
+                   help="a tab reopens its section where it was left (saveState/restoreState, as many apps do); by default "
+                        "a tab opens the section's root, so where a tab leads does not depend on what was visited before")
     p.add_argument("--mutate", default="", help="KIND=N,... of restyle, retext, restructure, relink, add, remove")
     p.add_argument("--mutation-seed", type=int, default=1)
     p.add_argument("--package", default="dev.greenroom.mapgen")

@@ -20,6 +20,7 @@ testapps/mapgen/mapgen.py --out /tmp/mapgen-b --seed 7 --screens 300 --sections 
 | `--images N` | distinct generated pictures (24) |
 | `--links F` | share of screens with a button to a screen elsewhere (0.15) |
 | `--animated N` | screens with an endless animation, which a walk cannot settle (0) |
+| `--keep-section-state` | a tab reopens its section where it was left, as many apps do. Off by default: then a tab always opens the section's root, so where it leads does not depend on what a walk visited before (with it on, two walks of one build disagree on most screens' routes) |
 | `--mutate KIND=N,...` | a second build: `restyle` (pixels), `retext` (words), `restructure` (blocks of controls), `relink` (a button's target), `add`, `remove` (a leaf screen) |
 | `--mutation-seed N` | which screens the mutations pick |
 | `--package ID`, `--version N` | application id (`dev.greenroom.mapgen`) and versionCode |
