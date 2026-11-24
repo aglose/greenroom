@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 /// The main window: running simulators and recent APKs in a sidebar, the selected simulator beside it,
 /// device controls in the toolbar. An APK dropped anywhere on the window opens.
-final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     let window: NSWindow
     private let table = NSTableView()
     private let grid = SimulatorGrid(frame: .zero)
@@ -158,10 +158,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                           backing: .buffered, defer: false)
         super.init()
         window.title = Variant.name
+        window.delegate = self
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 900, height: 560)
-        window.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        window.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.toolbarStyle = .unified
         window.titlebarAppearsTransparent = true
@@ -246,6 +245,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         reload()
         sessions.onChange = { [weak self] in self?.setNeedsSidebar() }   // the rows only: the stage did not change
         sessions.install(workbench: self)
+    }
+
+    func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
+        newFrame
     }
 
     // MARK: Opening and selecting

@@ -183,9 +183,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
             recordBar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
         ])
 
-        root.frame = NSRect(x: 0, y: 0, width: 340, height: 520)
         view = root
-        preferredContentSize = root.frame.size
         refresh()
     }
 
