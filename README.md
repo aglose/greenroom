@@ -10,6 +10,9 @@ version of it and adds the workbench.
 **Status: early.** Today:
 
 - Open APKs (drop, ⌘O, double-click in Finder, recent list); each runs as a simulator inside the Greenroom window.
+- No APK yet? The first screen builds one from source: "Open a project folder…" adds an Android app's repository
+  to Sessions and builds its working copy, and "Clone from GitHub…" clones a repository into `~/Developer` and does
+  the same. The app opens when the build lands.
 - The mouse is the finger, the scroll wheel scrolls, the keyboard types, ⌘V pastes.
 - Toolbar: Back, Home, Rotate, light/dark, the device (phone, foldable, tablet, desktop, TV, switched while the app
   runs), Screenshot, Restart, Close.
@@ -68,7 +71,10 @@ version of it and adds the workbench.
   on signed-in data does the same, each device on its own copy of the data. The Screen Map's menus still offer a shallower or shorter walk, and a
   repository's "Quick Walks Only" (a session row's menu) keeps its own walks to two taps and two minutes. While a
   walk runs, the row and the Screen Map say how many screens are found and how many are still to open, and the map's
-  placeholder cards take each screen's title as it is explored. A finished walk says whether it was saved to the
+  placeholder cards take each screen's title as it is explored. A walk started in the Screen Map goes on when the
+  sheet closes: the top bar shows how far it has got (click it to reopen the map), asking for another walk joins the
+  running one, and stopping one that has run a while asks first. Before an app's first walk the Screen Map shows the
+  three things that decide it (the app, signing in, how far) with Walk under them. A finished walk says whether it was saved to the
   history; one of a build made with uncommitted changes is not, until "Save Map to History Anyway" says the changes
   were to files the app is not built from. Every walk of a
   committed, clean build is kept as a snapshot of the app's screens for that commit,
