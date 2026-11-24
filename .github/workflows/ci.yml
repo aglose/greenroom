@@ -9,7 +9,34 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # What a pull request changed: one that only touches Markdown and docs/ needs no Mac runner (the account's few Mac
+  # runners are shared with apksim's CI, so a busy day queues every build behind them). `build`, the required check,
+  # is then skipped, which counts as passed; a path filter on the workflow would leave it pending for ever. Pushes to
+  # main run everything, and if the diff step fails its output is empty and everything runs.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          code=true
+          if [[ "${{ github.event_name }}" == pull_request ]]; then
+            files=$(git diff --no-renames --name-only "$BASE...$HEAD_SHA")
+            [[ -z "$files" ]] || printf '%s\n' "$files" | grep -qvE '\.md$|^docs/' || code=false
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code changes: $code"
   build:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}  # also when `changes` failed
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -20,6 +47,8 @@ jobs:
           path: build/engine-cache
           key: engine-${{ hashFiles('engine.lock') }}
       - name: Build, sign ad hoc, run the bundled test app
+        env:
+          GREENROOM_SWIFT_FLAGS: -Xswiftc -no-whole-module-optimization  # faster on the runner's 3 cores (bundle.sh)
         run: scripts/bundle.sh --check
       - name: Disk image
         run: scripts/dmg.sh
