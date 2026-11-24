@@ -322,11 +322,19 @@ final class ScriptRun {
 /// A script's output as it runs, in a window of its own, with Stop.
 final class ScriptWindow: NSWindowController, NSWindowDelegate {
     private static var open: [ScriptWindow] = []
-    private let run: ScriptRun
+    /// Nil for a window showing a run that has already ended (a quick sign-in's output).
+    private let run: ScriptRun?
+    private let script: Scripts.Script
+    private weak var sim: Simulator?
     private let text = NSTextView()
     private let status = NSTextField(labelWithString: "Running…")
     private let stop = NSButton(title: "Stop", target: nil, action: nil)
+    /// "Don't Offer": takes back the quick sign-in this run has just saved.
+    private let undoOffer = NSButton(title: "Don't Offer", target: nil, action: nil)
+    private var savedOffer: SignInOffers.Offer?
     private var finished = false
+    /// Called when a run saved a quick sign-in, or one was taken back (the stage looks again).
+    static var onOffersChanged: (() -> Void)?
 
     /// Starts `script` on `sim` and shows its window. Manual runs may take up to ten minutes.
     @discardableResult
@@ -338,22 +346,36 @@ final class ScriptWindow: NSWindowController, NSWindowDelegate {
             if let parent { a.beginSheetModal(for: parent) } else { a.runModal() }
             return nil
         }
-        let w = ScriptWindow(run: run)
-        open.append(w)
-        w.showWindow(nil)
-        if let parent, let win = w.window {
-            let f = parent.frame
-            win.setFrameTopLeftPoint(NSPoint(x: f.maxX - win.frame.width - 24, y: f.maxY - 80))
-        }
+        let w = ScriptWindow(script: script, simName: sim.name, run: run)
+        w.sim = sim
+        w.present(relativeTo: parent)
         w.begin()
         return w
     }
 
-    private init(run: ScriptRun) {
+    /// A window with the output of a run that has ended, as a quick sign-in's failure shows it.
+    static func showFinished(script: Scripts.Script, simName: String, outcome: ScriptRun.Outcome, relativeTo parent: NSWindow?) {
+        let w = ScriptWindow(script: script, simName: simName, run: nil)
+        w.present(relativeTo: parent)
+        outcome.output.forEach(w.append)
+        w.done(outcome)
+    }
+
+    private func present(relativeTo parent: NSWindow?) {
+        Self.open.append(self)
+        showWindow(nil)
+        if let parent, let win = window {
+            let f = parent.frame
+            win.setFrameTopLeftPoint(NSPoint(x: f.maxX - win.frame.width - 24, y: f.maxY - 80))
+        }
+    }
+
+    private init(script: Scripts.Script, simName: String, run: ScriptRun?) {
         self.run = run
+        self.script = script
         let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 320),
                              styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
-        window.title = "\(run.script.name) on \(run.simName)"
+        window.title = "\(script.name) on \(simName)"
         window.isFloatingPanel = false
         window.hidesOnDeactivate = false
         super.init(window: window)
@@ -374,7 +396,12 @@ final class ScriptWindow: NSWindowController, NSWindowDelegate {
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
 
-        let bar = NSStackView(views: [status, stop])
+        undoOffer.target = self
+        undoOffer.action = #selector(takeBackOffer(_:))
+        undoOffer.bezelStyle = .rounded
+        undoOffer.isHidden = true
+        undoOffer.toolTip = "Don't show a sign-in button for this script on this screen"
+        let bar = NSStackView(views: [status, undoOffer, stop])
         bar.orientation = .horizontal
         status.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let stack = NSStackView(views: [scroll, bar])
@@ -395,12 +422,43 @@ final class ScriptWindow: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     private func begin() {
+        guard let run else { return }
         run.onLine = { [weak self] line in self?.append(line) }
-        let run = self.run
+        let sim = self.sim
+        let simID = sim.map(ObjectIdentifier.init)
+        if let simID { QuickSignIn.scriptRunning.insert(simID) }
         DispatchQueue.global(qos: .userInitiated).async {
+            // The screen it starts from: a sign-in it leaves becomes a quick sign-in (SignInOffers).
+            let before = sim.flatMap(SignInOffers.capture)
             let o = run.runSync(timeout: 600)
-            DispatchQueue.main.async { [weak self] in self?.done(o) }
+            var after: SignInOffers.Print?
+            if o.code == 0, o.failure == nil, before?.looksLikeSignIn == true, let sim, sim.isAlive { after = SignInOffers.capture(sim) }
+            DispatchQueue.main.async { [weak self] in
+                if let simID { QuickSignIn.scriptRunning.remove(simID) }
+                self?.done(o)
+                if let before, let after, !before.matches(after) { self?.offer(on: before) }
+            }
         }
+    }
+
+    /// The run signed in from `screen` and left it: that screen offers the script from now on, once it is saved.
+    private func offer(on screen: SignInOffers.Print) {
+        guard SignInOffers.shared.add(script, on: screen), let saved = SignInOffers.shared.offers.last else { return }
+        savedOffer = saved
+        status.stringValue = "Finished · this sign-in screen now shows a button that runs \(script.name)"
+        status.toolTip = status.stringValue
+        undoOffer.isHidden = false
+        Self.onOffersChanged?()
+        NSAccessibility.post(element: status, notification: .announcementRequested, userInfo: [.announcement: status.stringValue])
+    }
+
+    @objc private func takeBackOffer(_ sender: Any?) {
+        guard let o = savedOffer else { return }
+        SignInOffers.shared.remove(o)
+        savedOffer = nil
+        undoOffer.isHidden = true
+        status.stringValue = "Finished"
+        Self.onOffersChanged?()
     }
 
     private func append(_ line: String) {
@@ -422,11 +480,11 @@ final class ScriptWindow: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func stopOrClose(_ sender: Any?) {
-        if finished { window?.close() } else { run.cancel(); status.stringValue = "Stopping…" }
+        if finished { window?.close() } else { run?.cancel(); status.stringValue = "Stopping…" }
     }
 
     func windowWillClose(_ notification: Notification) {
-        if !finished { run.cancel() }
+        if !finished { run?.cancel() }
         Self.open.removeAll { $0 === self }
     }
 }

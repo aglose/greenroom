@@ -121,6 +121,30 @@ enum ScriptsCheck {
             expect("... nor once disallowed", Scripts.approval(good) == .no)
             expect("a worktree's script is never an agent's", Scripts.approval(Scripts.Script(url: good.url, fromWorktree: true)) == .no)
 
+            // 3b. Quick sign-in: a screen is known again by its activity and texts, not by what was typed.
+            func node(_ text: String = "", hint: String = "", field: Bool = false, password: Bool = false) -> ScreenNode {
+                var n = ScreenNode(); n.text = text; n.hint = hint; n.field = field; n.password = password; return n
+            }
+            let act = "com.example.percy.MainActivity"
+            let login = SignInOffers.Print(activity: act, nodes: [node("PERCYSAFE"), node("Tailscale Active"), node("Server URL"),
+                node(hint: "Enter Server URL", field: true), node(hint: "Username", field: true), node(hint: "Password", field: true, password: true),
+                node("Connect"), node("Weather, Atlas, Fitness and Finance")])
+            let typed = SignInOffers.Print(activity: act, nodes: [node("PERCYSAFE"), node("Tailscale Active"), node("Server URL"),
+                node("nvr.tail1234.ts.net", hint: "Enter Server URL", field: true), node("ann", hint: "Username", field: true),
+                node("••••••", hint: "Password", field: true, password: true), node("Connect"), node("Weather, Atlas, Fitness and Finance")])
+            let home = SignInOffers.Print(activity: act, nodes: [node("Cameras"), node("Front door"), node("Garage"), node("Settings")])
+            let other = SignInOffers.Print(activity: "com.example.other.MainActivity", nodes: login.anchors.map { node($0) } + [node(password: true)])
+            expect("a sign-in screen looks like one", login.looksLikeSignIn && !home.looksLikeSignIn)
+            expect("typed text is not part of a screen's fingerprint", !typed.anchors.contains("ann") && !typed.anchors.contains("nvr.tail1234.ts.net"), typed.anchors.joined(separator: "|"))
+            expect("the sign-in screen with text typed is the same screen", login.matches(typed) && typed.matches(login))
+            expect("the screen after signing in is not", !login.matches(home))
+            expect("another app's screen with the same texts is not", !login.matches(other))
+            let offers = SignInOffers(file: nil)
+            expect("an offer is saved once per screen and script", offers.add(good, on: login) && !offers.add(good, on: typed) && offers.offers.count == 1)
+            expect("... and found on that screen only", offers.offers(for: typed).count == 1 && offers.offers(for: home).isEmpty)
+            expect("a script named sign-in-percysafe.sh reads as Sign in to Percysafe",
+                   QuickSignIn.title(Scripts.Script(url: URL(fileURLWithPath: "/x/sign-in-percysafe.sh"), fromWorktree: false)) == "Sign in to Percysafe")
+
             // 4. A second phone of the same APK while the first runs starts on a clone, gone once it has exited.
             guard let second = wb.openBeside(apk: apk, device: "phone"), await wait("the second phone", 240, { ready(second) }) else {
                 expect("a second phone opens", false); return finish()

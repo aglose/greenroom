@@ -235,7 +235,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         reload()
         sessions.onChange = { [weak self] in self?.setNeedsSidebar() }   // the rows only: the stage did not change
         sessions.install(workbench: self)
+        let quick = QuickSignIn(workbench: self)
+        quickSignIn = quick
+        ScriptWindow.onOffersChanged = { [weak quick] in quick?.refresh() }
     }
+
+    /// The "Sign in with…" button on a device whose screen a script signed in from before (SignInOffers).
+    private var quickSignIn: QuickSignIn?
 
     // MARK: Opening and selecting
 
