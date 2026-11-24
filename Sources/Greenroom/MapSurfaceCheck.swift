@@ -230,6 +230,7 @@ enum MapSurfaceCheck {
             after(1.2) { [self] in
                 sample("whole map")
                 expect(surface.detail == .far && surface.liveCards == 0, "the whole map is far: tiles and titles, \(surface.layerCount) layers, no cards")
+                expect(surface.mosaicShown && surface.mosaicCopies > 0, "far away the cards still show their pictures, small: \(surface.mosaicCopies) copies in one bitmap")
                 capture("1-far.png")
                 sweep()
             }

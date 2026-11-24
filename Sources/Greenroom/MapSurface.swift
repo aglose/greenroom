@@ -136,6 +136,15 @@ final class MapSurface: NSView {
     private var groupTitles: [CATextLayer] = []
     /// Far away: a filled path per status, dim and lit.
     private var dotLayers: [[CAShapeLayer]] = []
+    /// Far away, over the tiles: the cards' pictures in one bitmap for the region in view (MapMosaic).
+    private let mosaicLayer = CALayer()
+    private let mosaic: MapMosaic
+    private struct MosaicKey: Equatable { let region: CGRect; let scale: CGFloat; let focus: Int?; let combo: String; let version: Int }
+    private var builtMosaic: MosaicKey?
+    private var askedMosaic: MosaicKey?
+    /// Bumped when small copies were loaded (there is more to draw) and when the map changes.
+    private var mosaicVersion = 0
+    private var mosaicMap = 0
     private let edgesLayer = CALayer()
     private var lines: [CAShapeLayer] = [], tips: [CAShapeLayer] = []
     private let cardsLayer = CALayer()
@@ -202,7 +211,13 @@ final class MapSurface: NSView {
 
     init(pyramid: MapPyramid) {
         self.pyramid = pyramid
+        mosaic = MapMosaic(pyramid: pyramid)
         super.init(frame: .zero)
+        mosaic.onLoaded = { [weak self] in
+            guard let self else { return }
+            self.mosaicVersion += 1
+            if self.detail == .far { self.update() }
+        }
         wantsLayer = true
         layerContentsRedrawPolicy = .never
         layer?.addSublayer(content)
@@ -216,6 +231,10 @@ final class MapSurface: NSView {
             for l in pair { l.fillColor = color.cgColor; l.isHidden = true; content.addSublayer(l) }
             dotLayers.append(pair)
         }
+        mosaicLayer.isHidden = true
+        mosaicLayer.contentsGravity = .resize
+        mosaicLayer.minificationFilter = .trilinear
+        content.addSublayer(mosaicLayer)
         content.addSublayer(edgesLayer)
         for s in EdgeStyle.allCases {
             let line = CAShapeLayer(), tip = CAShapeLayer()
@@ -345,6 +364,10 @@ final class MapSurface: NSView {
 
         builtEdges = nil
         dotsFocus = .none
+        mosaicMap += 1
+        builtMosaic = nil
+        askedMosaic = nil
+        mosaicLayer.contents = nil
         fitLimits()
         detail = Self.detail(at: enclosingScrollView?.magnification ?? 1)
         levelChanged()
@@ -442,6 +465,7 @@ final class MapSurface: NSView {
         decorate()
         let t3 = CACurrentMediaTime()
         buildEdges(visible, m)
+        buildMosaic(visible, m)
         placeRing(m)
         CATransaction.commit()
         let t4 = CACurrentMediaTime()
@@ -522,6 +546,11 @@ final class MapSurface: NSView {
         let far = detail == .far
         for pair in dotLayers { for l in pair { l.isHidden = !far } }
         cardsLayer.isHidden = far
+        mosaicLayer.isHidden = !far
+        if !far {
+            mosaicLayer.contents = nil
+            builtMosaic = nil
+        }
         groupOutlines.isHidden = detail > .middle
         for t in groupTitles { t.isHidden = detail > .middle }
         if far {
@@ -787,6 +816,7 @@ final class MapSurface: NSView {
             c.wanted = nil
             want(c, i, tier ?? .large)
         }
+        if !screens.isEmpty { buildMosaic(lastVisible, magnification) }
     }
 
     private static let titles = DispatchQueue(label: "greenroom-map-titles", qos: .userInitiated)
@@ -872,6 +902,56 @@ final class MapSurface: NSView {
         }
         for (b, pair) in dotLayers.enumerated() { for k in 0..<2 { pair[k].path = paths[b][k] } }
     }
+
+    /// The pictures over the tiles: one bitmap for the region around the view, drawn off the main thread at the
+    /// view's resolution or the mosaic's finest, whichever is coarser. Asked for again when the view leaves the
+    /// region, the magnification moves well away from what was drawn, the focus moves or more small copies came; one
+    /// at a time, the tiles showing through wherever a picture is not there yet.
+    private func buildMosaic(_ visible: CGRect, _ m: CGFloat) {
+        guard detail == .far, askedMosaic == nil else { return }
+        let seen = visible.intersection(bounds)
+        guard !seen.isEmpty else { return }
+        let focus = focusIndex
+        let region = visible.insetBy(dx: -visible.width * 0.25, dy: -visible.height * 0.25).intersection(bounds).integral
+        var scale = min(m * (window?.backingScaleFactor ?? 2), MapMosaic.finest)
+        let pixels = region.width * region.height * scale * scale
+        if pixels > MapMosaic.pixelBudget { scale *= (MapMosaic.pixelBudget / pixels).squareRoot() }
+        if let b = builtMosaic, b.focus == focus, b.combo == combo, b.version == mosaicVersion, b.region.insetBy(dx: -1, dy: -1).contains(seen),
+           scale <= b.scale * 1.3, scale >= b.scale * 0.6 { return }
+        var items: [MapMosaic.Item] = []
+        cards(in: region) { i in
+            guard screens[i].tile == nil, let blob = screens[i].captures[combo] ?? screens[i].captures.values.sorted().first else { return }
+            let color: NSColor? = switch status[i] {
+            case .added?: Design.accent
+            case .removed?: Design.record
+            case .modified?: Design.warning
+            case .notCompared?: Design.mute
+            default: nil
+            }
+            items.append(MapMosaic.Item(frame: captureFrames[i], blob: blob, border: color?.cgColor, lit: focus == nil || i == focus || related.contains(i)))
+        }
+        let key = MosaicKey(region: region, scale: scale, focus: focus, combo: combo, version: mosaicVersion)
+        askedMosaic = key
+        let map = mosaicMap
+        mosaic.render(items, region: region, scale: scale) { [weak self] picture in
+            guard let self, self.mosaicMap == map else { return }
+            self.askedMosaic = nil
+            guard self.detail == .far else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if let picture {
+                self.mosaicLayer.frame = region
+                self.mosaicLayer.contents = picture.contents
+                self.builtMosaic = key
+            }
+            // The view may have moved on while this was drawn.
+            if picture != nil { self.buildMosaic(self.lastVisible, self.magnification) }
+            CATransaction.commit()
+        }
+    }
+    /// Whether the far view has its pictures now, and the small copies in memory: for checks.
+    var mosaicShown: Bool { !mosaicLayer.isHidden && mosaicLayer.contents != nil }
+    var mosaicCopies: Int { mosaic.copiesInMemory }
 
     // MARK: Routes
 
@@ -1002,6 +1082,7 @@ final class MapSurface: NSView {
         for (i, c) in live { style(c, i) }
         CATransaction.setDisableActions(true)
         if detail == .far { buildDots() }
+        buildMosaic(lastVisible, magnification)
         buildEdges(lastVisible, magnification, force: true)
         placeRing(magnification)
         placePills()

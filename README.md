@@ -84,8 +84,8 @@ version of it and adds the workbench.
   routes). A screen whose layout changed is followed as the same screen, not as one gone and one new. A strip across
   the top holds the stored snapshots; drag its two handles to compare any two, a release candidate against the last
   one included. The map opens on what changed and its neighbours, folds the rest, groups screens by the section they
-  hang from, and has filters, search (⌘F) and a minimap; it stays quick at a few thousand screens and zooms to the
-  capture's own pixels. A screen's column shows base, head and the difference, what text and controls changed, and
+  hang from, and has filters, search (⌘F) and a minimap; it stays quick at a few thousand screens and zooms from the
+  whole map, every card a small picture of its screen, to the capture's own pixels. A screen's column shows base, head and the difference, what text and controls changed, and
   the screen's captures over time. Changes answers from stored snapshots with no walk when both builds have one.
   "Export…" writes a folder with one `index.html` that shows the same comparison in any browser, for people without
   Greenroom. With "Share screen maps through git" on for a workspace (off by default), snapshots are kept in the
