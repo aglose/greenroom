@@ -176,10 +176,18 @@ final class MapPyramid {
             guard let raw = fetch(blob, 0), !isCancelled() else { return nil }
             return rounded(raw, width: raw.width)
         }
+        return thumbnail(blob, tier, isCancelled: isCancelled).flatMap { rounded($0, width: $0.width) }
+    }
+
+    /// The 96-pixel thumbnail as it is on disk, corners square: what the mosaic scales its small copies from. Any
+    /// thread but the main one.
+    func thumbnail(_ blob: String) -> CGImage? { thumbnail(blob, .small, isCancelled: { false }) }
+
+    private func thumbnail(_ blob: String, _ tier: Tier, isCancelled: () -> Bool) -> CGImage? {
         let url = file(blob, tier)
         if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
            let img = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) {
-            return rounded(img, width: img.width)
+            return img
         }
         guard let raw = fetch(blob, Tier.large.rawValue * 3), !isCancelled() else { return nil }
         // Both sizes at once: the source is the expensive part.
@@ -190,7 +198,7 @@ final class MapPyramid {
             write(img, to: file(blob, t))
         }
         diskLock.lock(); onDisk.insert(blob); diskLock.unlock()
-        return made[tier].flatMap { rounded($0, width: $0.width) }
+        return made[tier]
     }
 
     private func fetch(_ blob: String, _ maxPixel: Int) -> CGImage? {
