@@ -87,6 +87,9 @@ final class MapSignIn {
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let o = r.runSync(timeout: MapSignIn.timeout)
+            // A script can end well without having signed in (one that only checks the network when its variables are
+            // missing): what the app shows afterwards says. Read here, off the main thread, while the device still runs.
+            let leftAt = (o.code == 0 && !o.cancelled && !o.timedOut && o.failure == nil) ? ScreenNode.parse(s.sendSync("nodes")) : []
             DispatchQueue.main.async {
                 guard let self else { return }
                 if o.cancelled || self.cancelled { return self.end(.cancelled) }
@@ -96,10 +99,21 @@ final class MapSignIn {
                     let last = o.output.last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                     return self.end(.failed("\(name) failed (exit \(o.code ?? -1))" + (last.map { ": \($0)" } ?? "")))
                 }
+                if MapSignIn.stillAtSignIn(leftAt) {
+                    let last = o.output.last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                    return self.end(.failed("\(name) ended, but the app still shows a password field, so the walk would run signed out"
+                                            + (last.map { ". The script said: \($0)" } ?? ".")))
+                }
                 self.onStatus?("Signed in with \(name); starting the walk…")
                 self.end(.ready(slot: self.slot))
             }
         }
+    }
+
+    /// Whether the screen a sign-in script left the app on is still a sign-in: a password field is on it. A signed-in
+    /// app rarely shows one (a change-password screen is not where a sign-in script ends).
+    static func stillAtSignIn(_ nodes: [ScreenNode]) -> Bool {
+        nodes.contains { $0.password }
     }
 
     /// Stops the script and the device; the slot is removed. The completion gets `.cancelled`.

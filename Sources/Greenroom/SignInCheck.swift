@@ -59,6 +59,17 @@ enum SignInCheck {
         expect(SignInWall.atStart.note(kept: false)?.contains("Sign In Once") == true && SignInWall.atStart.note(kept: true)?.contains("no longer works") == true, "the note says what to do, and that a kept sign-in expired")
         expect(SignInWall.none.note(kept: false) == nil, "no wall, no note")
 
+        // A sign-in script that ended well, and the screen it left the app on.
+        func shown(password: Bool) -> [ScreenNode] {
+            var t = ScreenNode(); t.text = "Server URL"; t.field = true
+            var p = ScreenNode(); p.hint = "Password"; p.field = true; p.password = password
+            var c = ScreenNode(); c.text = "Connect"; c.click = true
+            return [t, p, c]
+        }
+        expect(MapSignIn.stillAtSignIn(shown(password: true)), "a script that leaves the app on a password field did not sign in")
+        expect(!MapSignIn.stillAtSignIn(shown(password: false)), "... and one that leaves it on a screen with no password field did")
+        expect(!MapSignIn.stillAtSignIn([]), "... and an empty answer is not read as a sign-in screen")
+
         // The recorder.
         func node(_ text: String, _ box: (Int, Int, Int, Int), field: Bool = false, password: Bool = false, click: Bool = true, hint: Bool = true) -> ScreenNode {
             var n = ScreenNode(); n.left = box.0; n.top = box.1; n.right = box.2; n.bottom = box.3; n.field = field; n.password = password; n.click = click
