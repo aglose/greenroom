@@ -290,8 +290,29 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         selected = sim
         window.subtitle = sim?.name ?? ""
         sessions.selected(sim)
+        noteLastOpened(sim)
         reload()
         if let sim, let v = grid.view(for: sim) { window.makeFirstResponder(v) }
+    }
+
+    /// Remembers what was chosen, for "Reopen what was open last" (LastOpened.swift): its session, else its APK.
+    private func noteLastOpened(_ sim: Simulator?) {
+        guard let sim else { return }
+        sessions.reopenWhenListed = nil   // something else was chosen first: it is not to be replaced
+        if let s = sessions.session(forSimulator: sim) { LastOpened.note(.session(worktree: s.worktree.path)) }
+        else { LastOpened.note(.apk(path: sim.apk.path)) }
+    }
+
+    /// At launch, with "Reopen what was open last" on: opens the APK again, or the session once Sessions lists it.
+    func reopenLast() {
+        switch LastOpened.stored {
+        case .apk(let path)?:
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: url.path) { open(url) }
+        case .session(let worktree)?:
+            sessions.reopenWhenListed = worktree
+        case nil: break
+        }
     }
 
     /// The simulators on screen: all of them side by side, or the chosen one.
@@ -304,6 +325,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 self.selected = sim
                 self.window.subtitle = sim.name
                 self.sessions.selected(sim)
+                self.noteLastOpened(sim)
                 self.reload()
             }
             view.onHover = { [weak self] v, inside in

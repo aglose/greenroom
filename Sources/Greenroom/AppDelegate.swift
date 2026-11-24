@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workbench.window.makeKeyAndOrderFront(nil)
         let early = openedEarly; openedEarly = []
         if !early.isEmpty { application(NSApp, open: early) }
+        else if LastOpened.shouldReopen(openedFiles: false) { workbench.reopenLast() }
         if !CommandLine.arguments.contains("--background") { NSApp.activate() }
         startAgentServer()
         // `kill` (and a script that started the app) quits it as the menu would: simulators stopped, nothing left behind.
@@ -628,6 +629,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func clearRecents(_ sender: Any?) {
         Recents.clear()
+        LastOpened.forget()
         NSDocumentController.shared.clearRecentDocuments(nil)
         Engine.shared.onChange?()
     }

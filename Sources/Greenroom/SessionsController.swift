@@ -35,6 +35,9 @@ final class SessionsController {
     var openWhenBuilt = Set<String>()
     /// A worktree to build and open once a refresh lists it (a project folder or a clone added from the empty stage).
     var runWhenListed: String?
+    /// The session that was open when Greenroom last quit, to open again once a refresh lists it, if it has a build
+    /// (a launch does not start a build by itself). Given up after the first complete refresh.
+    var reopenWhenListed: String?
     /// The walk and capture queue (Evidence.swift): every new build of a session is walked in the background.
     let evidence = Evidence()
 
@@ -336,6 +339,10 @@ final class SessionsController {
             if let want = self.runWhenListed, let s = self.sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == want }) {
                 self.runWhenListed = nil
                 self.activate(s)
+            }
+            if let want = self.reopenWhenListed, complete || self.sessions.contains(where: { $0.worktree.path == want }) {
+                self.reopenWhenListed = nil
+                if let s = self.sessions.first(where: { $0.worktree.path == want }), self.newestAPK(for: s) != nil { self.activate(s) }
             }
             if complete { self.autoArchive() }
             self.onChange?()
