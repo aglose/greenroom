@@ -31,6 +31,7 @@ struct SettingsView: View {
     @State private var waiting: [String] = []
     @State private var claudeSessions = ClaudeSessions.shared.enabled
     @State private var t3Sessions = T3Sessions.shared.enabled
+    @State private var reopenLast = LastOpened.enabled
     @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.autoArchiveKey) as? Bool ?? true
 
     private func refresh() {
@@ -41,6 +42,12 @@ struct SettingsView: View {
     var body: some View {
         Form {
             AppIconSection()
+            Section("Startup") {
+                Toggle("Reopen what was open last", isOn: $reopenLast)
+                    .onChange(of: reopenLast) { _, on in LastOpened.enabled = on }
+                Text("At launch, Greenroom opens the session or APK you were using when it last quit. Off, it starts on the screen to drop an APK.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Updates") {
                 if Updates.shared.available {
                     Toggle("Check for updates automatically", isOn: $automatic)
