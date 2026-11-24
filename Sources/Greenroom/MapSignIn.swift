@@ -110,16 +110,27 @@ final class MapSignIn {
         if run == nil { end(.cancelled) }   // still starting: nothing else will end it
     }
 
+    /// How long the last sign-in's engine held its slot after the device's process had exited (for checks).
+    static var lastRelease: TimeInterval = 0
+
     /// Quits the device and waits for it to let go of the slot (the crawler needs it), then reports.
     private func end(_ outcome: Outcome) {
         guard let done else { return }
         self.done = nil
-        let s = sim, log = self.log, slot = self.slot, keep: Bool
-        if case .ready = outcome { keep = true } else { keep = false }
+        let s = sim, log = self.log, slot = self.slot
+        var outcome = outcome
         s?.quit()
         DispatchQueue.global(qos: .userInitiated).async {
             s?.waitUntilExit()
-            if !keep { MapSignIn.discard(slot) }
+            // The device's process is the engine's client; the JVM that held the slot can still be exiting. The crawler
+            // refuses a slot that is held, so the walk starts only once it is free.
+            let exited = Date()
+            if case .ready = outcome {
+                let free = SlotClone.waitUntilFree(slot, in: Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true))
+                MapSignIn.lastRelease = Date().timeIntervalSince(exited)
+                if !free { outcome = .failed("The device for \(self.script.name) did not let go of its data after it quit.") }
+            }
+            if case .ready = outcome {} else { MapSignIn.discard(slot) }
             if let log { try? FileManager.default.removeItem(at: log) }
             DispatchQueue.main.async {
                 MapSignIn.live[ObjectIdentifier(self)] = nil

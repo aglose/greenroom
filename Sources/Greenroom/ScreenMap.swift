@@ -371,6 +371,15 @@ final class ScreenMap: NSView {
         signInPopup.selectItem(at: i)
     }
 
+    /// For checks: the kept sign-in, when the app has one. False when it has none.
+    @discardableResult
+    func chooseKeptSignIn() -> Bool {
+        reloadScripts()
+        let i = signInPopup.indexOfItem(withRepresentedObject: "kept")
+        if i >= 0 { signInPopup.selectItem(at: i) }
+        return i >= 0
+    }
+
     @objc private func signInChanged() {
         if signInPopup.selectedItem?.representedObject as? String == "new" {
             do { NSWorkspace.shared.open(try Scripts.newScript()) } catch { onSay?("Could not write a new script", true) }
