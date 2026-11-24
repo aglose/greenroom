@@ -278,6 +278,9 @@ final class CompareTabView: NSView {
             addSubview(v)
         }
 
+        let scrollBottom = scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6)
+        scrollBottom.priority = .init(250)
+
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -286,7 +289,7 @@ final class CompareTabView: NSView {
             scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            scrollBottom,
 
             documentView.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             documentView.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),

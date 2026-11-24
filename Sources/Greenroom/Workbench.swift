@@ -160,6 +160,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         window.title = Variant.name
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 900, height: 560)
+        window.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        window.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        window.collectionBehavior.insert(.fullScreenPrimary)
         window.toolbarStyle = .unified
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -218,7 +221,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         linkPanes()
         grid.onClose = { Engine.shared.close($0) }
         memoryMeter.onReading = { [weak self] in self?.grid.memoryLabel.show($0) }
-        split.addSplitViewItem(NSSplitViewItem(viewController: content))
+        let contentItem = NSSplitViewItem(viewController: content)
+        contentItem.minimumThickness = 520
+        contentItem.maximumThickness = NSSplitViewItem.unspecifiedDimension
+        split.addSplitViewItem(contentItem)
         inspector.onPick = { [weak self] node in
             guard let self, let sim = self.selected else { return }
             self.grid.view(for: sim)?.outlined = node?.frame
@@ -556,6 +562,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let captureCluster = group([shot, divider(), recordButton])
         let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, mirrorButton, group(layoutButtons), captureCluster, commands])
         bar.spacing = 8
+        bar.setHuggingPriority(.init(1), for: .horizontal)
+        bar.setHuggingPriority(.init(1), for: .vertical)
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
         bar.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(bar)
