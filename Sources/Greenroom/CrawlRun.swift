@@ -166,6 +166,8 @@ final class CrawlRun {
         var recordDeps = false
         var maxActions = false
         var events = false
+        /// `--diff-seed` and `--diff-controls` (apksim 0.62.0): a seeded walk compared with its seed.
+        var diffSeed = false
         static let none = Support()
     }
 
@@ -205,7 +207,7 @@ final class CrawlRun {
             p.waitUntilExit()
             killer.cancel()
             func has(_ flag: String) -> Bool { text.range(of: flag + "(?![\\w-])", options: .regularExpression) != nil }
-            s = Support(seed: has("--seed") && has("--only-file"), recordDeps: has("--record-deps"), maxActions: has("--max-actions"), events: has("--events"))
+            s = Support(seed: has("--seed") && has("--only-file"), recordDeps: has("--record-deps"), maxActions: has("--max-actions"), events: has("--events"), diffSeed: has("--diff-seed") && has("--diff-controls"))
         }
         supportLock.lock(); supportCache[key] = s; supportLock.unlock()
         return s
