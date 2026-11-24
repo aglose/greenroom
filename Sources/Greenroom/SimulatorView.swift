@@ -103,7 +103,13 @@ final class SimulatorView: NSView {
     private var lastSize = CGSize.zero
 
     private var recorderObserver: NSObjectProtocol?
-    deinit { if let o = recorderObserver { NotificationCenter.default.removeObserver(o) } }
+    /// Asks for a keyframe when the renderer loses its decoder, so a still screen comes back too (no new frame would
+    /// otherwise arrive to notice it).
+    private var flushObserver: NSObjectProtocol?
+    deinit {
+        if let o = recorderObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = flushObserver { NotificationCenter.default.removeObserver(o) }
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -202,6 +208,15 @@ final class SimulatorView: NSView {
         simulator?.onSize = nil
         simulator = sim
         display.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        if let o = flushObserver { NotificationCenter.default.removeObserver(o); flushObserver = nil }
+        if let sim {
+            let renderer = display.sampleBufferRenderer
+            flushObserver = NotificationCenter.default.addObserver(
+                forName: AVSampleBufferVideoRenderer.requiresFlushToResumeDecodingDidChangeNotification,
+                object: renderer, queue: nil) { [weak sim] _ in
+                if renderer.requiresFlushToResumeDecoding { sim?.requestKeyframe() }
+            }
+        }
         message.stringValue = sim == nil ? placeholder : (sim!.state == .starting ? "Starting \(sim!.name)…" : "")
         lastSize = .zero
         guard let sim else { placeholderLayer.isHidden = true; return }
@@ -222,10 +237,21 @@ final class SimulatorView: NSView {
             placeholderLayer.add(breathe, forKey: "breathe")
         }
         let renderer = display.sampleBufferRenderer
+        // After a flush the renderer can only start again from a keyframe: frames that depend on an earlier one are
+        // dropped until it comes, instead of failing the renderer again.
+        var awaitingKeyframe = false
         sim.onSample = { [weak self, weak sim] sample in
-            if renderer.status == .failed {
+            // A renderer stops decoding when the system takes its decoder away (the display slept, the GPU changed)
+            // without ever failing: it then accepts every frame and shows none, and the picture freezes. Either way
+            // it needs a flush and a keyframe.
+            if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
                 renderer.flush()
+                awaitingKeyframe = true
                 sim?.requestKeyframe()
+            }
+            if awaitingKeyframe {
+                guard VideoDecoder.isKeyframe(sample) else { return }
+                awaitingKeyframe = false
             }
             renderer.enqueue(sample)
             DispatchQueue.main.async {

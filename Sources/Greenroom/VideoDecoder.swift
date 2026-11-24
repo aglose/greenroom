@@ -30,6 +30,14 @@ final class VideoDecoder {
         return units
     }
 
+    /// Whether a sample from `sampleBuffer(for:)` is a keyframe (it carries no NotSync attachment).
+    static func isKeyframe(_ sample: CMSampleBuffer) -> Bool {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false),
+              CFArrayGetCount(attachments) > 0 else { return true }
+        let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFDictionary.self)
+        return !CFDictionaryContainsKey(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque())
+    }
+
     /// A sample buffer for one access unit, or nil until a keyframe has given the stream's parameter sets.
     func sampleBuffer(for frame: FrameChannel.Frame) -> CMSampleBuffer? {
         let b = frame.unit
