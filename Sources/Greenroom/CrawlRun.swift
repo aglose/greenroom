@@ -151,6 +151,8 @@ final class CrawlRun {
         var seed: URL?
         /// `--only-file PATH`: with `seed`, the screen ids to explore again, one per line.
         var onlyFile: URL?
+        /// `--diff-seed --diff-controls HOW`: with `seed`, compare the walk with it (nil: not passed).
+        var diffControls: String?
         /// `--record-deps`: each walked screen records the classes, source files and resources it depends on.
         var recordDeps = false
         /// `--max-actions N`: controls tried per screen (0: reach and capture only; "Verify carried screens").
@@ -253,6 +255,7 @@ final class CrawlRun {
         if let seed = settings.seed {
             a += ["--seed", seed.path]
             if let only = settings.onlyFile { a += ["--only-file", only.path] }
+            if let how = settings.diffControls { a += ["--diff-seed", "--diff-controls", how] }
         }
         if settings.recordDeps { a.append("--record-deps") }
         if settings.events { a.append("--events") }

@@ -70,6 +70,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var misses: Int?
         /// "Verify carried screens", in words, while it runs and after.
         var verify: String?
+        /// Why each walked screen was walked again ("SettingsFragment.kt changed"), by screen id. Nil for a full walk.
+        var why: [String: [String]]?
     }
 
     /// What a comparison of two builds found, from the `compare` list of crawl.json.
@@ -676,6 +678,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                         settings.seed = plan.seed
                         settings.onlyFile = plan.onlyFile
                         if job.verifyOf != nil { settings.maxActions = 0 }
+                        else if plan.diffSeed, plan.seed != nil { settings.diffControls = plan.diffControls }
                     }
                     if job.verifyOf != nil, plan == nil { self.finish(job, .finished); return }
                     let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
@@ -800,7 +803,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["screens"] as? [[String: Any]]) ?? []
         let carried = list.filter { ($0["origin"] as? String) == "carried" }.count
         return ImpactNote(full: plan.isFull, reason: plan.reason, walked: list.count - carried, total: list.count, files: plan.files,
-                          base: plan.seedSnapshot.map { String($0.commit.prefix(7)) })
+                          base: plan.seedSnapshot.map { String($0.commit.prefix(7)) }, why: plan.reasons.isEmpty ? nil : plan.reasons)
     }
 
     /// Kills the walk's processes and removes its clone (app quit).
@@ -1044,7 +1047,13 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     /// The key of the app's kept sign-in: one for a repository, whatever the worktree.
     func signInKey(_ worktree: String) -> String? {
-        controller?.sessions.first { $0.worktree.path == worktree }.map { SignIns.key(workspace: $0.workspace) }
+        guard let c = controller else { return nil }
+        if let s = c.sessions.first(where: { $0.worktree.path == worktree }) { return SignIns.key(workspace: s.workspace) }
+        // Main's walks (owned by the trunk's path) and a pull request row's ("pr:ID") are of the same app as the
+        // repository's sessions, and must be walked the same way to be compared with them.
+        if let ws = c.workspaces.first(where: { c.mainBuilds.trunk(of: $0.root).path == worktree }) { return SignIns.key(workspace: ws.root) }
+        if worktree.hasPrefix("pr:"), let p = c.pulls.all.first(where: { "pr:" + $0.id == worktree }) { return SignIns.key(workspace: URL(fileURLWithPath: p.workspace)) }
+        return nil
     }
     func keptSignIn(_ worktree: String) -> SignIns.Record? { SignIns.shared.record(signInKey(worktree)) }
 

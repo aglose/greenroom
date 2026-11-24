@@ -233,6 +233,9 @@ final class MainBuilds {
             let store = self.store
             DispatchQueue.global(qos: .utility).async { store.note(build: b.key, of: path) }
         }
+        // Main's map is what every pull request's walk starts from and is compared with: main's builds are walked like
+        // a session's (the first in full, each later one only where its commits changed the app), under the trunk's path.
+        sessions?.evidence.buildArrived(worktree: path, build: b, auto: ws.auto, withData: ws.walkWithData)
         change()
         if openWhenReady.remove(ws.root.path) != nil { open(ws) }
         else if let sim = simulator(of: ws.root), sim.apk.resolvingSymlinksInPath().path != b.apk.resolvingSymlinksInPath().path {

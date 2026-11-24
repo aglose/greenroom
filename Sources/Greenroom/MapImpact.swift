@@ -301,7 +301,7 @@ enum MapImpact {
 
     /// What a workspace's quick walks have learned, kept beside its snapshots (`<store>/impact.json`).
     struct Ledger: Codable, Equatable {
-        /// Walks of commits on the main branch, by profile id: every tenth is full.
+        /// Walks of commits on the main branch, by profile id. No longer counted (every tenth was a full walk); read so an older ledger keeps its shape.
         var mainWalks: [String: Int] = [:]
         /// Extra full-walk patterns (I2 adds each missed file's directory).
         var patterns: [String] = []
@@ -317,7 +317,6 @@ enum MapImpact {
     }
 
     /// How often a walk of main is full whatever the impact says.
-    static let fullEvery = 10
 }
 
 extension MapStore {

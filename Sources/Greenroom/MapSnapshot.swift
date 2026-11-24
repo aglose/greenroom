@@ -92,6 +92,20 @@ struct MapSnapshot: Codable, Equatable {
         /// Nil: walked at this snapshot's commit. Else the commit whose walk this entry was carried from.
         var carriedFrom: String?
         var deps: Deps?
+        /// The controls the walk read on the screen, as crawl.json's `actions` has them. A walk seeded from this
+        /// snapshot and compared with it (`--diff-seed`) taps only the controls that are not in this list. Nil in a
+        /// snapshot written before they were kept: such a seed's screens are walked with every control tried.
+        var actions: [Action]?
+    }
+
+    /// One control of a screen: crawl.json's `label`, `cmd`, `kind`, `box`, `skipped` and `scrolls`.
+    struct Action: Codable, Equatable {
+        var label: String
+        var cmd: String
+        var kind: String
+        var box: [Int]?
+        var skipped: String?
+        var scrolls = 0
     }
 
     struct Edge: Codable, Equatable {
@@ -103,6 +117,10 @@ struct MapSnapshot: Codable, Equatable {
         /// A screen's id, one of `pseudo`, or nil for a control that was not followed.
         var to: String?
         var note: String?
+        /// crawl.json's `kind` ("control", "skipped"...) and `steps` (the fills and scrolls before the tap, and the
+        /// tap): what a seeded walk needs to carry this transition without trying it again. Nil in an older snapshot.
+        var kind: String?
+        var steps: [String]?
     }
 
     struct Finding: Codable, Equatable {

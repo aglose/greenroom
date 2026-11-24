@@ -168,6 +168,7 @@ final class PullRows {
         change()
         let store = self.store, known = sessions?.sessions ?? []
         Task { @MainActor in
+            await Self.fetchHead(of: p, in: ws.root)
             let result = await Bases.resolve(sha: p.headSha, ref: p.headRef, in: ws, sessions: known, store: store, pullRequest: true, slug: p.slug.isEmpty ? nil : p.slug) { [weak self] line in
                 guard let self, case .fetching = self.states[p.id] ?? .idle, !line.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                 self.states[p.id] = .fetching(line)
@@ -194,6 +195,25 @@ final class PullRows {
                 change()
             }
         }
+    }
+
+    /// The ref a pull request's head is kept under in the repository, so its commit stays there for its map.
+    static func headRef(of p: PullRequest) -> String { "refs/greenroom/pulls/\(p.number)" }
+
+    /// Makes the pull request's head commit known to the repository (nothing is checked out): without it the walk of
+    /// its build has no place in the map's history, and nothing says which files it changed since main. A commit
+    /// already there (a session's branch) is left alone. A fetch that fails changes nothing: the build still opens.
+    static func fetchHead(of p: PullRequest, in root: URL) async {
+        guard !p.headSha.isEmpty, !p.headSha.hasPrefix("-") else { return }
+        if await Git.run(["cat-file", "-e", p.headSha + "^{commit}"], in: root) != nil { return }
+        var remote = "origin"
+        if !p.slug.isEmpty, let list = await Git.run(["remote", "-v"], in: root) {
+            for line in list.split(whereSeparator: \.isNewline) {
+                let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+                if parts.count >= 2, GitHubRemote.slug(of: parts[1])?.caseInsensitiveCompare(p.slug) == .orderedSame { remote = parts[0]; break }
+            }
+        }
+        _ = await Git.run(["fetch", "--quiet", "--no-tags", remote, "+refs/pull/\(p.number)/head:" + headRef(of: p)], in: root, timeout: 120)
     }
 
     /// Re-reads the pull request from GitHub (a push moves its head) and fetches the build of the new head.
@@ -223,6 +243,9 @@ final class PullRows {
         _ = all
         if let sim = simulator(of: p) { Engine.shared.close(sim) }
         items.removeAll { $0.id == p.id }
+        if let ws = sessions?.workspaces.first(where: { $0.root.path == p.workspace }) {
+            Task { _ = await Git.run(["update-ref", "-d", Self.headRef(of: p)], in: ws.root) }
+        }
         states[p.id] = nil
         save()
         change()

@@ -327,13 +327,18 @@ enum MapImpactCheck {
         expect(plan.ids == [ids[2], ids[3]] && plan.total == 15 && plan.files == 1 && plan.seed.map { fm.fileExists(atPath: $0.appendingPathComponent("crawl.json").path) } == true
                && (try? String(contentsOf: plan.onlyFile ?? work, encoding: .utf8)) == ids[2] + "\n" + ids[3] + "\n",
                "a walk of c2 is planned seeded from c1, with the string's 2 screens in its only-file (\(plan.reason ?? "seeded"))")
+        var diffing = support
+        diffing.diffSeed = true
+        let dplan = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: diffing, forceFull: false, folder: work) }
+        expect(dplan.diffSeed && !plan.diffSeed && Set(dplan.reasons.keys) == Set(dplan.ids) && dplan.reasons.values.allSatisfy { !$0.isEmpty },
+               "with a crawler that offers --diff-seed the walk is compared with its seed, and each screen's reason is kept (\(dplan.reasons[ids[2]]?.joined(separator: ", ") ?? "none"))")
         let none = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: .none, forceFull: false, folder: work) }
         expect(none.isFull && none.reason == nil && !none.recordDeps, "with the released engine's crawler the plan is a plain full walk, as before")
         let forced = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: support, forceFull: true, folder: work) }
         expect(forced.isFull && forced.reason == "asked to walk everything again" && forced.recordDeps, "\"Walk Everything Again\" is a full walk with deps")
-        store.updateLedger { $0.mainWalks[profile.id] = MapImpact.fullEvery - 1 }
+        store.updateLedger { $0.mainWalks[profile.id] = 9 }
         let tenth = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: support, forceFull: false, folder: work) }
-        expect(tenth.isFull && tenth.reason?.contains("10th walk of main") == true, "the tenth walk of main is full: \(tenth.reason ?? "seeded")")
+        expect(!tenth.isFull && tenth.diffControls == "all", "the tenth walk of main is seeded like the others, with every control of its screens tried: \(tenth.reason ?? "seeded")")
 
         // 6. "Verify carried screens": a quick walk of c2 (its 2 screens walked, 13 carried), then the verification's walk,
         // which reaches the 13 again (here written by hand, with one of them changed).
@@ -383,12 +388,12 @@ enum MapImpactCheck {
         let support = CrawlRun.support(python: python, script: script)
         expect(support.seed && support.recordDeps, "live: the crawler's --help offers --seed, --only-file and --record-deps")
 
-        func walk(_ name: String, seed: URL? = nil, only: URL? = nil, maxActions: Int? = nil) -> (ok: Bool, seconds: Double, folder: URL, why: String) {
+        func walk(_ name: String, seed: URL? = nil, only: URL? = nil, maxActions: Int? = nil, diffControls: String? = nil) -> (ok: Bool, seconds: Double, folder: URL, why: String) {
             let out = dir.appendingPathComponent(name, isDirectory: true)
             try? fm.removeItem(at: out)
             var s = CrawlRun.Settings()
             s.depth = 3; s.seconds = 600; s.jobs = 1; s.appearances = ["light"]
-            s.recordDeps = true; s.seed = seed; s.onlyFile = only; s.script = script; s.maxActions = maxActions
+            s.recordDeps = true; s.seed = seed; s.onlyFile = only; s.script = script; s.maxActions = maxActions; s.diffControls = diffControls
             if script == nil { s.engineOptions = ["--data-slots", SlotClone.freshName(prefix: "evg")] }
             let run = CrawlRun(python: python, apk: target, out: out, settings: s)
             var result: CrawlRun.Outcome?
@@ -437,6 +442,27 @@ enum MapImpactCheck {
             }.joined(separator: "; "))
         }
         expect(second.seconds < first.seconds, "live: the seeded walk took less time (\(String(format: "%.1f", second.seconds)) s against \(String(format: "%.1f", first.seconds)) s)")
+
+        // The same seeded walk compared with its seed (`--diff-seed`, apksim 0.62.0): with every control tried it must
+        // give the full walk's map; with only the seed's unknown controls tried, the same map, carried from the seed.
+        if support.diffSeed, script == nil {
+            for how in ["all", "changed"] {
+                guard store.writeSeed(a, to: seed) else { expect(false, "live: the seed was written again"); break }
+                let w = walk("diff-" + how, seed: seed, only: only, diffControls: how)
+                expect(w.ok, "live: --diff-seed --diff-controls \(how) of the same screen finished in \(String(format: "%.1f", w.seconds)) s (plain seeded: \(String(format: "%.1f", second.seconds)) s) \(w.why)")
+                guard w.ok, var d = store.importWalk(w.folder, commit: "live1", tree: "t", profile: profile, engine: "live", walked: ISO8601DateFormatter().date(from: a.walked) ?? Date(), seed: a) else { continue }
+                for i in d.screens.indices { d.screens[i].carriedFrom = nil; d.screens[i].deps?.classes = [] }
+                d.seconds = a.seconds
+                var off: [String] = d.screens.filter { $0 != ref.screen($0.id) }.map(\.id)
+                if d.edges != ref.edges { off.append("edges") }
+                expect(d == ref, "live: its map equals the full walk's\(off.isEmpty ? "" : "; differ: " + off.joined(separator: ", "))")
+                let json = (try? Data(contentsOf: w.folder.appendingPathComponent("crawl.json"))).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let pairs = (json?["compare"] as? [[String: Any]]) ?? []
+                let changed = pairs.filter { ($0["status"] as? String) != "same" }
+                expect(pairs.count == a.screens.count && changed.isEmpty,
+                       "live: the engine's comparison with the seed pairs \(pairs.count) screens and calls none changed (the same build)\(changed.isEmpty ? "" : ": " + changed.map { "\($0["id"] as? String ?? "?") \($0["status"] as? String ?? "") \($0["why"] as? String ?? "")" }.joined(separator: "; "))")
+            }
+        }
 
         // The verification's walk: the carried screens named, no control tried.
         let carried = b.screens.filter { $0.carriedFrom != nil }.map(\.id)
