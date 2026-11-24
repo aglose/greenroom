@@ -10,6 +10,54 @@ final class DevicePane: NSView {
     /// "All devices" is on: commands go to every running simulator.
     private(set) var toAll = false
     var onToAllChange: ((Bool) -> Void)?
+    /// Called whenever a device override changes so the stage can update its active override pills.
+    var onOverridesChange: (() -> Void)?
+
+    struct ActiveOverride {
+        let id: String
+        let symbol: String
+        let label: String
+        let color: NSColor
+        let key: String
+        let resetValue: String
+        let resetCommand: String
+    }
+
+    func activeOverrides(for sim: Simulator?) -> [ActiveOverride] {
+        guard let sim, let map = state[ObjectIdentifier(sim)] else { return [] }
+        var out: [ActiveOverride] = []
+        if let net = map["network"], net != "online" {
+            let label = net == "3g" ? "Slow 3G" : net.capitalized
+            out.append(ActiveOverride(id: "network", symbol: "wifi.exclamationmark", label: label, color: Design.warning, key: "network", resetValue: "online", resetCommand: "network online"))
+        }
+        if let fs = map["fontscale"], let v = Double(fs), abs(v - 1.0) > 0.04 {
+            out.append(ActiveOverride(id: "fontscale", symbol: "textformat.size", label: String(format: "%.2g×", v), color: NSColor(srgbRed: 0.376, green: 0.647, blue: 0.980, alpha: 1), key: "fontscale", resetValue: "1.0", resetCommand: "fontscale 1.0"))
+        }
+        if let loc = map["locale"], !loc.isEmpty, !loc.hasPrefix("en") {
+            let rtl = loc.hasPrefix("ar") || loc.hasPrefix("he")
+            out.append(ActiveOverride(id: "locale", symbol: "globe", label: rtl ? "\(loc) RTL" : loc, color: NSColor(srgbRed: 0.376, green: 0.647, blue: 0.980, alpha: 1), key: "locale", resetValue: "en-US", resetCommand: "locale en-US"))
+        }
+        if map["bounds"] == "on" {
+            out.append(ActiveOverride(id: "bounds", symbol: "square.dashed", label: "Layout bounds", color: Design.accent, key: "bounds", resetValue: "off", resetCommand: "debug layout off"))
+        }
+        if map["anim"] == "off" {
+            out.append(ActiveOverride(id: "anim", symbol: "tortoise", label: "No anims", color: Design.mute, key: "anim", resetValue: "on", resetCommand: "animscale 1"))
+        }
+        if let th = map["thermal"], th != "none" {
+            out.append(ActiveOverride(id: "thermal", symbol: "thermometer.high", label: "Thermal: \(th)", color: Design.record, key: "thermal", resetValue: "none", resetCommand: "thermal none"))
+        }
+        if let loc = map["location"], loc != "none" {
+            out.append(ActiveOverride(id: "location", symbol: "location.fill", label: "GPS mock", color: Design.accent, key: "location", resetValue: "none", resetCommand: "location none"))
+        }
+        return out
+    }
+
+    func clearOverride(_ o: ActiveOverride, on sim: Simulator) {
+        state[ObjectIdentifier(sim), default: [:]][o.key] = o.resetValue
+        sim.send(o.resetCommand)
+        refresh()
+        onOverridesChange?()
+    }
 
     private let glass = GlassView(radius: 18)
     private let stack = NSStackView()
@@ -97,6 +145,7 @@ final class DevicePane: NSView {
 
     private func remember(_ key: String, _ v: String) {
         for s in targets() + [simulator].compactMap({ $0 }) { state[ObjectIdentifier(s), default: [:]][key] = v }
+        onOverridesChange?()
     }
 
     /// Shows this simulator's settings; asks the engine for the ones it reports (language, text size).

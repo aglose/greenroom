@@ -29,6 +29,8 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
     private let rulesFlow = NSStackView()
     private var rulesHeight: NSLayoutConstraint!
     private(set) var rules: [[String: Any]] = []
+    /// Called whenever the active mock/patch rule count changes.
+    var onRulesChange: ((Int) -> Void)?
     private var actionButtons: [GlassButton] = []
     private var selectedEvent: NetEvent?
     private var ruleTimer: Timer?
@@ -495,6 +497,11 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
             rulesFlow.addArrangedSubview(chip)
         }
         rulesStrip.isHidden = list.isEmpty
+        onRulesChange?(list.count)
+    }
+
+    func clearAllRules() {
+        clearRules(nil)
     }
 
     @objc private func clearRules(_ sender: Any?) {

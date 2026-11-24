@@ -31,27 +31,47 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     /// The inspector pane is open: the pointer picks nodes on the chosen simulator.
     private(set) var inspecting = false
     private let inspector = Inspector()
-    private var inspectorItem: NSSplitViewItem!
     private var inspectTimer: Timer?
-    private let compareBar = NSTextField(wrappingLabelWithString: "")
-    private var compareHeight: NSLayoutConstraint!
-    /// The log panel under the simulators, and whether the flight recorder is on for the chosen simulator.
+    /// The unified bottom dock (Log, Timeline, Compare) and flight recorder state.
     private let logPanel = LogPanel(frame: .zero)
-    private var logHeight: NSLayoutConstraint!
-    private(set) var showingLog = false
+    private lazy var bottomDock = BottomDock(logPanel: logPanel, timeline: timeline)
+    private var bottomDockHeight: NSLayoutConstraint!
+    private var bottomDockSavedHeight: CGFloat = 216
+    private(set) var showingBottomDock = false
+    var showingLog: Bool { showingBottomDock && bottomDock.activeTab == .log }
+    var showingTimeline: Bool { showingBottomDock && bottomDock.activeTab == .timeline }
+    private var logErrorCount = 0
+    private var networkRuleCount = 0
     private var recording = Set<ObjectIdentifier>()
     private let compareQueue = DispatchQueue(label: "greenroom-compare")
     private var compareScheduled = false
     private var compareTimer: Timer?
-    /// What agents have done here, and the popover that shows it.
+    /// What agents have done here, and the persistent right-drawer panel that shows it.
     let agentActivity = AgentActivity()
-    var agentTools: AgentTools? { didSet { agentPanel = agentTools.map { AgentPanel(activity: agentActivity, tools: $0, selected: { [weak self] in self?.selected.flatMap { self?.sessions.session(forSimulator: $0) }.map { ($0.worktree.path, $0.branch ?? $0.shortHead) } }) } } }
+    var agentTools: AgentTools? {
+        didSet {
+            let panel = agentTools.map {
+                AgentPanel(activity: agentActivity, tools: $0, selected: { [weak self] in
+                    self?.selected.flatMap { self?.sessions.session(forSimulator: $0) }.map { ($0.worktree.path, $0.branch ?? $0.shortHead) }
+                })
+            }
+            panel?.onClose = { [weak self] in self?.show(nil, closing: .agent) }
+            panel?.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+            agentPanel = panel
+            mountAgentPanel()
+        }
+    }
     private var agentPanel: AgentPanel?
-    private let agentPopover = NSPopover()
+    private let agentHost = NSView()
     private let status = NSTextField(labelWithString: "")
-    // The floating chrome: a glass bar along the top and a rail of panes on the right.
+    // The floating chrome: a glass bar along the top, a badged rail on the right, override pills & Agent HUD on stage.
     private let header = GlassView()
     private let rail = GlassView()
+    private let overrideBar = NSStackView()
+    private let agentHud = GlassView(radius: 15)
+    private let agentHudDot = NSView()
+    private let agentHudLabel = NSTextField(labelWithString: "")
+    private var agentHudPause: GlassButton!
     private var appChip: GlassButton!
     private var deviceButton: GlassButton!
     private var deviceButtons: [GlassButton] = []
@@ -59,21 +79,27 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private var layoutButtons: [GlassButton] = []
     private var recordButton: GlassButton!
     private var railButtons: [String: GlassButton] = [:]
+    private var railBadges: [String: NSTextField] = [:]
+    private var railDots: [String: NSView] = [:]
     private var splitController: NSSplitViewController!
-    // The network pane (right, over the stage) and the timeline dock (bottom).
+    // The network pane (right, over the stage) and the timeline dock (hosted in BottomDock).
     private let networkPane = NetworkPane(frame: .zero)
     private let timeline = TimelineDock(frame: .zero)
     private var gridTrailing: NSLayoutConstraint!
-    private var timelineHeight: NSLayoutConstraint!
     private var networkLeading: NSLayoutConstraint!
-    /// The right-hand slot holds one pane at a time; opening one sends the one there away.
-    enum RightPane { case device, network, tests, diagnostics, recordings }
+    /// The right-hand slot holds one glass drawer at a time; opening one sends the one there away.
+    enum RightPane { case device, inspector, network, tests, diagnostics, recordings, agent }
     private(set) var rightPane: RightPane?
     var showingNetwork: Bool { rightPane == .network }
     var showingDevice: Bool { rightPane == .device }
     var showingTests: Bool { rightPane == .tests }
     var showingDiagnostics: Bool { rightPane == .diagnostics }
     var showingRecordings: Bool { rightPane == .recordings }
+    var showingAgent: Bool { rightPane == .agent }
+    private var inspectorLeading: NSLayoutConstraint!
+    private static let inspectorWidth: CGFloat = 340
+    private var agentLeading: NSLayoutConstraint!
+    private static let agentWidth: CGFloat = 360
     private let devicePane = DevicePane(frame: .zero)
     private var deviceLeading: NSLayoutConstraint!
     private static let deviceWidth: CGFloat = 384
@@ -100,7 +126,6 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
     let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
-    private(set) var showingTimeline = false
     private static let networkWidth: CGFloat = 600
     private var rows: [Row] = []
     /// What each row showed when it was drawn (`key(of:)`): a reload redraws only the rows whose key moved.
@@ -150,52 +175,42 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         side.isCollapsed = UserDefaults.standard.bool(forKey: Self.sidebarHiddenKey)   // open until the person folds it away
         split.addSplitViewItem(side)
         let content = NSViewController()
-        compareBar.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        compareBar.textColor = .secondaryLabelColor
-        compareBar.maximumNumberOfLines = 7
-        compareBar.lineBreakMode = .byTruncatingTail
-        compareBar.isSelectable = true
         let stack = StageBackground()
-        for v in [grid, emptyStage, compareBar, timeline, logPanel, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        for v in [grid, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
         emptyStage.onOpen = { [weak self] in self?.open($0) }
+        emptyStage.onAddRepo = { [weak self] in self?.addRepository(nil) }
         DevHooks.shared.install(workbench: self, in: stack, over: grid)   // developer hooks (DevHooks.swift)
         emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
-        timeline.isHidden = true
-        compareHeight = compareBar.heightAnchor.constraint(equalToConstant: 0)
-        timelineHeight = timeline.heightAnchor.constraint(equalToConstant: 0)
-        gridTrailing = grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -64)
-        logHeight = logPanel.heightAnchor.constraint(equalToConstant: 0)
-        logPanel.isHidden = true
-        logPanel.wantsLayer = true   // a dock of glass along the bottom, as the timeline will be
-        logPanel.layer?.cornerRadius = Design.glassRadius
-        logPanel.layer?.cornerCurve = .continuous
-        logPanel.layer?.masksToBounds = true
-        logPanel.layer?.borderWidth = 1
-        logPanel.layer?.borderColor = Design.stroke.cgColor
-        logPanel.layer?.backgroundColor = NSColor(srgbRed: 0.17, green: 0.18, blue: 0.2, alpha: 0.86).cgColor
+        bottomDock.isHidden = true
+        bottomDockHeight = bottomDock.heightAnchor.constraint(equalToConstant: 0)
+        gridTrailing = grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -68)
+
+        overrideBar.orientation = .horizontal
+        overrideBar.spacing = 6
+        overrideBar.alignment = .centerY
+        overrideBar.isHidden = true
+
+        buildAgentHud()
+
         NSLayoutConstraint.activate([
             grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
             gridTrailing,
+            grid.bottomAnchor.constraint(equalTo: bottomDock.topAnchor, constant: -6),
             emptyStage.topAnchor.constraint(equalTo: grid.topAnchor),
             emptyStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
             emptyStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
             emptyStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            overrideBar.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
+            overrideBar.bottomAnchor.constraint(equalTo: grid.bottomAnchor, constant: -8),
+            agentHud.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
+            agentHud.topAnchor.constraint(equalTo: grid.topAnchor, constant: 6),
             toast.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
             toast.topAnchor.constraint(equalTo: grid.topAnchor, constant: 4),
-            grid.bottomAnchor.constraint(equalTo: compareBar.topAnchor),
-            compareBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
-            compareBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
-            compareBar.bottomAnchor.constraint(equalTo: timeline.topAnchor, constant: -8),
-            compareHeight,
-            timeline.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
-            timeline.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
-            timeline.bottomAnchor.constraint(equalTo: logPanel.topAnchor, constant: -8),
-            timelineHeight,
-            logPanel.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
-            logPanel.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
-            logPanel.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: -Design.margin),
-            logHeight,
+            bottomDock.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
+            bottomDock.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            bottomDock.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: -Design.margin),
+            bottomDockHeight,
         ])
         let drop = DropTarget(content: stack) { [weak self] in self?.open($0) }
         content.view = drop
@@ -204,15 +219,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         grid.onClose = { Engine.shared.close($0) }
         memoryMeter.onReading = { [weak self] in self?.grid.memoryLabel.show($0) }
         split.addSplitViewItem(NSSplitViewItem(viewController: content))
-        inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
-        inspectorItem.minimumThickness = 240
-        inspectorItem.maximumThickness = 380
-        inspectorItem.isCollapsed = true
-        split.addSplitViewItem(inspectorItem)
         inspector.onPick = { [weak self] node in
             guard let self, let sim = self.selected else { return }
             self.grid.view(for: sim)?.outlined = node?.frame
         }
+        inspector.onClose = { [weak self] in self?.setInspecting(false) }
+        inspector.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1080, height: 780))
 
@@ -436,26 +448,91 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     // MARK: Floating chrome
 
+    private func buildAgentHud() {
+        agentHud.isHidden = true
+        agentHudDot.wantsLayer = true
+        agentHudDot.layer?.cornerRadius = 4
+        agentHudDot.layer?.backgroundColor = Design.agent.cgColor
+        agentHudDot.widthAnchor.constraint(equalToConstant: 8).isActive = true
+        agentHudDot.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        agentHudLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        agentHudLabel.textColor = Design.ink
+        agentHudLabel.lineBreakMode = .byTruncatingTail
+        agentHudLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 260).isActive = true
+        agentHudPause = GlassButton(symbol: nil, title: "Pause", label: "Pause or resume the agent", style: .well, target: self, action: #selector(toggleAgentPause(_:)))
+        agentHudPause.font = .systemFont(ofSize: 11, weight: .semibold)
+        agentHudPause.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        let row = NSStackView(views: [agentHudDot, agentHudLabel, agentHudPause])
+        row.spacing = 8
+        row.alignment = .centerY
+        row.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 6)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        agentHud.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: agentHud.topAnchor), row.bottomAnchor.constraint(equalTo: agentHud.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: agentHud.leadingAnchor), row.trailingAnchor.constraint(equalTo: agentHud.trailingAnchor),
+        ])
+    }
+
+    @objc private func toggleAgentPause(_ sender: Any?) {
+        guard let tools = agentTools else { return }
+        tools.paused.toggle()
+        agentPanel?.refresh()
+        updateAgentHud()
+    }
+
+    private func updateAgentHud() {
+        guard let client = agentActivity.client else { agentHud.isHidden = true; return }
+        agentHud.isHidden = false
+        let paused = agentTools?.paused ?? false
+        agentHudDot.layer?.backgroundColor = (paused ? Design.warning : Design.agent).cgColor
+        let latest = agentActivity.entries(session: nil, all: true).last
+        let action = paused ? "Paused" : (latest.map { "\($0.tool) \($0.summary)" } ?? "Connected")
+        let text = NSMutableAttributedString(string: client + "  ", attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink])
+        text.append(NSAttributedString(string: action, attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
+        agentHudLabel.attributedStringValue = text
+        agentHudPause.title = paused ? "Resume" : "Pause"
+        agentHudPause.isOn = paused
+    }
+
+    private func mountAgentPanel() {
+        agentHost.subviews.forEach { $0.removeFromSuperview() }
+        guard let v = agentPanel?.view else { return }
+        v.translatesAutoresizingMaskIntoConstraints = false
+        agentHost.addSubview(v)
+        NSLayoutConstraint.activate([
+            v.topAnchor.constraint(equalTo: agentHost.topAnchor), v.bottomAnchor.constraint(equalTo: agentHost.bottomAnchor),
+            v.leadingAnchor.constraint(equalTo: agentHost.leadingAnchor), v.trailingAnchor.constraint(equalTo: agentHost.trailingAnchor),
+        ])
+    }
+
     private func buildChrome(in host: NSView) {
-        appChip = GlassButton(symbol: nil, title: "No app", label: "Running apps", style: .well, target: self, action: #selector(showAppMenu(_:)))
-        deviceButton = GlassButton(symbol: "iphone", title: "Phone", label: "Switch the device while the app runs", style: .well, target: self, action: #selector(showDeviceMenu(_:)))
+        appChip = GlassButton(symbol: nil, title: "Open an APK", label: "Running apps", style: .well, target: self, action: #selector(showAppMenu(_:)))
+        deviceButton = GlassButton(symbol: "iphone", title: "Phone", label: "Switch the device while the app runs", style: .plain, target: self, action: #selector(showDeviceMenu(_:)))
         deviceButtons = [
-            GlassButton(symbol: "chevron.backward", label: "Back", target: self, action: #selector(back(_:))),
-            GlassButton(symbol: "house", label: "Home", target: self, action: #selector(home(_:))),
-            GlassButton(symbol: "rotate.right", label: "Rotate", target: self, action: #selector(rotate(_:))),
-            GlassButton(symbol: "circle.lefthalf.filled", label: "Light or dark", target: self, action: #selector(appearance(_:))),
-            GlassButton(symbol: nil, title: "Shake", label: "Shake the device", target: self, action: #selector(shake(_:))),
+            GlassButton(symbol: "chevron.backward", label: "Back (⌘[)", target: self, action: #selector(back(_:))),
+            GlassButton(symbol: "rotate.right", label: "Rotate (⌘R)", target: self, action: #selector(rotate(_:))),
+            GlassButton(symbol: "circle.lefthalf.filled", label: "Light or dark (⇧⌘A)", target: self, action: #selector(appearance(_:))),
         ]
-        mirrorButton = GlassButton(symbol: "dot.radiowaves.left.and.right", title: "Mirror", label: "Send touches and keys to every device", style: .well, target: self, action: #selector(toggleMirror(_:)))
+        mirrorButton = GlassButton(symbol: "dot.radiowaves.left.and.right", title: "Mirror", label: "Send touches and keys to every device (⇧⌘M)", style: .well, target: self, action: #selector(toggleMirror(_:)))
         layoutButtons = [
             GlassButton(symbol: "iphone", label: "One device", target: self, action: #selector(showOne(_:))),
-            GlassButton(symbol: "rectangle.split.2x1", label: "Every device, side by side", target: self, action: #selector(showAll(_:))),
-            GlassButton(symbol: "plusminus", label: "Compare: mark what differs", target: self, action: #selector(toggleCompare(_:))),
+            GlassButton(symbol: "rectangle.split.2x1", label: "Every device, side by side (⌘\\)", target: self, action: #selector(showAll(_:))),
+            GlassButton(symbol: "plusminus", label: "Compare: mark what differs (⇧⌘D)", target: self, action: #selector(toggleCompare(_:))),
         ]
-        recordButton = GlassButton(symbol: "record.circle", title: "Record", label: "Record input, log, network and screen for replay", style: .record, target: self, action: #selector(toggleRecording(_:)))
-        let library = GlassButton(symbol: "sidebar.left", label: "Show the library", target: self, action: #selector(toggleLibrary(_:)))
-        let shot = GlassButton(symbol: "camera", label: "Screenshot", target: self, action: #selector(screenshot(_:)))
-        let commands = GlassButton(symbol: "magnifyingglass", title: "Commands   ⌘K", label: "Search every command, device, app and recording", style: .well, target: self, action: #selector(showPalette(_:)))
+        let shot = GlassButton(symbol: "camera", label: "Screenshot (⌘S)", target: self, action: #selector(screenshot(_:)))
+        recordButton = GlassButton(symbol: "record.circle", title: "", label: "Record input, log, network and screen (⌥⌘R)", style: .record, target: self, action: #selector(toggleRecording(_:)))
+        let library = GlassButton(symbol: "sidebar.left", label: "Show or hide the library", target: self, action: #selector(toggleLibrary(_:)))
+        let commands = GlassButton(symbol: "magnifyingglass", title: "⌘K", label: "Search every command, device, app and recording (⌘K)", style: .well, target: self, action: #selector(showPalette(_:)))
+
+        func divider() -> NSView {
+            let d = NSView()
+            d.wantsLayer = true
+            d.layer?.backgroundColor = Design.stroke.cgColor
+            d.widthAnchor.constraint(equalToConstant: 1).isActive = true
+            d.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            return d
+        }
 
         func group(_ views: [NSView]) -> NSView {
             let well = NSView()
@@ -465,6 +542,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             well.layer?.cornerCurve = .continuous
             let row = NSStackView(views: views)
             row.spacing = 2
+            row.alignment = .centerY
             row.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
             row.translatesAutoresizingMaskIntoConstraints = false
             well.addSubview(row)
@@ -474,50 +552,106 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [library, appChip, deviceButton, group(deviceButtons), spacer, mirrorButton, group(layoutButtons), shot, recordButton, commands])
+        let deviceCluster = group([deviceButton, divider()] + deviceButtons)
+        let captureCluster = group([shot, divider(), recordButton])
+        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, mirrorButton, group(layoutButtons), captureCluster, commands])
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
         bar.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(bar)
 
-        let rails: [(String, String, String, Selector)] = [
-            ("device", "slider.horizontal.3", "Device controls", #selector(toggleDevicePane(_:))),
-            ("inspect", "cursorarrow.rays", "Inspect: pick what is on screen", #selector(toggleInspector(_:))),
-            ("diagnostics", "stethoscope", "Diagnostics: performance, accessibility, background work", #selector(toggleDiagnostics(_:))),
-            ("-", "", "", #selector(toggleLog(_:))),
-            ("network", "arrow.up.arrow.down", "Network: the app's requests", #selector(toggleNetwork(_:))),
-            ("timeline", "chart.bar.xaxis", "Timeline: the last minute, track by track", #selector(toggleTimeline(_:))),
-            ("log", "text.alignleft", "Log", #selector(toggleLog(_:))),
-            ("-", "", "", #selector(toggleLog(_:))),
-            ("tests", "checkmark.circle", "Tests: run an androidTest APK", #selector(toggleTests(_:))),
-            ("snapshots", "photo.stack", "Screenshot tests", #selector(toggleSnapshots(_:))),
-            ("map", "point.3.connected.trianglepath.dotted", "Screen map: walk the app and see every screen", #selector(toggleMap(_:))),
-            ("recordings", "film", "Recordings: replay, and find the first build that differs", #selector(toggleRecordings(_:))),
-            ("-", "", "", #selector(toggleLog(_:))),
-            ("agent", "sparkles", "Agent", #selector(showAgent(_:))),
+        // Three labeled micro-clusters: Inspect (right drawers), Verify (Changes/Map/Snapshots/Tests/Recordings), Dock (BottomDock & Agent).
+        enum RailEntry {
+            case section(String)
+            case item(String, String, String, Selector)
+        }
+        let railEntries: [RailEntry] = [
+            .section("INSPECT"),
+            .item("device", "slider.horizontal.3", "Device controls", #selector(toggleDevicePane(_:))),
+            .item("inspect", "cursorarrow.rays", "Inspector: pick what is on screen (⌥⌘I)", #selector(toggleInspector(_:))),
+            .item("network", "arrow.up.arrow.down", "Network: live requests & mocks", #selector(toggleNetwork(_:))),
+            .item("diagnostics", "stethoscope", "Diagnostics: performance, accessibility, background work", #selector(toggleDiagnostics(_:))),
+            .section("VERIFY"),
+            .item("changes", "plusminus", "Changes: compare session build against base (⌘D)", #selector(showChanges(_:))),
+            .item("map", "point.3.connected.trianglepath.dotted", "Screen map: walk every screen", #selector(toggleMap(_:))),
+            .item("snapshots", "photo.stack", "Screenshot tests", #selector(toggleSnapshots(_:))),
+            .item("tests", "checkmark.circle", "Tests: run an androidTest APK", #selector(toggleTests(_:))),
+            .item("recordings", "film", "Recordings: replay & bisect", #selector(toggleRecordings(_:))),
+            .section("DOCK"),
+            .item("dock", "dock.rectangle", "Bottom dock: Log, Timeline & Compare (⇧⌘L)", #selector(toggleBottomDock(_:))),
+            .item("agent", "sparkles", "Agent activity (⌥⌘A)", #selector(showAgent(_:))),
         ]
-        // Four groups, a hairline between them: the device, what it does over time, checking builds, the agent.
-        let column = NSStackView(views: rails.map { id, symbol, label, action -> NSView in
-            if id == "-" {
-                let line = NSView()
-                line.wantsLayer = true
-                line.layer?.backgroundColor = Design.stroke.cgColor
-                line.heightAnchor.constraint(equalToConstant: 1).isActive = true
-                line.widthAnchor.constraint(equalToConstant: 22).isActive = true
-                return line
+        var railViews: [NSView] = []
+        for (idx, entry) in railEntries.enumerated() {
+            switch entry {
+            case .section(let title):
+                if idx > 0 {
+                    let line = NSView()
+                    line.wantsLayer = true
+                    line.layer?.backgroundColor = Design.stroke.cgColor
+                    line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+                    line.widthAnchor.constraint(equalToConstant: 26).isActive = true
+                    railViews.append(line)
+                }
+                let lbl = NSTextField(labelWithString: title)
+                lbl.font = .systemFont(ofSize: 8, weight: .bold)
+                lbl.textColor = Design.mute.withAlphaComponent(0.75)
+                lbl.alignment = .center
+                railViews.append(lbl)
+            case .item(let id, let symbol, let label, let action):
+                let b = GlassButton(symbol: symbol, label: label, target: self, action: action)
+                railButtons[id] = b
+                let wrap = NSView()
+                wrap.translatesAutoresizingMaskIntoConstraints = false
+                wrap.addSubview(b)
+                NSLayoutConstraint.activate([
+                    b.topAnchor.constraint(equalTo: wrap.topAnchor), b.bottomAnchor.constraint(equalTo: wrap.bottomAnchor),
+                    b.leadingAnchor.constraint(equalTo: wrap.leadingAnchor), b.trailingAnchor.constraint(equalTo: wrap.trailingAnchor),
+                ])
+                // Small corner status dot (for overrides, log errors, live agent)
+                let dot = NSView()
+                dot.wantsLayer = true
+                dot.layer?.cornerRadius = 3.5
+                dot.isHidden = true
+                dot.translatesAutoresizingMaskIntoConstraints = false
+                wrap.addSubview(dot)
+                NSLayoutConstraint.activate([
+                    dot.widthAnchor.constraint(equalToConstant: 7), dot.heightAnchor.constraint(equalToConstant: 7),
+                    dot.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 2),
+                    dot.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -2),
+                ])
+                railDots[id] = dot
+                // Compact count pill (for active mock rules, etc.)
+                let badge = NSTextField(labelWithString: "")
+                badge.font = .systemFont(ofSize: 9, weight: .bold)
+                badge.alignment = .center
+                badge.wantsLayer = true
+                badge.layer?.cornerRadius = 7
+                badge.layer?.masksToBounds = true
+                badge.isHidden = true
+                badge.translatesAutoresizingMaskIntoConstraints = false
+                wrap.addSubview(badge)
+                NSLayoutConstraint.activate([
+                    badge.heightAnchor.constraint(equalToConstant: 14),
+                    badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 14),
+                    badge.topAnchor.constraint(equalTo: wrap.topAnchor, constant: -2),
+                    badge.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: 3),
+                ])
+                railBadges[id] = badge
+                railViews.append(wrap)
             }
-            let b = GlassButton(symbol: symbol, label: label, target: self, action: action)
-            railButtons[id] = b
-            return b
-        })
+        }
+        let column = NSStackView(views: railViews)
         column.orientation = .vertical
+        column.alignment = .centerX
         column.spacing = 4
-        column.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        column.edgeInsets = NSEdgeInsets(top: 6, left: 5, bottom: 6, right: 5)
         column.translatesAutoresizingMaskIntoConstraints = false
         rail.addSubview(column)
 
         // Panes first, then the bar and rail over them, then the palette's veil and the palette on top.
-        for v in [networkPane, devicePane, testsPane, diagnosticsPane, recordingsPane, header, rail, scrim, palette] as [NSView] {
+        let inspectorView = inspector.view
+        for v in [networkPane, devicePane, inspectorView, testsPane, diagnosticsPane, recordingsPane, agentHost, header, rail, scrim, palette] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             host.addSubview(v)
         }
@@ -531,6 +665,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         palette.source = { [weak self] in self?.paletteItems() ?? [] }
         networkPane.isHidden = true
         devicePane.isHidden = true
+        inspectorView.isHidden = true
+        agentHost.isHidden = true
         testsPane.isHidden = true
         testsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         testsPane.follow(selected)
@@ -546,7 +682,10 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             guard let self else { return [] }
             return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
         }
+        devicePane.onOverridesChange = { [weak self] in self?.refreshOverrides() }
         deviceLeading = devicePane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
+        inspectorLeading = inspectorView.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
+        agentLeading = agentHost.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         // Hidden, the pane waits just off the window's right edge; shown, it slides in beside the rail.
         networkLeading = networkPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         NSLayoutConstraint.activate([
@@ -562,6 +701,14 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             networkPane.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
             networkPane.widthAnchor.constraint(equalToConstant: Self.networkWidth),
             networkLeading,
+            inspectorView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            inspectorView.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            inspectorView.widthAnchor.constraint(equalToConstant: Self.inspectorWidth),
+            inspectorLeading,
+            agentHost.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Design.margin),
+            agentHost.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -Design.margin),
+            agentHost.widthAnchor.constraint(equalToConstant: Self.agentWidth),
+            agentLeading,
             scrim.topAnchor.constraint(equalTo: host.topAnchor), scrim.bottomAnchor.constraint(equalTo: host.bottomAnchor),
             scrim.leadingAnchor.constraint(equalTo: host.leadingAnchor), scrim.trailingAnchor.constraint(equalTo: host.trailingAnchor),
             palette.centerXAnchor.constraint(equalTo: host.centerXAnchor),
@@ -590,15 +737,81 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         ])
     }
 
+    private func refreshOverrides() {
+        overrideBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard let sim = selected, sim.isAlive else {
+            overrideBar.isHidden = true
+            updateRailBadges(overrideCount: 0)
+            return
+        }
+        let overrides = devicePane.activeOverrides(for: sim)
+        for o in overrides {
+            let pill = makeOverridePill(symbol: o.symbol, title: o.label, color: o.color) { [weak self] in
+                self?.devicePane.clearOverride(o, on: sim)
+                self?.toast.show("Cleared \(o.label)")
+            }
+            overrideBar.addArrangedSubview(pill)
+        }
+        if networkRuleCount > 0 {
+            let label = networkRuleCount == 1 ? "1 Mock" : "\(networkRuleCount) Mocks"
+            let pill = makeOverridePill(symbol: "theatermasks", title: label, color: Design.difference) { [weak self] in
+                self?.networkPane.clearAllRules()
+                self?.toast.show("Cleared all network rules")
+            }
+            overrideBar.addArrangedSubview(pill)
+        }
+        overrideBar.isHidden = overrideBar.arrangedSubviews.isEmpty
+        updateRailBadges(overrideCount: overrides.count)
+    }
+
+    private func makeOverridePill(symbol: String, title: String, color: NSColor, onClear: @escaping () -> Void) -> NSView {
+        let b = GlassButton(symbol: symbol, title: "\(title)  ×", label: "Click to clear \(title)", style: .well, target: nil, action: nil)
+        b.font = .systemFont(ofSize: 11, weight: .semibold)
+        b.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        b.layer?.cornerRadius = 12
+        b.layer?.backgroundColor = color.withAlphaComponent(0.18).cgColor
+        b.layer?.borderWidth = 1
+        b.layer?.borderColor = color.withAlphaComponent(0.38).cgColor
+        b.contentTintColor = color
+        b.attributedTitle = NSAttributedString(string: "\(title)  ×", attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 11, weight: .semibold)])
+        b.onPress = onClear
+        return b
+    }
+
+    private func updateRailBadges(overrideCount: Int) {
+        if let dot = railDots["device"] {
+            dot.isHidden = overrideCount == 0
+            dot.layer?.backgroundColor = Design.warning.cgColor
+        }
+        if let badge = railBadges["network"] {
+            badge.isHidden = networkRuleCount == 0
+            badge.stringValue = " \(networkRuleCount) "
+            badge.textColor = Design.stage
+            badge.layer?.backgroundColor = Design.difference.cgColor
+        }
+        if let dot = railDots["dock"] {
+            dot.isHidden = logErrorCount == 0
+            dot.layer?.backgroundColor = Design.record.cgColor
+        }
+        if let dot = railDots["agent"] {
+            dot.isHidden = agentActivity.client == nil
+            dot.layer?.backgroundColor = ((agentTools?.paused ?? false) ? Design.warning : Design.accent).cgColor
+        }
+    }
+
     private func updateChrome() {
         guard appChip != nil else { return }
         let alive = Engine.shared.simulators.filter(\.isAlive).count
         if let sim = selected {
-            let state = sim.state == .running ? "  ● Live" : (sim.state == .starting ? "  Starting…" : "  Ended")
-            let text = NSMutableAttributedString(string: sim.name, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.ink])
-            text.append(NSAttributedString(string: state, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-                                                                       .foregroundColor: sim.state == .running ? Design.accent : Design.mute]))
-            if alive > 1 { text.append(NSAttributedString(string: "  \(alive) devices", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.mute])) }
+            let dot = sim.state == .running ? "● " : (sim.state == .starting ? "◌ " : "○ ")
+            let text = NSMutableAttributedString(string: dot, attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                                                                           .foregroundColor: sim.state == .running ? Design.accent : Design.mute])
+            text.append(NSAttributedString(string: sim.name, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.ink]))
+            if let session = sessions.session(forSimulator: sim) {
+                text.append(NSAttributedString(string: "  \(session.branch ?? session.shortHead)", attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
+            } else if alive > 1 {
+                text.append(NSAttributedString(string: "  \(alive) devices", attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
+            }
             appChip.title = sim.name
             appChip.attributedTitle = text
         } else {
@@ -612,27 +825,29 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         deviceButton.isEnabled = live != nil
         for b in deviceButtons { b.isEnabled = live != nil }
         mirrorButton.isOn = mirror
-        mirrorButton.title = mirror ? "Mirroring to all" : "Mirror"
+        mirrorButton.title = mirror ? "Mirroring" : "Mirror"
         mirrorButton.isHidden = alive < 2 && !mirror
         layoutButtons[0].isOn = !sideBySide
         layoutButtons[1].isOn = sideBySide && !comparing
         layoutButtons[2].isOn = comparing
         for b in layoutButtons.dropFirst() { b.isEnabled = alive > 1 || sideBySide }
         recordButton.isOn = isRecording
-        recordButton.title = isRecording ? "Recording" : "Record"
+        recordButton.title = isRecording ? "Rec" : ""
         recordButton.isEnabled = live != nil
         railButtons["inspect"]?.isOn = inspecting
-        railButtons["log"]?.isOn = showingLog
+        railButtons["dock"]?.isOn = showingBottomDock
         railButtons["network"]?.isOn = showingNetwork
         railButtons["device"]?.isOn = showingDevice
         railButtons["tests"]?.isOn = showingTests
         railButtons["diagnostics"]?.isOn = showingDiagnostics
         railButtons["recordings"]?.isOn = showingRecordings
-        railButtons["timeline"]?.isOn = showingTimeline
+        railButtons["changes"]?.isOn = changesSheet.isOpen
         timeline.saveButton.isEnabled = isRecording
-        railButtons["agent"]?.isOn = agentActivity.client != nil
+        railButtons["agent"]?.isOn = showingAgent
         railButtons["snapshots"]?.isOn = snapshotReview.isOpen
         railButtons["map"]?.isOn = screenMap.isOpen
+        refreshOverrides()
+        updateAgentHud()
     }
 
     @objc func toggleNetwork(_ sender: Any?) { setShowingNetwork(!showingNetwork) }
@@ -964,10 +1179,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if let pane, pane != rightPane {
             switch pane {
             case .device: Reports.shared.count(.paneDevice)
+            case .inspector: Reports.shared.count(.inspector)
             case .network: Reports.shared.count(.paneNetwork)
             case .tests: Reports.shared.count(.paneTests)
             case .diagnostics: Reports.shared.count(.paneDiagnostics)
             case .recordings: Reports.shared.count(.paneRecordings)
+            case .agent: break
             }
         }
         if pane == nil, let closing, rightPane != closing { return }
@@ -981,18 +1198,29 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private func activate(_ pane: RightPane, _ on: Bool) {
         switch pane {
         case .device: devicePane.follow(on ? selected : nil)
+        case .inspector:
+            inspecting = on
+            inspectTimer?.invalidate()
+            inspectTimer = on ? Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refreshInspector() } : nil
+            refreshGrid()
+            if on { refreshInspector() }
         case .network: networkPane.follow(on ? selected : nil)
         case .tests: testsPane.setActive(on)
         case .diagnostics: diagnosticsPane.follow(on ? selected : nil)
         case .recordings: recordingsPane.setShown(on, folder: recordings)
+        case .agent: if on { agentPanel?.refresh() }
         }
     }
 
     /// Each pane of the slot: its view, the constraint that slides it, its width.
     private var slot: [(RightPane, NSView, NSLayoutConstraint, CGFloat)] {
-        [(.device, devicePane, deviceLeading, Self.deviceWidth), (.network, networkPane, networkLeading, Self.networkWidth),
-         (.tests, testsPane, testsLeading, Self.testsWidth), (.diagnostics, diagnosticsPane, diagnosticsLeading, Self.diagnosticsWidth),
-         (.recordings, recordingsPane, recordingsLeading, Self.recordingsWidth)]
+        [(.device, devicePane, deviceLeading, Self.deviceWidth),
+         (.inspector, inspector.view, inspectorLeading, Self.inspectorWidth),
+         (.network, networkPane, networkLeading, Self.networkWidth),
+         (.tests, testsPane, testsLeading, Self.testsWidth),
+         (.diagnostics, diagnosticsPane, diagnosticsLeading, Self.diagnosticsWidth),
+         (.recordings, recordingsPane, recordingsLeading, Self.recordingsWidth),
+         (.agent, agentHost, agentLeading, Self.agentWidth)]
     }
 
     func setShowingRecordings(_ on: Bool) { show(on ? .recordings : nil, closing: .recordings) }
@@ -1004,7 +1232,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         let width = panes.first { $0.0 == rightPane }?.3 ?? 0
         Design.animate(Design.move, {
             for (p, _, leading, w) in panes { leading.animator().constant = p == self.rightPane ? -(w + 68) : 20 }
-            self.gridTrailing.animator().constant = width > 0 ? -(width + 80) : -64
+            self.gridTrailing.animator().constant = width > 0 ? -(width + 80) : -68
             host.layoutSubtreeIfNeeded()
         }, done: {
             for (p, view, _, _) in self.slot where p != self.rightPane { view.isHidden = true }
@@ -1012,16 +1240,37 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         updateChrome()
     }
 
-    /// The timeline docks along the bottom, under the stage.
+    @objc func toggleBottomDock(_ sender: Any?) {
+        setBottomDock(!showingBottomDock)
+    }
+
+    func setBottomDock(_ on: Bool, tab: BottomDock.Tab? = nil) {
+        if let tab { bottomDock.select(tab) }
+        showingBottomDock = on
+        if on {
+            bottomDock.isHidden = false
+            logPanel.follow(bottomDock.activeTab == .log ? selected : nil)
+            timeline.follow(bottomDock.activeTab == .timeline ? selected : nil)
+            timeline.setShown(bottomDock.activeTab == .timeline)
+        } else {
+            logPanel.follow(nil)
+            timeline.follow(nil)
+            timeline.setShown(false)
+        }
+        Design.animate(Design.move, { self.bottomDockHeight.animator().constant = on ? self.bottomDockSavedHeight : 0 },
+                       done: { if !self.showingBottomDock { self.bottomDock.isHidden = true } })
+        window.toolbar?.validateVisibleItems()
+        updateChrome()
+    }
+
+    /// The timeline docks along the bottom, inside the unified BottomDock.
     func setShowingTimeline(_ on: Bool) {
         if on { Reports.shared.count(.timeline) }
-        showingTimeline = on
-        timeline.follow(on ? selected : nil)
-        timeline.setShown(on)
-        if on { timeline.isHidden = false }
-        Design.animate(Design.move, { self.timelineHeight.animator().constant = on ? 196 : 0 },
-                       done: { if !self.showingTimeline { self.timeline.isHidden = true } })
-        updateChrome()
+        if on {
+            setBottomDock(true, tab: .timeline)
+        } else if showingTimeline {
+            setBottomDock(false)
+        }
     }
 
     var network: NetworkPane { networkPane }
@@ -1038,14 +1287,43 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             if !self.showingTimeline { self.setShowingTimeline(true) }
             self.timeline.show(e.start)
         }
+        networkPane.onRulesChange = { [weak self] count in
+            self?.networkRuleCount = count
+            self?.refreshOverrides()
+        }
         timeline.onScrub = { [weak self] t in
             guard let self else { return }
             if !self.showingNetwork { self.setShowingNetwork(true) }
             self.networkPane.reveal(at: t)
+            self.bottomDock.setTimelineLive(false)
         }
         timeline.onSave = { [weak self] in self?.saveRecordingAndShow(nil) }
         networkPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
-        timeline.onClose = { [weak self] in self?.setShowingTimeline(false) }
+        timeline.onClose = { [weak self] in self?.setBottomDock(false) }
+        logPanel.onErrorCount = { [weak self] count in
+            self?.logErrorCount = count
+            self?.bottomDock.setLogErrorCount(count)
+            self?.refreshOverrides()
+        }
+        bottomDock.onClose = { [weak self] in self?.setBottomDock(false) }
+        bottomDock.onResizeDelta = { [weak self] delta in
+            guard let self, self.showingBottomDock else { return }
+            let next = min(max(self.bottomDockSavedHeight + delta, 140), 420)
+            self.bottomDockSavedHeight = next
+            self.bottomDockHeight.constant = next
+        }
+        bottomDock.onTabChange = { [weak self] tab in
+            guard let self, self.showingBottomDock else { return }
+            self.logPanel.follow(tab == .log ? self.selected : nil)
+            self.timeline.follow(tab == .timeline ? self.selected : nil)
+            self.timeline.setShown(tab == .timeline)
+            self.bottomDock.setTimelineLive(self.timeline.isLive)
+            self.updateChrome()
+        }
+        bottomDock.onHighlightDiff = { [weak self] item in
+            guard let self, let sim = self.selected else { return }
+            self.grid.view(for: sim)?.outlined = item?.rect
+        }
     }
 
     private static let sidebarHiddenKey = "sidebarHidden"
@@ -1192,7 +1470,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if case .sessionsHeader = rows[row] { return 24 }
         if case .suggestion = rows[row] { return 24 }
         if case .addSession = rows[row] { return 28 }
-        if case .session = rows[row] { return 40 }
+        if case .session(let s) = rows[row] { return sessions.rowHeight(for: s) }
         if case .pull = rows[row] { return 42 }
         return 36
     }
@@ -1287,6 +1565,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         if case .claudeOffer(let offer) = rows[row] { sessions.addRepositories([offer.repository]) }
         if case .claudeTitles = rows[row] { ClaudeSessions.shared.enabled = true; reload() }   // the titles arrive with the read
         if case .pull(let pull) = rows[row] { sessions.openPull(pull) }
+        if case .recent(let url) = rows[row] { open(url) }
     }
 
     @objc private func rowDoubleClicked() {
@@ -1489,12 +1768,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     func setShowingLog(_ on: Bool) {
         if on { Reports.shared.count(.log) }
-        showingLog = on
-        logPanel.isHidden = !on
-        Design.animate { self.logHeight.animator().constant = on ? 210 : 0 }
-        logPanel.follow(on ? selected : nil)
-        window.toolbar?.validateVisibleItems()
-        updateChrome()
+        if on {
+            setBottomDock(true, tab: .log)
+        } else if showingLog {
+            setBottomDock(false)
+        }
     }
 
     /// The log lines shown (for scripted checks).
@@ -1582,15 +1860,11 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
 
     @objc func toggleInspector(_ sender: Any?) { if !inspecting { Reports.shared.count(.inspector) }; setInspecting(!inspecting) }
 
-    /// The inspector: the chosen simulator's nodes in a pane, picked by pointing at the picture. While it is open
-    /// clicks on that picture pick instead of tapping; keys and the toolbar still reach the app.
+    /// The inspector: the chosen simulator's nodes in a frosted glass right drawer, picked by pointing at the picture.
+    /// While it is open clicks on that picture pick instead of tapping; keys and the toolbar still reach the app.
     func setInspecting(_ on: Bool) {
-        inspecting = on
-        inspectorItem.animator().isCollapsed = !on
-        inspectTimer?.invalidate()
-        inspectTimer = on ? Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refreshInspector() } : nil
+        show(on ? .inspector : nil, closing: .inspector)
         reload()
-        if on { refreshInspector() }
     }
 
     private var inspectorBusy = false
@@ -1619,7 +1893,7 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     @objc func toggleCompare(_ sender: Any?) { if !comparing { Reports.shared.count(.compare) }; setComparing(!comparing) }
 
     /// Compare mode: the simulators side by side, the differences from the chosen one marked on each picture
-    /// (boxes: content only there or moved; shaded: pixels that differ) and listed under them.
+    /// (boxes: content only there or moved; shaded: pixels that differ) and listed in the BottomDock's Compare tab.
     func setComparing(_ on: Bool) {
         comparing = on
         compareTimer?.invalidate()
@@ -1628,11 +1902,12 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             sideBySide = true
             // Content that loads by itself changes the answer too: look again every few seconds.
             compareTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.scheduleCompare(after: 0) }
+            setBottomDock(true, tab: .compare)
         } else {
             for v in grid.views { v.boxes = []; v.areas = [] }
-            compareBar.stringValue = ""
+            bottomDock.setCompareSummary(text: "", items: [], counts: (0, 0))
+            if showingBottomDock && bottomDock.activeTab == .compare { setBottomDock(false) }
         }
-        compareHeight.constant = on ? 104 : 0
         reload()
         if on { scheduleCompare(after: 0) }
     }
@@ -1659,8 +1934,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
         return sim
     }
 
-    /// What the bar under the simulators says (for scripted checks).
-    var compareText: String { compareBar.stringValue }
+    /// What the compare tab says (for scripted checks).
+    var compareText: String { bottomDock.compareText }
 
     private func scheduleCompare(after delay: TimeInterval = 0.5) {
         guard comparing, !compareScheduled else { return }
@@ -1670,7 +1945,9 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
             let running = Engine.shared.simulators.filter { $0.state == .running }
             guard self.comparing, let base = self.live, running.count > 1 else {
                 self.compareScheduled = false
-                if self.comparing { self.compareBar.stringValue = "Compare: open a second simulator (File > Compare With APK…, or the device menu's Open Beside As)." }
+                if self.comparing {
+                    self.bottomDock.setCompareSummary(text: "Compare: open a second simulator (File > Compare With APK…, or the device menu's Open Beside As).", items: [], counts: (0, 0))
+                }
                 return
             }
             let others = running.filter { $0 !== base }
@@ -1688,6 +1965,8 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     private func show(_ results: [(Simulator, ScreenComparison)], base: Simulator) {
         var baseBoxes: [CGRect] = []
         var text: [String] = []
+        var diffItems: [CompareDiffItem] = []
+        var totalAdded = 0, totalMoved = 0
         func rect(_ n: ScreenNode) -> CGRect { CGRect(x: n.left, y: n.top, width: n.right - n.left, height: n.bottom - n.top) }
         for (other, c) in results {
             baseBoxes += c.onlyA.map(rect) + c.moved.map { rect($0.a) }
@@ -1695,13 +1974,25 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
                 v.boxes = c.onlyB.map(rect) + c.moved.map { rect($0.b) }
                 v.areas = c.cells
             }
+            totalAdded += c.onlyA.count + c.onlyB.count
+            totalMoved += c.moved.count
+            for n in c.onlyA.prefix(6) {
+                diffItems.append(CompareDiffItem(symbol: "+", title: n.label.isEmpty ? "(unlabeled)" : n.label, detail: "Only in \(base.name)", rect: rect(n), isAdded: true))
+            }
+            for n in c.onlyB.prefix(6) {
+                diffItems.append(CompareDiffItem(symbol: "−", title: n.label.isEmpty ? "(unlabeled)" : n.label, detail: "Only in \(other.name)", rect: rect(n), isAdded: false))
+            }
+            for pair in c.moved.prefix(6) {
+                let dx = pair.b.left - pair.a.left, dy = pair.b.top - pair.a.top
+                diffItems.append(CompareDiffItem(symbol: "↔", title: pair.a.label.isEmpty ? "(unlabeled)" : pair.a.label, detail: "Moved (\(dx >= 0 ? "+\(dx)" : "\(dx)"), \(dy >= 0 ? "+\(dy)" : "\(dy)")) px", rect: rect(pair.a), isAdded: false))
+            }
             let size = other.deviceSize
             text.append("\(base.name) → \(other.name) \(Int(size.width))×\(Int(size.height)): \(c.summary)")
             text += c.lines(limit: 5).map { "  " + $0 }
         }
         grid.view(for: base)?.boxes = baseBoxes
         grid.view(for: base)?.areas = []
-        compareBar.stringValue = text.joined(separator: "\n")
+        bottomDock.setCompareSummary(text: text.joined(separator: "\n"), items: diffItems, counts: (totalAdded, totalMoved))
     }
 
     @objc func toggleSideBySide(_ sender: Any?) { if !sideBySide { Reports.shared.count(.sideBySide) }; setSideBySide(!sideBySide) }
@@ -1750,18 +2041,13 @@ final class Workbench: NSObject, NSToolbarDelegate, NSTableViewDataSource, NSTab
     }
 
     @objc func showAgent(_ sender: Any?) {
-        guard let agentPanel else { return }
-        if agentPopover.isShown { agentPopover.close(); return }
-        agentPopover.contentViewController = agentPanel
-        agentPopover.behavior = .transient
-        if let anchor = railButtons["agent"] ?? window.contentView {
-            agentPopover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minX)
-        }
-        agentPanel.refresh()
+        guard agentPanel != nil else { return }
+        show(showingAgent ? nil : .agent, closing: .agent)
     }
 
     func agentChanged() {
         agentPanel?.refresh()
+        updateAgentHud()
         updateChrome()
     }
 
