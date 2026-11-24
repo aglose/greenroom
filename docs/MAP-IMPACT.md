@@ -27,10 +27,17 @@ verification passes them: the engine keeps its instances parked on the screens i
   `why`, by screen id.
 - **Main is walked.** `MainBuilds.land` hands each build of main to Evidence under the trunk's path, with the
   repository's kept sign-in, so a pull request's walk has main's map to start from. The first is a full walk; later
-  ones are seeded like any other. The every-tenth full walk of main is gone: a full walk is the first of a project, an
-  engine or settings change, a change `MapImpact` cannot place, or "Walk Everything Again".
+  ones are seeded like any other. The every-tenth full walk of main is gone: a full walk is the first of a project, a
+  settings change, a change `MapImpact` cannot place, or "Walk Everything Again".
 - **A pull request row's head is fetched** into `refs/greenroom/pulls/N` (nothing is checked out), so its walk is
   filed in the history and compared with main's.
+- **An engine update keeps the map.** A baseline walked by another engine no longer starts a full walk. The walk is
+  seeded as usual (`WalkPlan.engineChanged`), and once it is filed its carried screens are verified
+  (`verifyCarried(afterEngine:)`, `--max-actions 0`). A carried screen whose structure the new engine reads
+  differently starts a full walk of that build, with the reason on the row; a capture that differs is kept as a miss
+  and starts nothing (a screen reached with no control tried can look different for other reasons). Limits: captures
+  carried from the old engine are compared with ones the new engine takes, so a rendering change in the engine can
+  show as a visual change; and a verification that never ran (the app quit first) is not started again.
 - **Measured** (`--map-impact-check DIR APK`, engine 0.62.0, its test app, one instance): full walk 144.9 s; one screen
   seeded 13.6 s; the same with `--diff-seed --diff-controls all` 13.8 s; with `changed` 2.2 s. All three gave the
   full walk's map.

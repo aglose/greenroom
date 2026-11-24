@@ -263,7 +263,7 @@ enum MapImpactCheck {
         var unreliable = snap0; unreliable.depsUnreliable = "probes lost"
         expect(full(decide(c1, baseline: unreliable))?.contains("cannot be trusted (probes lost)") == true, "a baseline whose deps cannot be trusted walks everything")
         var older = snap0; older.engine = "e0"
-        expect(full(decide(c1, baseline: older)) == "the engine changed (e0 to e1)", "another engine walks everything")
+        expect(screens(decide(c1, baseline: older)) == screens(kotlin), "a baseline walked by another engine is kept: the same 2 screens are walked")
         var otherProfile = snap0; otherProfile.profile.depth = 5
         expect(full(decide(c1, baseline: otherProfile)) == "the walk's settings changed", "another profile walks everything")
         expect(full(decide(c1, patterns: [src])) == "a file under \(src) changed, where a quick walk missed a change before", "a workspace full-walk pattern is honoured")
@@ -332,6 +332,12 @@ enum MapImpactCheck {
         let dplan = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: diffing, forceFull: false, folder: work) }
         expect(dplan.diffSeed && !plan.diffSeed && Set(dplan.reasons.keys) == Set(dplan.ids) && dplan.reasons.values.allSatisfy { !$0.isEmpty },
                "with a crawler that offers --diff-seed the walk is compared with its seed, and each screen's reason is kept (\(dplan.reasons[ids[2]]?.joined(separator: ", ") ?? "none"))")
+        let newer = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e2", support: support, forceFull: false, folder: work) }
+        expect(!newer.isFull && newer.ids == plan.ids && newer.engineChanged == "e1" && plan.engineChanged == nil,
+               "after an engine update the walk is still seeded, and says its carried screens are to be verified (was \(newer.engineChanged ?? "none"))")
+        let moved = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e2", support: support, forceFull: true,
+                                              fullReason: "engine e2 reads 1 screen differently than e1 did", folder: work) }
+        expect(moved.isFull && moved.reason == "engine e2 reads 1 screen differently than e1 did", "a full walk a verification asked for says why")
         let none = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: .none, forceFull: false, folder: work) }
         expect(none.isFull && none.reason == nil && !none.recordDeps, "with the released engine's crawler the plan is a plain full walk, as before")
         let forced = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: support, forceFull: true, folder: work) }

@@ -164,7 +164,8 @@ enum MapImpact {
     /// Full walk, or which screens to walk again. See the file's head and the plan for the rules.
     static func decide(_ input: Input) -> Decision {
         let b = input.baseline
-        if b.engine != input.engine { return .full("the engine changed (\(b.engine) to \(input.engine))") }
+        // A new engine no longer starts a full walk: the map is kept and its carried screens are verified after the walk
+        // (`History.WalkPlan.engineChanged`), with a full walk only when the new engine reads a screen differently.
         if b.profile.id != input.profile.id { return .full("the walk's settings changed") }
         if let why = b.depsUnreliable { return .full("the last walk's record of what screens depend on cannot be trusted (\(why))") }
         guard let start = b.startDeps, b.screens.contains(where: { $0.deps != nil }) else {

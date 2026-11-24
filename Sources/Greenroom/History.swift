@@ -268,6 +268,9 @@ enum History {
         /// does not have, and is chosen only when no source file changed (a changed handler would not be tried).
         var diffSeed = false
         var diffControls = "all"
+        /// The baseline was walked by another engine (its version): the map is kept, and the screens this walk carries
+        /// are verified once it is filed. A screen the new engine reads differently then starts a full walk.
+        var engineChanged: String?
         /// Fetching teammates' maps before looking for the baseline went wrong, in words.
         var shareProblem: String?
         var isFull: Bool { seed == nil }
@@ -277,11 +280,11 @@ enum History {
     /// recorded its dependencies, and `MapImpact` says only some screens. The seed's
     /// folder and only-file are written into `folder`. Off the main thread.
     static func plan(build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String, support: CrawlRun.Support,
-                     forceFull: Bool, folder: URL) async -> WalkPlan {
+                     forceFull: Bool, fullReason: String? = nil, folder: URL) async -> WalkPlan {
         var plan = WalkPlan(recordDeps: support.recordDeps)
         guard support.seed, support.recordDeps else { return plan }
         guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return plan }
-        if forceFull { plan.reason = "asked to walk everything again"; return plan }
+        if forceFull { plan.reason = fullReason ?? "asked to walk everything again"; return plan }
         // A commit on main is walked like any other: where its changes reach. (Every tenth used to be walked in full
         // to audit the quick ones; a full walk is now the first of a project, or one the person asks for.)
         let ref = p.workspace.baseRef
@@ -316,6 +319,7 @@ enum History {
             plan.ids = ids
             plan.total = base.snapshot.screens.count
             plan.reasons = reasons
+            if base.snapshot.engine != engine, ids.count < base.snapshot.screens.count { plan.engineChanged = base.snapshot.engine }
             plan.diffSeed = support.diffSeed
             // Resources say exactly which screens show them; code may also change where a control leads.
             let codeChanged = diff.changes.contains { if case .source = MapImpact.kind(of: $0.path) { return true } else { return false } }
