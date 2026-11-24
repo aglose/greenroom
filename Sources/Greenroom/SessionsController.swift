@@ -660,16 +660,22 @@ final class SessionsController {
         icon.contentTintColor = running ? Design.accent : .tertiaryLabelColor
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8.5, weight: .regular)
         icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        icon.widthAnchor.constraint(equalToConstant: 10).isActive = true
         let name = NSTextField(labelWithString: s.title)
-        name.font = .systemFont(ofSize: 13, weight: isSelected ? .medium : .regular)
+        name.font = .systemFont(ofSize: 13, weight: isSelected ? .semibold : .regular)
         name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         // The branch, the head's hash and the commits ahead are in the tooltip: the row keeps to what tells it apart.
         let build = buildAccessories(for: s)
         let line = detail(for: s)
-        let sub = NSTextField(labelWithString: build.detail ?? line.text)
+        let rawSub = build.detail ?? line.text
+        let mainPrefix = (s.isMain && s.title != (s.branch ?? "main")) ? "\(s.branch ?? "main") · " : ""
+        let sub = NSTextField(labelWithString: mainPrefix + rawSub)
         sub.font = .systemFont(ofSize: 10)
         sub.textColor = build.color ?? (s.isStale && s.builtAt != nil ? .systemOrange : .secondaryLabelColor)
         sub.lineBreakMode = .byTruncatingTail
+        sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let text = NSStackView(views: [name, sub])
         text.orientation = .vertical
         text.alignment = .leading
@@ -677,7 +683,7 @@ final class SessionsController {
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         var topViews: [NSView] = [icon, text]
         if let dot = ClaudeUI.dot(for: s.claude), s.claude?.running == true || s.claude?.status == .waiting { topViews.append(dot) }   // a finished session's dot said nothing
-        if let walk = evidence.badge(for: s) { topViews.append(walk) }   // "walking…", "N screens" (Evidence.swift)
+        if !isSelected, let walk = evidence.badge(for: s) { topViews.append(walk) }   // selected row gives full width to title
         // A build under way keeps its spinner and cancel in sight; the hammer, the log and the cross show on hover.
         let active = buildQueue.job(for: s)?.isActive ?? false
         var hover: [NSView] = []
@@ -717,11 +723,12 @@ final class SessionsController {
         topRow.alignment = .centerY
         topRow.spacing = 6
 
-        let rebuildButton = GlassButton(symbol: "hammer", title: "Rebuild", label: "Rebuild this session", style: .well, target: nil, action: nil)
-        rebuildButton.image = NSImage(systemSymbolName: "hammer", accessibilityDescription: "Rebuild")?
+        let rebuildButton = GlassButton(symbol: "hammer", title: "Build", label: "Rebuild this session", style: .well, target: nil, action: nil)
+        rebuildButton.image = NSImage(systemSymbolName: "hammer", accessibilityDescription: "Build")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
         rebuildButton.font = .systemFont(ofSize: 11, weight: .medium)
         rebuildButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        rebuildButton.layer?.cornerRadius = 6
         rebuildButton.onPress = { [weak self] in self?.build(s) }
 
         let changesButton = GlassButton(symbol: "plusminus", title: "Changes", label: "Show changes for this session", style: .well, target: nil, action: nil)
@@ -729,27 +736,22 @@ final class SessionsController {
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
         changesButton.font = .systemFont(ofSize: 11, weight: .medium)
         changesButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        changesButton.layer?.cornerRadius = 6
         changesButton.onPress = { [weak self] in self?.workbench?.showChanges(of: s) }
 
         let actionRow = NSStackView(views: [rebuildButton, changesButton])
         actionRow.orientation = .horizontal
         actionRow.alignment = .centerY
+        actionRow.distribution = .fillEqually
         actionRow.spacing = 6
 
         let card = HoverRow(views: [topRow, actionRow])
         card.orientation = .vertical
-        card.alignment = .leading
+        card.alignment = .width
         card.hoverOnly = hover
         card.spacing = 5
-        card.edgeInsets = NSEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
-        card.wantsLayer = true
-        card.layer?.backgroundColor = Design.accent.withAlphaComponent(0.10).cgColor
-        card.layer?.borderColor = Design.accent.withAlphaComponent(0.28).cgColor
-        card.layer?.borderWidth = 1
-        card.layer?.cornerRadius = 10
-        card.layer?.cornerCurve = .continuous
+        card.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 6)
         card.toolTip = tooltipText
-        topRow.widthAnchor.constraint(equalTo: card.widthAnchor, constant: -16).isActive = true
         return card
     }
 
