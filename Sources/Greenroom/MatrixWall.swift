@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// The matrix wall (docs/PLAN.md, phase 4): one build over devices × appearances × locales × font scales, every
 /// combination a live simulator side by side, one touch going to all of them. Each cell runs at a low frame rate
@@ -36,62 +37,214 @@ struct Matrix {
     }
 }
 
-/// Asks which values of each axis to run; answers the matrix, or nil when cancelled.
+/// Frosted-glass Matrix Wall configurator sheet with axis chips, presets, and a live wall preview.
 enum MatrixSheet {
     static func ask(over window: NSWindow, apkName: String, done: @escaping (Matrix) -> Void) {
+        let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 500),
+                             styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        sheet.titlebarAppearsTransparent = true
+        sheet.titleVisibility = .hidden
+        sheet.backgroundColor = Design.stage
+        sheet.appearance = NSAppearance(named: .darkAqua)
+        sheet.isReleasedWhenClosed = false
+
+        let view = MatrixConfiguratorView(apkName: apkName, onCancel: {
+            window.endSheet(sheet, returnCode: .cancel)
+        }, onRun: { matrix in
+            window.endSheet(sheet, returnCode: .OK)
+            done(matrix)
+        })
+        sheet.contentView = NSHostingView(rootView: view)
+        window.beginSheet(sheet) { _ in sheet.orderOut(nil) }
+    }
+}
+
+private struct MatrixConfiguratorView: View {
+    let apkName: String
+    let onCancel: () -> Void
+    let onRun: (Matrix) -> Void
+
+    @State private var devices: Set<String> = ["phone"]
+    @State private var appearances: Set<String> = ["light", "dark"]
+    @State private var locales: Set<String> = ["en-US"]
+    @State private var fontScales: Set<String> = ["1.0"]
+
+    private var currentMatrix: Matrix {
         var m = Matrix()
-        let alert = NSAlert()
-        alert.messageText = "Matrix wall for \(apkName)"
-        alert.informativeText = "Every combination runs at once, side by side; a touch on one goes to all of them. Up to \(Matrix.maxCells)."
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        var boxes: [(String, String, NSButton)] = []
-        func row(_ title: String, _ axis: String, _ values: [(String, String)], _ on: [String]) {
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 12, weight: .semibold)
-            let line = NSStackView()
-            line.spacing = 10
-            for (v, name) in values {
-                let b = NSButton(checkboxWithTitle: name, target: nil, action: nil)
-                b.state = on.contains(v) ? .on : .off
-                line.addArrangedSubview(b)
-                boxes.append((axis, v, b))
+        m.devices = Matrix.devices.map(\.0).filter { devices.contains($0) }
+        m.appearances = Matrix.appearances.map(\.0).filter { appearances.contains($0) }
+        m.locales = Matrix.locales.map(\.0).filter { locales.contains($0) }
+        m.fontScales = Matrix.fontScales.map(\.0).filter { fontScales.contains($0) }
+        return m
+    }
+
+    private var cells: [Matrix.Cell] { currentMatrix.cells }
+    private var canRun: Bool { !cells.isEmpty && cells.count <= Matrix.maxCells }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text("Matrix Wall")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(SettingsTheme.ink)
+                        Text(apkName)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(SettingsTheme.mute)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(0.08)))
+                    }
+                    Text("Every combination runs side by side with mirrored touch (up to \(Matrix.maxCells)).")
+                        .font(.system(size: 12))
+                        .foregroundStyle(SettingsTheme.mute)
+                }
+                Spacer()
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(SettingsTheme.mute)
+                        .frame(width: 26, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.white.opacity(0.07)))
+                }
+                .buttonStyle(.plain)
             }
-            stack.addArrangedSubview(label)
-            stack.addArrangedSubview(line)
+
+            // Quick presets
+            HStack(spacing: 6) {
+                Text("Presets:")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(SettingsTheme.mute)
+                presetChip("Light × Dark") {
+                    devices = ["phone"]; appearances = ["light", "dark"]; locales = ["en-US"]; fontScales = ["1.0"]
+                }
+                presetChip("RTL + 200% Text") {
+                    devices = ["phone"]; appearances = ["dark"]; locales = ["en-US", "ar-EG"]; fontScales = ["1.0", "2.0"]
+                }
+                presetChip("Form Factors") {
+                    devices = ["phone", "foldable", "tablet"]; appearances = ["light", "dark"]; locales = ["en-US"]; fontScales = ["1.0"]
+                }
+            }
+
+            // Axis chips
+            VStack(alignment: .leading, spacing: 10) {
+                axisRow("DEVICES", Matrix.devices, selection: $devices)
+                axisRow("APPEARANCE", Matrix.appearances, selection: $appearances)
+                axisRow("LANGUAGE", Matrix.locales, selection: $locales)
+                axisRow("TEXT SIZE", Matrix.fontScales, selection: $fontScales)
+            }
+
+            // Live grid preview
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Live Wall Preview")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(SettingsTheme.mute)
+                    Spacer()
+                    Text(cells.isEmpty
+                         ? "Choose at least one of each"
+                         : "\(cells.count) / \(Matrix.maxCells) simulator\(cells.count == 1 ? "" : "s")" + (cells.count > Matrix.maxCells ? " (too many)" : ""))
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(canRun ? SettingsTheme.accent : SettingsTheme.record)
+                }
+
+                let cols = Array(repeating: GridItem(.flexible(), spacing: 6), count: 4)
+                LazyVGrid(columns: cols, spacing: 6) {
+                    ForEach(Array(cells.prefix(16).enumerated()), id: \.offset) { _, cell in
+                        let isDark = cell.options.contains("dark")
+                        VStack(spacing: 4) {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(isDark ? SettingsTheme.accent.opacity(0.35) : Color.black.opacity(0.22))
+                                .frame(width: 14, height: 22)
+                            Text(cell.label)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .foregroundStyle(isDark ? SettingsTheme.ink : Color(white: 0.12))
+                                .lineLimit(1)
+                        }
+                        .padding(.vertical, 6).padding(.horizontal, 4)
+                        .frame(maxWidth: .infinity)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(isDark ? Color(red: 0.11, green: 0.12, blue: 0.15) : Color(red: 0.92, green: 0.93, blue: 0.95))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(SettingsTheme.stroke, lineWidth: 1)
+                        )
+                    }
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(SettingsTheme.wellFill))
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(SettingsTheme.stroke, lineWidth: 1))
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(SettingsTheme.ink)
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.09)))
+                    .keyboardShortcut(.cancelAction)
+
+                Button(canRun ? "Launch \(cells.count) Simulator\(cells.count == 1 ? "" : "s")" : "Cannot Launch") {
+                    onRun(currentMatrix)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canRun)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SettingsTheme.onAccent)
+                .padding(.horizontal, 16).padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(SettingsTheme.accent.opacity(canRun ? 1 : 0.35)))
+                .keyboardShortcut(.defaultAction)
+            }
         }
-        row("Devices", "device", Matrix.devices, m.devices)
-        row("Appearance", "appearance", Matrix.appearances, m.appearances)
-        row("Language", "locale", Matrix.locales, m.locales)
-        row("Text size", "font", Matrix.fontScales, m.fontScales)
-        let count = NSTextField(labelWithString: "")
-        count.textColor = .secondaryLabelColor
-        stack.addArrangedSubview(count)
-        func read() -> Matrix {
-            var r = Matrix()
-            func on(_ axis: String) -> [String] { boxes.filter { $0.0 == axis && $0.2.state == .on }.map(\.1) }
-            r.devices = on("device"); r.appearances = on("appearance"); r.locales = on("locale"); r.fontScales = on("font")
-            return r
-        }
-        let runButton = alert.addButton(withTitle: "Run")
-        alert.addButton(withTitle: "Cancel")
-        final class Updater: NSObject { var f: () -> Void = {}; @objc func changed(_ s: Any?) { f() } }
-        let updater = Updater()
-        updater.f = {
-            let n = read().cells.count
-            count.stringValue = n == 0 ? "Choose at least one of each." : "\(n) simulator\(n == 1 ? "" : "s")" + (n > Matrix.maxCells ? ": too many (at most \(Matrix.maxCells))" : "")
-            runButton.isEnabled = n > 0 && n <= Matrix.maxCells
-        }
-        for (_, _, b) in boxes { b.target = updater; b.action = #selector(Updater.changed(_:)) }
-        updater.f()
-        stack.frame = NSRect(x: 0, y: 0, width: 460, height: stack.fittingSize.height)
-        alert.accessoryView = stack
-        alert.beginSheetModal(for: window) { answer in
-            withExtendedLifetime(updater) {}
-            m = read()
-            if answer == .alertFirstButtonReturn, !m.cells.isEmpty, m.cells.count <= Matrix.maxCells { done(m) }
+        .padding(18)
+        .frame(width: 520)
+        .background(SettingsTheme.stage)
+        .preferredColorScheme(.dark)
+    }
+
+    private func presetChip(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(SettingsTheme.ink)
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(Capsule().fill(Color.white.opacity(0.08)))
+            .overlay(Capsule().stroke(SettingsTheme.stroke, lineWidth: 1))
+    }
+
+    private func axisRow(_ title: String, _ values: [(String, String)], selection: Binding<Set<String>>) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(SettingsTheme.mute)
+            HStack(spacing: 6) {
+                ForEach(values, id: \.0) { value, name in
+                    let on = selection.wrappedValue.contains(value)
+                    Button(name) {
+                        if on && selection.wrappedValue.count > 1 {
+                            selection.wrappedValue.remove(value)
+                        } else {
+                            selection.wrappedValue.insert(value)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(on ? SettingsTheme.accent : SettingsTheme.mute)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(on ? SettingsTheme.accent.opacity(0.16) : Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(on ? SettingsTheme.accent.opacity(0.55) : SettingsTheme.stroke, lineWidth: 1)
+                    )
+                }
+            }
         }
     }
 }

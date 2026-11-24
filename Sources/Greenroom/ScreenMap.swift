@@ -67,11 +67,13 @@ final class ScreenMap: NSView {
 
     private let dim = NSView()
     private let panel = GlassView(radius: 18)
-    private let appLabel = NSTextField(labelWithString: "")
+    private let apkButton = GlassButton(symbol: "app.dashed", title: "Choose APK…", label: "Choose the APK to walk", style: .well, target: nil, action: nil)
+    private let configButton = GlassButton(symbol: "slider.horizontal.3", title: "Whole app · No limit · Light ▾", label: "Configure walk depth, time, captures, sign-in and deep link", style: .well, target: nil, action: nil)
+    private let configPopover = GlassView(radius: 14)
     private let depthPopup = NSPopUpButton()
     private let timePopup = NSPopUpButton()
     private let capturePopup = NSPopUpButton()
-    private let offline = NSButton(checkboxWithTitle: "Offline", target: nil, action: nil)
+    private let offline = NSButton(checkboxWithTitle: "Walk offline (block network)", target: nil, action: nil)
     private let startField = NSTextField()
     private let signInPopup = NSPopUpButton()
     private let exportButton = GlassButton(symbol: "square.and.arrow.up", title: "Export…", label: "Export the map as a folder with an index.html anyone can open in a browser", style: .well, target: nil, action: nil)
@@ -136,19 +138,20 @@ final class ScreenMap: NSView {
             panel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28), panel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
         ])
 
-        // Header: what is walked, the settings, Walk.
-        let title = label("Screen map", size: 15, weight: .semibold, color: Design.ink)
-        appLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        appLabel.textColor = Design.mute
-        appLabel.lineBreakMode = .byTruncatingMiddle
-        appLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        let choose = GlassButton(symbol: nil, title: "Choose…", label: "Choose the APK to walk", style: .well, target: self, action: #selector(chooseAPK))
+        // Header: sleek single bar with APK pill, Walk Config popover pill, Export, Walk, Close.
+        let title = label("Screen Map", size: 15, weight: .semibold, color: Design.ink)
+        apkButton.target = self; apkButton.action = #selector(chooseAPK)
+        apkButton.font = .systemFont(ofSize: 12, weight: .medium)
+        apkButton.widthAnchor.constraint(lessThanOrEqualToConstant: 230).isActive = true
+        configButton.target = self; configButton.action = #selector(toggleConfigPopover)
+        configButton.font = .systemFont(ofSize: 12, weight: .medium)
         let close = GlassButton(symbol: "xmark", label: "Close (Esc)", target: self, action: #selector(closePressed))
         walkButton.target = self; walkButton.action = #selector(walkPressed)
         let hs = NSView(); hs.setContentHuggingPriority(.init(1), for: .horizontal)
         exportButton.target = self; exportButton.action = #selector(exportPressed)
         exportButton.isEnabled = false
-        let header = NSStackView(views: [title, appLabel, choose, hs, exportButton, walkButton, close])
+        let header = NSStackView(views: [title, apkButton, configButton, hs, exportButton, walkButton, close])
+        header.alignment = .centerY
         header.spacing = 10
 
         popup(depthPopup, ["1 tap deep", "2 taps deep", "3 taps deep", "4 taps deep", "6 taps deep", "Whole app"], key: "mapWalkDepth", default: 5)
@@ -163,17 +166,11 @@ final class ScreenMap: NSView {
         startField.controlSize = .small
         startField.font = .systemFont(ofSize: 12)
         startField.stringValue = UserDefaults.standard.string(forKey: "mapStart") ?? ""
-        startField.widthAnchor.constraint(equalToConstant: 230).isActive = true
-        let safety = label("Never taps delete, buy, send, sign out and the like", size: 11)
-        safety.lineBreakMode = .byTruncatingTail
-        safety.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         signInPopup.controlSize = .small
         signInPopup.font = .systemFont(ofSize: 12)
         signInPopup.target = self; signInPopup.action = #selector(signInChanged)
         signInPopup.toolTip = "Run one of your scripts (Device > Run Script) on a hidden device first, then walk signed in on its data. Your own devices' data is not touched."
         signInPopup.setAccessibilityLabel("Sign in before walking")
-        let settings = NSStackView(views: [depthPopup, timePopup, capturePopup, signInPopup, offline, startField, safety])
-        settings.spacing = 10
 
         // Status: what the walk is doing, or what the map holds.
         spinner.style = .spinning
@@ -232,16 +229,114 @@ final class ScreenMap: NSView {
         let body = mapWell
         let rule = NSView(); rule.wantsLayer = true; rule.layer?.backgroundColor = Design.stroke.cgColor
         rule.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        let column = NSStackView(views: [header, settings, rule, status, compareLabel, timeline, body])
+        let column = NSStackView(views: [header, rule, status, compareLabel, timeline, body])
         column.orientation = .vertical
         column.spacing = 10
         column.alignment = .leading
         column.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(column)
-        for v in [header, settings, rule, status, compareLabel, timeline, body] as [NSView] { v.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
+        for v in [header, rule, status, compareLabel, timeline, body] as [NSView] { v.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
         body.setContentHuggingPriority(.init(1), for: .vertical)
         NSLayoutConstraint.activate([column.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), column.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -16),
                                      column.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18), column.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -18)])
+
+        buildConfigPopover()
+    }
+
+    private func buildConfigPopover() {
+        func fieldRow(_ name: String, _ control: NSView) -> NSStackView {
+            let l = label(name, size: 11.5, weight: .medium, color: Design.mute)
+            l.widthAnchor.constraint(equalToConstant: 74).isActive = true
+            let r = NSStackView(views: [l, control])
+            r.alignment = .centerY
+            r.spacing = 8
+            return r
+        }
+        let popTitle = label("Walk Configuration", size: 12.5, weight: .semibold, color: Design.ink)
+        let popClose = GlassButton(symbol: "xmark", label: "Close configuration", target: self, action: #selector(closeConfigPopover))
+        popClose.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        let popSpacer = NSView(); popSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let popHeader = NSStackView(views: [popTitle, popSpacer, popClose])
+        popHeader.alignment = .centerY
+
+        let safetyBox = NSView()
+        safetyBox.wantsLayer = true
+        safetyBox.layer?.cornerRadius = 8
+        safetyBox.layer?.cornerCurve = .continuous
+        safetyBox.layer?.backgroundColor = Design.accent.withAlphaComponent(0.11).cgColor
+        safetyBox.layer?.borderWidth = 1
+        safetyBox.layer?.borderColor = Design.accent.withAlphaComponent(0.28).cgColor
+        let shield = NSImageView(image: NSImage(systemSymbolName: "checkmark.shield.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold)) ?? NSImage())
+        shield.contentTintColor = Design.accent
+        let safety = label("Never taps delete, buy, send, sign out and the like.", size: 11, color: Design.accent)
+        safety.lineBreakMode = .byWordWrapping
+        safety.maximumNumberOfLines = 2
+        let safetyRow = NSStackView(views: [shield, safety])
+        safetyRow.alignment = .centerY
+        safetyRow.spacing = 7
+        safetyRow.edgeInsets = NSEdgeInsets(top: 7, left: 9, bottom: 7, right: 9)
+        safetyRow.translatesAutoresizingMaskIntoConstraints = false
+        safetyBox.addSubview(safetyRow)
+        NSLayoutConstraint.activate([
+            safetyRow.topAnchor.constraint(equalTo: safetyBox.topAnchor), safetyRow.bottomAnchor.constraint(equalTo: safetyBox.bottomAnchor),
+            safetyRow.leadingAnchor.constraint(equalTo: safetyBox.leadingAnchor), safetyRow.trailingAnchor.constraint(equalTo: safetyBox.trailingAnchor),
+        ])
+
+        let rows: [NSView] = [
+            popHeader,
+            fieldRow("Depth", depthPopup),
+            fieldRow("Time limit", timePopup),
+            fieldRow("Captures", capturePopup),
+            fieldRow("Sign-in", signInPopup),
+            fieldRow("Deep link", startField),
+            offline,
+            safetyBox,
+        ]
+        let stack = NSStackView(views: rows)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 9
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for v in rows { v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28).isActive = true }
+
+        configPopover.addSubview(stack)
+        configPopover.translatesAutoresizingMaskIntoConstraints = false
+        configPopover.isHidden = true
+        configPopover.layer?.shadowColor = NSColor.black.cgColor
+        configPopover.layer?.shadowOpacity = 0.55
+        configPopover.layer?.shadowRadius = 24
+        configPopover.layer?.shadowOffset = CGSize(width: 0, height: -8)
+        panel.addSubview(configPopover)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: configPopover.topAnchor), stack.bottomAnchor.constraint(equalTo: configPopover.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: configPopover.leadingAnchor), stack.trailingAnchor.constraint(equalTo: configPopover.trailingAnchor),
+            configPopover.widthAnchor.constraint(equalToConstant: 350),
+            configPopover.topAnchor.constraint(equalTo: configButton.bottomAnchor, constant: 8),
+            configPopover.leadingAnchor.constraint(equalTo: configButton.leadingAnchor),
+        ])
+    }
+
+    @objc private func toggleConfigPopover() {
+        configPopover.isHidden.toggle()
+        configButton.isOn = !configPopover.isHidden
+    }
+
+    @objc private func closeConfigPopover() {
+        configPopover.isHidden = true
+        configButton.isOn = false
+    }
+
+    private func refreshConfigSummary() {
+        let depthStr = ["1 tap", "2 taps", "3 taps", "4 taps", "6 taps", "Whole app"][max(0, min(5, depthPopup.indexOfSelectedItem))]
+        let timeStr = ["1m", "3m", "5m", "10m", "30m", "No limit"][max(0, min(5, timePopup.indexOfSelectedItem))]
+        let capStr = ["Light", "Light & Dark", "No captures"][max(0, min(2, capturePopup.indexOfSelectedItem))]
+        var parts = [depthStr, timeStr, capStr]
+        if let s = signInScript { parts.append(s.name) }
+        else if usesKeptSignIn { parts.append("Signed in") }
+        if offline.state == .on { parts.append("Offline") }
+        configButton.title = parts.joined(separator: " · ") + " ▾"
     }
 
     // MARK: Opening and closing
@@ -277,6 +372,7 @@ final class ScreenMap: NSView {
     func close() {
         guard isOpen else { return }
         isOpen = false
+        closeConfigPopover()
         if isWalking, !toldBackground {
             toldBackground = true
             onSay?("The walk goes on in the background. The top bar shows how far it has got.", false)
@@ -286,9 +382,21 @@ final class ScreenMap: NSView {
     }
 
     @objc private func closePressed() { close() }
-    override func cancelOperation(_ sender: Any?) { close() }
-    override func keyDown(with event: NSEvent) { if event.keyCode == 53 { close() } else { super.keyDown(with: event) } }
-    override func mouseDown(with event: NSEvent) { if !panel.frame.contains(convert(event.locationInWindow, from: nil)) { close() } }
+    override func cancelOperation(_ sender: Any?) {
+        if !configPopover.isHidden { closeConfigPopover(); return }
+        close()
+    }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { cancelOperation(nil) } else { super.keyDown(with: event) }
+    }
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if !configPopover.isHidden {
+            let pInPanel = panel.convert(event.locationInWindow, from: nil)
+            if !configPopover.frame.contains(pInPanel) && !configButton.frame.contains(pInPanel) { closeConfigPopover() }
+        }
+        if !panel.frame.contains(p) { close() }
+    }
 
     // MARK: Settings
 
@@ -420,8 +528,12 @@ final class ScreenMap: NSView {
     }
 
     private func refresh() {
-        if let apk = effectiveAPK { appLabel.stringValue = apk.lastPathComponent + (apkURL == nil ? "  ·  the selected device's" : "") }
-        else { appLabel.stringValue = "No app: open one, or choose an APK" }
+        if let apk = effectiveAPK {
+            apkButton.title = apk.lastPathComponent + (apkURL == nil ? " · active" : "")
+        } else {
+            apkButton.title = "Choose APK…"
+        }
+        refreshConfigSummary()
         let running = isWalking
         walkButton.title = running ? "Stop walk" : (data == nil ? "Walk the app" : "Walk again")
         walkButton.style = running ? .record : .accent
@@ -460,6 +572,7 @@ final class ScreenMap: NSView {
     // MARK: Walking
 
     @objc private func walkPressed() {
+        closeConfigPopover()
         if isWalking, Date().timeIntervalSince(run?.startedAt ?? startedAt) > 15, let w = window {
             // A long walk is not thrown away by one press: what it found goes with it.
             let a = NSAlert()
