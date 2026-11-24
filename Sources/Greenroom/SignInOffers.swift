@@ -253,7 +253,7 @@ final class QuickSignIn {
     }
 }
 
-/// The button a device shows over its screen's bottom when the screen has a quick sign-in: the script's name, and
+/// The button a device shows above itself, on the stage rather than over the app, when the screen has a quick sign-in: the script's name, and
 /// a small × that stops the offer.
 final class QuickSignInButton: NSView {
     struct Model {

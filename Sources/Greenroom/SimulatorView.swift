@@ -59,13 +59,17 @@ final class SimulatorView: NSView {
     var onPoint: ((Int, Int) -> Void)?
     /// Extra text at the end of the caption (the Diagnostics pane's live fps); empty for none.
     var captionExtra = "" { didSet { if captionExtra != oldValue { updateCaption() } } }
-    /// The quick sign-in this screen offers (SignInOffers), shown as a button over the screen's bottom; nil for none.
+    /// The quick sign-in this screen offers (SignInOffers), shown as a button above the device (never over the app); nil for none.
     var quickSignIn: QuickSignInButton.Model? {
         didSet {
             if (quickSignIn == nil) != (oldValue == nil) || quickSignIn?.offer != oldValue?.offer { refreshQuickSignIn() }
         }
     }
     private var quickSignInButton: QuickSignInButton?
+    /// The space kept above the device for the quick sign-in button, so it never covers the app.
+    private static let quickSignInBand: CGFloat = 46
+    /// The device's outer edge, as last laid out (the quick sign-in button sits on it).
+    private var rimFrame = CGRect.zero
     /// On a side-by-side canvas: the body and caption move the device, the grip at its bottom right resizes it, and
     /// the button at its top left closes it. The grid does the moving and sizing; the view reports the gesture.
     var arrangeable = false { didSet { if arrangeable != oldValue { updateTracking(); updateChips() } } }
@@ -370,6 +374,10 @@ final class SimulatorView: NSView {
         let size = effectiveSize
         var area = bounds.insetBy(dx: 28, dy: 24)
         area.size.height -= 30   // the caption
+        if quickSignInButton != nil {   // the quick sign-in button, above the device
+            area.origin.y += Self.quickSignInBand
+            area.size.height -= Self.quickSignInBand
+        }
         guard size.width > 0, size.height > 0, area.width > 0, area.height > 0 else { return area }
         // First fit, then take the body's bezel and rim off the space and fit again.
         let first = min(area.width / size.width, area.height / size.height)
@@ -460,8 +468,10 @@ final class SimulatorView: NSView {
         gripChip.frame = CGRect(x: rimRect.maxX - 3 - Self.chip / 2, y: rimRect.maxY - 3 - Self.chip / 2, width: Self.chip, height: Self.chip)
         gripRect = gripChip.frame.insetBy(dx: -6, dy: -6)
         closeChip.blocked = r
+        rimFrame = rimRect
         bodyRect = rimRect.union(closeChip.frame).union(gripRect).union(caption.frame)
         placeQuickSignIn()
+        if let b = quickSignInButton { bodyRect = bodyRect.union(b.frame) }
         updateOutline()
     }
 
@@ -473,6 +483,8 @@ final class SimulatorView: NSView {
             if let b = quickSignInButton {
                 quickSignInButton = nil
                 Design.animate(Design.snap, { b.animator().alphaValue = 0 }, done: { b.removeFromSuperview() })
+                morphOnce = true   // the device grows back into the space the button had
+                needsLayout = true
             }
             return
         }
@@ -481,6 +493,8 @@ final class SimulatorView: NSView {
             b.alphaValue = 0
             addSubview(b)
             quickSignInButton = b
+            morphOnce = true   // the device makes room above it
+            needsLayout = true
             Design.animate(Design.arrive, { b.animator().alphaValue = 1 })
             return b
         }()
@@ -488,13 +502,13 @@ final class SimulatorView: NSView {
         placeQuickSignIn()
     }
 
-    /// Centred near the bottom of the screen, above the app's navigation bar.
+    /// Centred above the device, in the band kept for it: over the skin, never over the app.
     private func placeQuickSignIn() {
         guard let b = quickSignInButton else { return }
-        let r = pictureRect
+        let rim = rimFrame.isEmpty ? pictureRect : rimFrame
         let size = b.fittingSize
-        let w = min(size.width, r.width - 24)
-        b.frame = CGRect(x: (r.midX - w / 2).rounded(), y: (r.maxY - size.height - max(16, r.height * 0.06)).rounded(), width: w, height: size.height)
+        let w = min(size.width, max(bounds.width - 16, 60))
+        b.frame = CGRect(x: (rim.midX - w / 2).rounded(), y: (rim.minY - size.height - 8).rounded(), width: w, height: size.height)
     }
 
     /// The close and resize chips: shown while the pointer is over an arrangeable device, or it is being arranged.

@@ -50,7 +50,7 @@ version of it and adds the workbench.
   of yours on the chosen simulator with them in its environment and `gr` on its PATH to drive it
   (`gr tap-text "Sign in"`, `gr type "$LOGIN_PASSWORD"`, `gr wait "Welcome"`). Scripts live in
   `~/Library/Application Support/Greenroom/scripts` (and a session's `.greenroom/scripts`); New Script… writes an
-  example. Once a script has signed in from a screen, that screen shows a "Sign in" button on the device whenever
+  example. Once a script has signed in from a screen, that screen shows a "Sign in" button above the device whenever
   it comes back (known by its activity and texts, never by what was typed): one click runs the script again, × stops
   offering it there. A variable can also be a 1Password reference (`op://Private/My App/password`): it is read with the 1Password
   CLI each time a script starts, after you approve in 1Password, so credentials never leave your vault for Greenroom's
