@@ -59,6 +59,13 @@ final class SimulatorView: NSView {
     var onPoint: ((Int, Int) -> Void)?
     /// Extra text at the end of the caption (the Diagnostics pane's live fps); empty for none.
     var captionExtra = "" { didSet { if captionExtra != oldValue { updateCaption() } } }
+    /// The quick sign-in this screen offers (SignInOffers), shown as a button over the screen's bottom; nil for none.
+    var quickSignIn: QuickSignInButton.Model? {
+        didSet {
+            if (quickSignIn == nil) != (oldValue == nil) || quickSignIn?.offer != oldValue?.offer { refreshQuickSignIn() }
+        }
+    }
+    private var quickSignInButton: QuickSignInButton?
     /// On a side-by-side canvas: the body and caption move the device, the grip at its bottom right resizes it, and
     /// the button at its top left closes it. The grid does the moving and sizing; the view reports the gesture.
     var arrangeable = false { didSet { if arrangeable != oldValue { updateTracking(); updateChips() } } }
@@ -190,6 +197,7 @@ final class SimulatorView: NSView {
     override var isFlipped: Bool { true }
 
     func show(_ sim: Simulator?, placeholder: String = "") {
+        if sim !== simulator { quickSignIn = nil }
         simulator?.onSample = nil
         simulator?.onSize = nil
         simulator = sim
@@ -453,10 +461,41 @@ final class SimulatorView: NSView {
         gripRect = gripChip.frame.insetBy(dx: -6, dy: -6)
         closeChip.blocked = r
         bodyRect = rimRect.union(closeChip.frame).union(gripRect).union(caption.frame)
+        placeQuickSignIn()
         updateOutline()
     }
 
     private static let chip: CGFloat = 22
+
+    /// Shows, updates or takes away the quick sign-in button.
+    func refreshQuickSignIn() {
+        guard let m = quickSignIn, simulator != nil else {
+            if let b = quickSignInButton {
+                quickSignInButton = nil
+                Design.animate(Design.snap, { b.animator().alphaValue = 0 }, done: { b.removeFromSuperview() })
+            }
+            return
+        }
+        let b = quickSignInButton ?? {
+            let b = QuickSignInButton(frame: .zero)
+            b.alphaValue = 0
+            addSubview(b)
+            quickSignInButton = b
+            Design.animate(Design.arrive, { b.animator().alphaValue = 1 })
+            return b
+        }()
+        b.set(m)
+        placeQuickSignIn()
+    }
+
+    /// Centred near the bottom of the screen, above the app's navigation bar.
+    private func placeQuickSignIn() {
+        guard let b = quickSignInButton else { return }
+        let r = pictureRect
+        let size = b.fittingSize
+        let w = min(size.width, r.width - 24)
+        b.frame = CGRect(x: (r.midX - w / 2).rounded(), y: (r.maxY - size.height - max(16, r.height * 0.06)).rounded(), width: w, height: size.height)
+    }
 
     /// The close and resize chips: shown while the pointer is over an arrangeable device, or it is being arranged.
     private func updateChips() {
