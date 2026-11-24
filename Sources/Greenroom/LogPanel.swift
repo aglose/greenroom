@@ -83,6 +83,9 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
         addSubview(topBar)
         addSubview(scroll)
 
+        let scrollBottom = scroll.bottomAnchor.constraint(equalTo: bottomAnchor)
+        scrollBottom.priority = .init(250)
+
         NSLayoutConstraint.activate([
             topBar.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             topBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -91,7 +94,7 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
             scroll.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scrollBottom,
         ])
 
         refreshFilterButtons()

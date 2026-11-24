@@ -39,6 +39,8 @@ final class BottomDock: NSView {
         self.timeline = timeline
         super.init(frame: .zero)
         appearance = NSAppearance(named: .darkAqua)
+        wantsLayer = true
+        layer?.masksToBounds = true
 
         grabber.onResizeDelta = { [weak self] delta in self?.onResizeDelta?(delta) }
         compareView.onSelect = { [weak self] item in self?.onHighlightDiff?(item) }
@@ -81,6 +83,9 @@ final class BottomDock: NSView {
             ])
         }
 
+        let contentBottom = contentHost.bottomAnchor.constraint(equalTo: bottomAnchor)
+        contentBottom.priority = .init(250)
+
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: topAnchor),
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -104,7 +109,7 @@ final class BottomDock: NSView {
             contentHost.topAnchor.constraint(equalTo: divider.bottomAnchor),
             contentHost.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentHost.trailingAnchor.constraint(equalTo: trailingAnchor),
-            contentHost.bottomAnchor.constraint(equalTo: bottomAnchor),
+            contentBottom,
         ])
 
         applyTabVisibility()
