@@ -64,14 +64,16 @@ final class MapMosaic {
             return
         }
         let w = mip.rawValue, h = max(1, source.height * w / max(source.width, 1))
-        guard let ctx = MapPyramid.context(w, h) else { return }
-        ctx.interpolationQuality = .high
-        ctx.draw(source, in: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let image = ctx.makeImage() else { return }
+        var image: CGImage?
+        if let ctx = MapPyramid.context(w, h) {
+            ctx.interpolationQuality = .high
+            ctx.draw(source, in: CGRect(x: 0, y: 0, width: w, height: h))
+            image = ctx.makeImage()
+        }
         lock.lock()
-        // Crude, and rare: a map with more screens than this starts the level over.
-        if (copies[mip]?.count ?? 0) >= (limits[mip] ?? 0) { copies[mip] = [:] }
-        copies[mip]?[blob] = image
+        // Past the level's limit (a map larger than any walk so far) or unmade, the card keeps its tile: asked for
+        // again, it would be loaded again on every pass.
+        if let image, (copies[mip]?.count ?? 0) < (limits[mip] ?? 0) { copies[mip]?[blob] = image } else { failed.insert(blob) }
         lock.unlock()
     }
 
