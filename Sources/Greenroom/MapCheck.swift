@@ -176,7 +176,11 @@ extension AppDelegate {
     /// apksim://slot screen and taps Write (a Settings value that outlives the process, as a sign-in's token does); the
     /// walk, started at that screen, must then find "setting=written" from app start on, which a walk with no sign-in
     /// does not. The walk's throwaway slot must be gone afterwards, and a failing script must stop the walk with its
-    /// reason. One `[greenroom] map-signin:` line per step.
+    /// reason. A second signed-in walk right after the first must work too: the sign-in's engine (a JVM apart from the
+    /// device's process) can hold its slot a moment after that process has exited, and the crawler refuses a held slot.
+    /// Then the same sign-in is kept (as "Sign In Once" keeps one) and walked twice back to back with a device of
+    /// the app open: both walks must start signed in. The check keeps its own state in DIR/map-signin-check, so it
+    /// meets no other Greenroom's devices or kept sign-ins. One `[greenroom] map-signin:` line per step.
     func mapSignInCheckIfAsked() {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--map-signin-check"), i + 2 < args.count else { return }
@@ -215,8 +219,8 @@ extension AppDelegate {
             Engine.shared.stopAll()
             exit(ok ? 0 : 1)
         }
-        func walk(_ script: URL?, then: @escaping (ScreenMapData?, Double) -> Void) {
-            map.chooseSignIn(script)
+        func walk(_ script: URL?, choose: Bool = true, then: @escaping (ScreenMapData?, Double) -> Void) {
+            if choose { map.chooseSignIn(script) }
             let started = Date()
             guard map.walk() else { expect(false, "the walk starts (Python 3 found)"); end(); return }
             var sawSignIn = false
@@ -229,25 +233,68 @@ extension AppDelegate {
                 then(map.data, t)
             }
         }
+        /// The kept sign-in ("Sign In Once"), walked twice back to back with a device of the app open on the stage, as
+        /// a person would: each walk runs on its own clone of the kept slot, and the second must start as the first did.
+        func keptTwice() {
+            let key = SignIns.key(apk: apk), kept = SignIns.slot(for: key)
+            let s = MapSignIn(apk: apk, script: .init(url: good, fromWorktree: false), worktree: nil)
+            s.start { [self] outcome in
+                guard case .ready(let slot) = outcome else { expect(false, "the sign-in to keep ran (\(outcome))"); return end() }
+                say(String(format: "the sign-in's engine let go of its slot %.2f s after the device's process exited", MapSignIn.lastRelease))
+                SlotClone.remove(kept, in: SignIns.dataRoot)
+                expect(SignIns.adopt(slot, as: kept), "the sign-in is kept as \(kept)")
+                SignIns.shared.set(SignIns.Record(slot: kept, date: Date(), script: good.lastPathComponent), key: key)
+                guard workbench.open(apk, remember: false) != nil else { expect(false, "a device of the app opens"); return end() }
+                /// Walk 1 from app start, a tap deep on several devices (each relaunch takes a new copy of the clone);
+                /// walk 2 right after it, at the slot screen, where what the sign-in wrote shows.
+                func keptWalk(_ n: Int, then: @escaping () -> Void) {
+                    if n == 1 { map.configure(depth: 1, time: 1, captures: 1, start: "") }
+                    else { map.configure(depth: 0, time: 0, captures: 2, start: "apksim://slot") }
+                    expect(map.chooseKeptSignIn(), "walk \(n): the menu offers the kept sign-in")
+                    walk(nil, choose: false) { d, t in
+                        say(String(format: "kept walk %d: %d screens in %.0f s; %@", n, d?.screens.count ?? 0, t, map.statusText))
+                        if n == 1 { expect((d?.screens.count ?? 0) > 1, "kept walk 1 finished with a map") }
+                        else { expect(d?.screens.first?.texts.contains { $0.contains("at app start: setting=written") } == true, "kept walk 2, right after it, finished signed in, from app start on") }
+                        then()
+                    }
+                }
+                keptWalk(1) {
+                    keptWalk(2) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                            expect(Set(walkSlots()).subtracting(before).isEmpty, "the kept walks' clones are removed")
+                            expect(SignIns.hasData(kept), "the kept sign-in itself is still there")
+                            SignIns.shared.forget(key)
+                            end()
+                        }
+                    }
+                }
+            }
+        }
         workbench.showMap()
         map.setAPK(apk)
         map.configure(depth: 0, time: 0, captures: 2, start: "apksim://slot")
         walk(good) { d, t in
             let first = d?.screens.first
             say(String(format: "signed-in walk: %d screens in %.0f s; first screen: %@", d?.screens.count ?? 0, t, first?.texts.joined(separator: " | ") ?? "none"))
+            say(String(format: "the sign-in's engine let go of its slot %.2f s after the device's process exited", MapSignIn.lastRelease))
             expect(d != nil, "the signed-in walk finished with a map")
             expect(first?.texts.contains { $0.contains("at app start: setting=written") } == true, "the walk saw what the script did, from app start on")
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 expect(Set(walkSlots()).subtracting(before).isEmpty, "the walk's slot is removed afterwards")
-                walk(nil) { d, _ in
-                    expect(d?.screens.first?.texts.contains { $0.contains("setting=written") } == false, "a walk with no sign-in does not see it")
-                    walk(bad) { d, _ in
-                        say("failed sign-in: \(map.statusText)")
-                        expect(d == nil, "a failing script gives no map")
-                        expect(map.statusText.contains("bad-sign-in.sh failed (exit 3): no such account"), "... and says which script failed and why")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                            expect(Set(walkSlots()).subtracting(before).isEmpty, "... and its slot is removed")
-                            end()
+                // The same right away: each sign-in's device must have let go of its slot before its walk starts.
+                walk(good) { d, _ in
+                    say(String(format: "the sign-in's engine let go of its slot %.2f s after the device's process exited", MapSignIn.lastRelease))
+                    expect(d?.screens.first?.texts.contains { $0.contains("at app start: setting=written") } == true, "a second signed-in walk right after it also finished signed in (\(d == nil ? map.statusText : "a map"))")
+                    walk(nil) { d, _ in
+                        expect(d?.screens.first?.texts.contains { $0.contains("setting=written") } == false, "a walk with no sign-in does not see it")
+                        walk(bad) { d, _ in
+                            say("failed sign-in: \(map.statusText)")
+                            expect(d == nil, "a failing script gives no map")
+                            expect(map.statusText.contains("bad-sign-in.sh failed (exit 3): no such account"), "... and says which script failed and why")
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                expect(Set(walkSlots()).subtracting(before).isEmpty, "... and its slot is removed")
+                                keptTwice()
+                            }
                         }
                     }
                 }

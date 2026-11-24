@@ -1184,6 +1184,24 @@ enum SlotClone {
         return cloned ? .cloned(name) : .none
     }
 
+    /// Waits (blocking) until no engine holds instance 0 of `slot` in any package, or `timeout` has passed; true when
+    /// it is free. A simulator's process is the engine's launcher client: the JVM that ran the app (a standby that took
+    /// the launch) is another process, which can hold the slot's lock for a moment after the client has exited. A walk
+    /// with `--keep-data` refuses a slot that is held ("in use by a running apksim"), and a copy taken while the JVM
+    /// still writes could miss what it wrote.
+    @discardableResult
+    static func waitUntilFree(_ slot: String, in root: URL, timeout: TimeInterval = 20) -> Bool {
+        let fm = FileManager.default
+        let folders = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+            .map { $0.appendingPathComponent(slot + "-0", isDirectory: true) }.filter { fm.fileExists(atPath: $0.path) }
+        let deadline = Date().addingTimeInterval(timeout)
+        while folders.contains(where: DeviceData.inUse) {
+            if Date() > deadline { return false }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return true
+    }
+
     /// Deletes every folder of the throwaway slot, in every package.
     static func remove(_ name: String, in root: URL) {
         let fm = FileManager.default

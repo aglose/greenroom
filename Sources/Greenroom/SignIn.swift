@@ -31,7 +31,10 @@ final class SignIns {
 
     init(file: URL = Engine.shared.state.appendingPathComponent("sign-ins.json")) {
         self.file = file
-        if let d = try? Data(contentsOf: file), let r = try? JSONDecoder().decode([String: Record].self, from: d) { records = r }
+        // Read as it is written (ISO 8601 dates): with the default decoder every kept sign-in was lost at the next launch.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let d = try? Data(contentsOf: file), let r = try? decoder.decode([String: Record].self, from: d) { records = r }
     }
 
     /// The kept sign-in of a key, when its data is still there.
@@ -386,7 +389,16 @@ final class SignInOnce: NSObject {
     }
 
     /// The device has quit with the person's go-ahead: its slot becomes the kept one, the script and variables are written.
+    /// The device's process has ended, but the engine's JVM may still be writing the slot: it is moved once that has let go.
     private func keep() {
+        let slot = self.slot
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            SlotClone.waitUntilFree(slot, in: SignIns.dataRoot)
+            DispatchQueue.main.async { self?.adoptKept() }
+        }
+    }
+
+    private func adoptKept() {
         let kept = SignIns.slot(for: key)
         SlotClone.remove(kept, in: SignIns.dataRoot)
         guard SignIns.adopt(slot, as: kept) else {
