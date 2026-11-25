@@ -108,6 +108,29 @@ struct ScreenMapData {
     }
 }
 
+/// A repository's `.greenroom/map.json`, as walks inside the app read it: only `dataIgnore`, the patterns of what the
+/// app writes at every action and no screen reads (`crawl.py --data-ignore`: a file of the data slot, `FILE#TABLE` or
+/// `FILE#KEY`), so a replay after such a write does not take a new launch.
+enum RepoMapSettings {
+    static func dataIgnore(in root: URL?) -> [String] {
+        guard let root, let data = try? Data(contentsOf: root.appendingPathComponent(".greenroom/map.json")),
+              let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
+        return ((d["dataIgnore"] as? [String]) ?? []).filter { !$0.isEmpty && !$0.hasPrefix("-") }
+    }
+
+    /// What a finished walk relaunched for most (crawl.json's `relaunches` and `relaunch_files`), in a line, when it
+    /// is worth saying: most of the walk's launches were for one or two things the app wrote. Nil otherwise.
+    static func relaunchNote(_ walk: URL) -> String? {
+        guard let data = try? Data(contentsOf: walk.appendingPathComponent("crawl.json")),
+              let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let n = d["relaunches"] as? Int, n >= 50, let files = d["relaunch_files"] as? [String: Int] else { return nil }
+        let top = files.filter { !$0.key.hasPrefix("<") }.sorted { $0.value > $1.value }.prefix(2)
+        guard let first = top.first, first.value * 2 >= n else { return nil }
+        let names = top.map { "\($0.key) (\($0.value))" }.joined(separator: ", ")
+        return "\(n) replays took a new launch, most because the app wrote \(names). If no screen shows that, list it under \"dataIgnore\" in the repository's .greenroom/map.json and later walks skip those launches."
+    }
+}
+
 /// `scripts/crawl.py` of the bundled engine, run in the background. Its stdout says each level as it starts
 /// ("[new] depth 1: 3 screen(s) to explore, 4 known"), which is what the map shows while the walk goes on.
 final class CrawlRun {
@@ -151,6 +174,12 @@ final class CrawlRun {
         var seed: URL?
         /// `--only-file PATH`: with `seed`, the screen ids to explore again, one per line.
         var onlyFile: URL?
+        /// `--standby`: launches go to apksim's warm JVM when one is up (set when the crawler offers it). The engine
+        /// keeps launches cold where a warm JVM cannot serve them (`--record-deps`, `--base`).
+        var standby = false
+        /// `--data-ignore PATTERN`, each: what the app writes at every action and no screen reads (the repository's
+        /// `.greenroom/map.json` `dataIgnore`, RepoMapSettings), so replays after it are not new launches.
+        var dataIgnore: [String] = []
         /// `--diff-seed --diff-controls HOW`: with `seed`, compare the walk with it (nil: not passed).
         var diffControls: String?
         /// `--record-deps`: each walked screen records the classes, source files and resources it depends on.
@@ -170,6 +199,10 @@ final class CrawlRun {
         var events = false
         /// `--diff-seed` and `--diff-controls` (apksim 0.62.0): a seeded walk compared with its seed.
         var diffSeed = false
+        /// `--standby` (apksim 0.64.0): launches handed to a warm JVM when one is up.
+        var standby = false
+        /// `--data-ignore PATTERN` (apksim 0.64.0).
+        var dataIgnore = false
         static let none = Support()
     }
 
@@ -209,7 +242,8 @@ final class CrawlRun {
             p.waitUntilExit()
             killer.cancel()
             func has(_ flag: String) -> Bool { text.range(of: flag + "(?![\\w-])", options: .regularExpression) != nil }
-            s = Support(seed: has("--seed") && has("--only-file"), recordDeps: has("--record-deps"), maxActions: has("--max-actions"), events: has("--events"), diffSeed: has("--diff-seed") && has("--diff-controls"))
+            s = Support(seed: has("--seed") && has("--only-file"), recordDeps: has("--record-deps"), maxActions: has("--max-actions"), events: has("--events"), diffSeed: has("--diff-seed") && has("--diff-controls"),
+                        standby: has("--standby"), dataIgnore: has("--data-ignore"))
         }
         supportLock.lock(); supportCache[key] = s; supportLock.unlock()
         return s
@@ -259,6 +293,8 @@ final class CrawlRun {
         }
         if settings.recordDeps { a.append("--record-deps") }
         if settings.events { a.append("--events") }
+        if settings.standby { a.append("--standby") }
+        for d in settings.dataIgnore { a += ["--data-ignore", d] }
         if let n = settings.maxActions { a += ["--max-actions", String(n)] }
         let tail = settings.engineOptions + (settings.offline ? ["--network-profile", "offline"] : [])
         if !tail.isEmpty { a += ["--"] + tail }

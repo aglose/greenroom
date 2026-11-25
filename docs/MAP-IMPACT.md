@@ -94,6 +94,90 @@ Limits: a build with uncommitted changes has no place in the history, so it is c
 walked). A walk cut at a depth leaves its last screens with no record of what they depend on, and those are walked
 again every time: the default is the whole app.
 
+## Walks from the Screen Map sheet
+
+A walk started by hand in the Screen Map sheet is the same kind of map as an automatic one:
+
+- It passes `--record-deps` when the crawler offers it, so it can be what a later walk starts from. Before, it never
+  did, and a walk seeded from it was a full one ("the last walk did not record what its screens depend on").
+- A walk of the base branch's own build (the main row) has a place in the history too (`Workbench.mapContext` looked
+  only at sessions' builds, so such a walk was shown and never saved).
+- A commit's map is kept once, except that a walk with its dependencies recorded takes the place of one without, as a
+  full walk does of one that carried screens.
+- The sheet says what the walk is for: while it runs ("This walk becomes the map of main at 753faed: pull request diffs
+  start from it and are compared with it") and in the header after ("saved as the map of main: ..."). A walk with a
+  depth, a time limit or a start of its own is another profile, and says pull request diffs use the whole-app one.
+- The automatic walk does not make a map again that is already there: when the commit has a full map with its
+  dependencies under the walk's profile, `History.plan` hands it back (`WalkPlan.existing`) and Evidence writes it out
+  as the build's map ("Not walked: this commit's map was already there"). "Walk Again" still walks.
+
+Signed in or not is part of the profile. A map walked signed in (a script, or the kept sign-in) is compared only with
+walks made signed in; `ChangesRun.fromMain` looks first for the map its session's own walks will have.
+
+## Signed in, or it is not the map
+
+The map of the base branch is there to have every screen, and an app shows most of its screens only signed in. So by
+default only a walk made signed in (the kept sign-in, a sign-in script in the Screen Map, or the session's own data)
+counts as a map of a repository:
+
+- `Workspace.unsignedBaseline` ("Count Walks That Are Not Signed In" in the repository's + menu, off) lets walks that
+  were not signed in count, for an app with no sign-in or an owner who wants only that part compared.
+- With it off and no sign-in to walk with, a build is not walked by itself: the row says "sign in to walk"
+  (`Evidence.Status.needsSignIn`) and what to do. "Walk Again" by hand still walks.
+- `Evidence.walkProfiles` leaves the not-signed-in profile out, so a pull request diff looks only for a signed-in map
+  of the base branch, and the card that holds a comparison back says so. `History.plan` gives a not-signed-in walk no
+  map to start from.
+- The Screen Map says of a walk of the base branch that is not signed in that it is saved but is not the map pull
+  request diffs use.
+
+Checks walk apps with no sign-in in stand-in repositories: `SessionsController.unsignedForChecks` answers for them.
+
+## Pausing a walk
+
+A whole-app walk can take an hour, so a Screen Map walk can be paused and gone on with, now or after Greenroom was quit:
+
+- **Pause walk** stops the crawler (SIGTERM): the engine writes what it has found and the ids still to open
+  (`unexplored`). The sheet shows that part, says "Paused: 233 screens found, 66 still to open", and keeps the folder
+  and the walk's settings (`ScreenMap.Paused`, in the defaults).
+- **Resume walk** starts a walk seeded from that folder with `unexplored` as its `--only-file` and the same settings
+  (the engine refuses another set of captures). It can be paused again; each pause's folder holds everything so far.
+- The finished walk is one walk of its commit: a `greenroom-resumed` marker makes `importWalk(continuation:)` take
+  what was carried from the paused part as walked here.
+- **Start over** forgets the paused walk. **Stop** (while walking) keeps nothing, and asks first after 15 seconds,
+  offering to pause instead.
+
+Not yet: pausing an automatic walk (a session's or the base branch's own); "stop walking" there still keeps nothing.
+
+Checked by `--map-check DIR APK` (engine 0.63.1, its test app): paused 6 s in with 4 screens found and 3 to open,
+resumed, finished with 10 screens in 84 s, saved with nothing marked as carried.
+
+## What makes a walk slow
+
+Measured on one whole-app walk of an app with two Room databases (`--keep-data -j 6`, stopped after 58 minutes, 233
+screens found, 66 to open): 2,495 relaunches, 2,478 of them because `databases/<name>.db-wal` changed. The crawler takes
+any change of a file's size or date as the app having written to its data, and then replays from a new launch, so
+nearly every control tried cost a launch (aglose/apksim#644). That is the engine's to fix; nothing in Greenroom avoids it.
+
+What Greenroom does:
+
+- **The engine's startup cache.** The engine rebuilt `app.aot` only when it found itself in another folder, and an
+  update of Greenroom puts the new engine in the same one, so the JVM refused the old cache at every launch
+  (aglose/apksim#645). apksim 0.64.0 records the release a cache was built for and rebuilds it after an upgrade in
+  place; Greenroom no longer does anything about it. Measured with 0.63.1 and its test app, headless: first frame 1.59
+  s without the cache, 1.03 s with it.
+- **Write-ahead logs.** apksim 0.64.0 compares a SQLite database by its content (a hash per table, Room's bookkeeping
+  left out) and ignores `-wal` and `-journal` files (aglose/apksim#644), so a replay after a write no screen shows is
+  no longer a new launch. Nothing to do in Greenroom.
+- **`dataIgnore`.** What an app writes at every action and no screen reads can be listed in the repository's
+  `.greenroom/map.json`, `{"dataIgnore": ["databases/app.db#events", "shared_prefs/x.xml#last_seen*"]}`, and every walk
+  in the app passes each as `--data-ignore` (`RepoMapSettings`). A finished Screen Map walk says what most of its
+  launches were for when one or two things the app wrote account for half of them, and points there.
+- **Warm launches.** Walks pass `--standby` when the crawler offers it. apksim keeps one warm JVM per folder, so with
+  several devices most relaunches still start cold, and a walk with `--record-deps` (every walk Greenroom makes, so it
+  can be a map) stays cold altogether.
+- **No second walk of one commit** (above).
+
+
 ## Decisions the brief left open
 
 - **Where the per-workspace state lives.** `Workspace` (Sessions.swift) is not this package's, so the full-walk

@@ -555,7 +555,10 @@ final class ChangesRun {
         if ws.auto == .off {
             return ("\(name) has not been walked yet", intro + " Walking is off for this repository: turn it on in the repository's + menu.", false)
         }
+        let signIn = controller.countsUnsigned(ws.root) ? "" : " It is walked signed in, so it has every screen."
         switch evidence.entry(of: main.trunk(of: ws.root).path) {
+        case let e? where e.status == .needsSignIn:
+            return ("\(name) is walked signed in, and no sign-in is kept", intro + signIn + " Choose \u{201C}Sign In Once\u{2026}\u{201D} in a session row's menu (or walk \(name) from the Screen Map with a sign-in script) and its walk starts. For an app with no sign-in, turn on \u{201C}Count Walks That Are Not Signed In\u{201D} in the repository's + menu.", false)
         case nil:
             return ("Waiting for a build of \(name)", intro + " Its walk starts when the build is there.", true)
         case let e?:
@@ -566,7 +569,11 @@ final class ChangesRun {
                 return ("Walking \(name) for the first time", intro + (n > 0 ? " \(n) screen\(n == 1 ? "" : "s") found so far." : ""), true)
             case .failed(let why): return ("\(name)'s walk failed", why + " Walk it again from \(name)'s row.", false)
             case .stopped: return ("\(name)'s walk was stopped", intro + " Walk it again from \(name)'s row.", false)
+            case .needsSignIn: return ("\(name) is walked signed in", intro + signIn, false)
             case .done:
+                if !controller.countsUnsigned(ws.root) {
+                    return ("\(name) has no map walked signed in", intro + signIn + " Its last walk was not signed in, or was made with other settings than this session's walks. Choose \u{201C}Sign In Once\u{2026}\u{201D} in a session row's menu, then walk \(name) again from its row.", false)
+                }
                 return e.saved ? ("\(name)'s map cannot be used here", "\(name) was walked with other settings than this session's walks (signed in or not, or how deep), so the two cannot be compared. Walk \(name) again from its row.", false)
                     : ("Filing \(name)'s map", intro, true)
             }
@@ -621,6 +628,7 @@ final class ChangesRun {
                 case .walking(let depth, let known): state = .walking(depth: depth, known: max(known, e.explored), since: since)
                 case .failed(let why): state = .failed(why); return true
                 case .stopped: state = .cancelled; return true
+                case .needsSignIn: state = .failed("This build is walked signed in, and no sign-in is kept. Choose \u{201C}Sign In Once\u{2026}\u{201D} in the session's menu, then compare again."); return true
                 case .done: break walking
                 }
             }

@@ -78,7 +78,12 @@ version of it and adds the workbench.
   on signed-in data does the same, each device on its own copy of the data. The Screen Map's menus still offer a shallower or shorter walk, and a
   repository's "Quick Walks Only" (a session row's menu) keeps its own walks to two taps and two minutes. While a
   walk runs, the row and the Screen Map say how many screens are found and how many are still to open, and the map's
-  placeholder cards take each screen's title as it is explored. A walk started in the Screen Map goes on when the
+  placeholder cards take each screen's title as it is explored. A whole-app walk of the base branch's build (the main row) started in the Screen Map
+  is the project's map: it records what each screen depends on, pull request diffs start from it and are compared
+  with it, and the sheet says so while it runs and after; the automatic walk does not make it a second time. Only a walk made signed in counts as that map, since only it reaches every screen; "Count Walks
+  That Are Not Signed In" in the repository's + menu changes that for an app with no sign-in. A long walk can be
+  paused ("Pause walk") and gone on with later ("Resume walk"), also after Greenroom was quit. A walk
+  started in the Screen Map goes on when the
   sheet closes: the top bar shows how far it has got (click it to reopen the map), asking for another walk joins the
   running one, and stopping one that has run a while asks first. Before an app's first walk the Screen Map shows the
   three things that decide it (the app, signing in, how far) with Walk under them. A finished walk says whether it was saved to the

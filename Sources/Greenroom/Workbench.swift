@@ -974,14 +974,33 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// or the build has no clean commit.
     func mapContext(for apk: URL) async -> MapContext? {
         let key = await Task.detached { Workbench.fileKey(apk) }.value
-        guard let key, let session = sessions.sessions.first(where: { (sessions.builds[$0.worktree.path] ?? $0.build)?.key == key }),
-              let build = sessions.builds[session.worktree.path] ?? session.build, History.fileable(build), let sha = build.sha,
-              let workspace = sessions.workspaces.first(where: { $0.root.path == session.workspace.path }),
+        guard let key else { return nil }
+        // A session's newest build, else the base branch's own build (the main row): its walk is the project's map.
+        var found: (build: Build, workspace: Workspace)?
+        if let session = sessions.sessions.first(where: { (sessions.builds[$0.worktree.path] ?? $0.build)?.key == key }),
+           let build = sessions.builds[session.worktree.path] ?? session.build,
+           let workspace = sessions.workspaces.first(where: { $0.root.path == session.workspace.path }) {
+            found = (build, workspace)
+        } else {
+            for ws in sessions.workspaces {
+                guard let row = sessions.mainBuilds.row(for: ws), let b = [row.current, row.newest].compactMap({ $0 }).first(where: { $0.key == key }) else { continue }
+                found = (b, ws)
+                break
+            }
+        }
+        guard let (build, workspace) = found, History.fileable(build), let sha = build.sha,
               let (commit, tree) = await History.resolve(sha, in: workspace.root) else { return nil }
         let store = History.store(stateRoot: sessions.evidence.store.root, workspace: workspace.root)
-        return MapContext(store: store, commit: commit, tree: tree, engine: Engine.shared.version) { profile in
+        var onBase = false
+        for r in [workspace.baseRef, workspace.baseRef.hasPrefix("origin/") ? String(workspace.baseRef.dropFirst(7)) : nil].compactMap({ $0 }) where !onBase {
+            onBase = await Git.run(["merge-base", "--is-ancestor", commit, r], in: workspace.root) != nil
+        }
+        var ctx = MapContext(store: store, commit: commit, tree: tree, engine: Engine.shared.version) { profile in
             await History.baseline(commit: commit, mainRef: workspace.baseRef, in: workspace.root, store: store, profile: profile.id)
         }
+        ctx.baseBranch = onBase ? MainBuilds.shortName(workspace.baseRef) : nil
+        ctx.unsignedCounts = sessions.countsUnsigned(workspace.root)
+        return ctx
     }
 
     /// The first 16 hex digits of a file's SHA-256: a build's key.

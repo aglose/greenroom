@@ -350,6 +350,9 @@ enum MapImpactCheck {
         let moved = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e2", support: support, forceFull: true,
                                               fullReason: "engine e2 reads 1 screen differently than e1 did", folder: work) }
         expect(moved.isFull && moved.reason == "engine e2 reads 1 screen differently than e1 did", "a full walk a verification asked for says why")
+        let unsigned = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: support, forceFull: false, unsignedCounts: false, folder: work) }
+        expect(unsigned.isFull && unsigned.seed == nil && unsigned.reason?.hasPrefix("not signed in") == true,
+               "where only signed-in walks count, a walk that is not signed in starts from no map (\(unsigned.reason ?? "seeded"))")
         let none = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: .none, forceFull: false, folder: work) }
         expect(none.isFull && none.reason == nil && !none.recordDeps, "with the released engine's crawler the plan is a plain full walk, as before")
         let forced = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: support, forceFull: true, folder: work) }
@@ -423,6 +426,7 @@ enum MapImpactCheck {
         }
         let support = CrawlRun.support(python: python, script: script)
         expect(support.seed && support.recordDeps, "live: the crawler's --help offers --seed, --only-file and --record-deps")
+
 
         func walk(_ name: String, seed: URL? = nil, only: URL? = nil, maxActions: Int? = nil, diffControls: String? = nil) -> (ok: Bool, seconds: Double, folder: URL, why: String) {
             let out = dir.appendingPathComponent(name, isDirectory: true)

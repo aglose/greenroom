@@ -15,6 +15,11 @@ struct MapContext {
     var tree: String
     var engine: String
     var baseline: (MapProfile) async -> (snapshot: MapSnapshot, behind: Int)?
+    /// The base branch's short name ("main") when the commit is on it: its map is what pull request diffs start from
+    /// and are compared with. Nil for a commit of another branch.
+    var baseBranch: String? = nil
+    /// Whether a walk that was not signed in counts as a map of this repository (`Workspace.unsignedBaseline`).
+    var unsignedCounts = true
 }
 
 final class ScreenMap: NSView {
@@ -78,6 +83,46 @@ final class ScreenMap: NSView {
     private let signInPopup = NSPopUpButton()
     private let exportButton = GlassButton(symbol: "square.and.arrow.up", title: "Export…", label: "Export the map as a folder with an index.html anyone can open in a browser", style: .well, target: nil, action: nil)
     private let walkButton = GlassButton(symbol: "point.3.connected.trianglepath.dotted", title: "Walk the app", label: "Walk every screen the app has", style: .accent, target: nil, action: nil)
+    /// While a walk runs: stops it and keeps nothing. With a paused walk: starts over instead of resuming.
+    private let stopButton = GlassButton(symbol: nil, title: "Stop", label: "Stop the walk and keep nothing", style: .well, target: nil, action: nil)
+
+    /// A walk that was paused: its folder (the engine writes what it found when it is stopped, with the screens still
+    /// to open), the APK it was of, and the settings it ran with, which a walk that goes on from it must have too.
+    struct Paused: Codable, Equatable {
+        var folder: String
+        var apk: String
+        var found: Int
+        var toOpen: Int
+        var depth: Int
+        var seconds: Int
+        var appearances: [String]
+        var start: String?
+        var offline: Bool
+    }
+    private(set) var paused: Paused? {
+        didSet {
+            if let paused, let d = try? JSONEncoder().encode(paused) { UserDefaults.standard.set(d, forKey: "mapPaused") }
+            else { UserDefaults.standard.removeObject(forKey: "mapPaused") }
+        }
+    }
+    /// The paused walk, when it is of the APK shown and its folder is still there.
+    private var pausedHere: Paused? {
+        guard let p = paused, p.apk == effectiveAPK?.path, FileManager.default.fileExists(atPath: p.folder + "/crawl.json") else { return nil }
+        return p
+    }
+    private var pausing = false
+    /// What the map shows is a paused walk's part, not a finished walk.
+    private var showsPaused = false
+    /// What the finished walk relaunched for most, when that was most of its launches (RepoMapSettings.relaunchNote).
+    private(set) var relaunchNote: String?
+    private var walkOut: URL?
+    /// The paused walk the running one goes on from.
+    private var resumedFrom: URL?
+    nonisolated static let resumedMarker = "greenroom-resumed"
+    var pausedText: String? { pausedHere.map { Self.pausedWords($0) } }
+    static func pausedWords(_ p: Paused) -> String {
+        "Paused: \(p.found) screen\(p.found == 1 ? "" : "s") found" + (p.toOpen > 0 ? ", \(p.toOpen) still to open" : "") + ". Resume goes on from here; nothing found so far is walked again."
+    }
     private let summary = NSTextField(labelWithString: "")
     private let crashChip = GlassButton(symbol: "exclamationmark.triangle.fill", title: "", label: "Show where it crashed", style: .record, target: nil, action: nil)
     private let comboControl = NSSegmentedControl(labels: [], trackingMode: .selectOne, target: nil, action: nil)
@@ -147,10 +192,13 @@ final class ScreenMap: NSView {
         configButton.font = .systemFont(ofSize: 12, weight: .medium)
         let close = GlassButton(symbol: "xmark", label: "Close (Esc)", target: self, action: #selector(closePressed))
         walkButton.target = self; walkButton.action = #selector(walkPressed)
+        stopButton.target = self; stopButton.action = #selector(stopPressed)
+        stopButton.isHidden = true
+        if let d = UserDefaults.standard.data(forKey: "mapPaused") { paused = try? JSONDecoder().decode(Paused.self, from: d) }
         let hs = NSView(); hs.setContentHuggingPriority(.init(1), for: .horizontal)
         exportButton.target = self; exportButton.action = #selector(exportPressed)
         exportButton.isEnabled = false
-        let header = NSStackView(views: [title, apkButton, configButton, hs, exportButton, walkButton, close])
+        let header = NSStackView(views: [title, apkButton, configButton, hs, exportButton, stopButton, walkButton, close])
         header.alignment = .centerY
         header.spacing = 10
 
@@ -356,7 +404,11 @@ final class ScreenMap: NSView {
         isOpen = true
         if pythonURL == nil { pythonURL = SnapshotRun.python() }
         reloadScripts()
-        if data == nil, !isWalking, let f = lastFolder, let last = ScreenMapData.read(f) { present(last, animated: false, live: false) }
+        if data == nil, !isWalking, let p = pausedHere, let part = ScreenMapData.read(URL(fileURLWithPath: p.folder)) {
+            showsPaused = true
+            present(part, animated: false, live: false)
+            setSummary(Self.pausedWords(p))
+        } else if data == nil, !isWalking, let f = lastFolder, let last = ScreenMapData.read(f) { present(last, animated: false, live: false) }
         refresh()
         isHidden = false
         alphaValue = 0
@@ -433,6 +485,10 @@ final class ScreenMap: NSView {
 
     /// The status line, for checks.
     var statusText: String { summary.stringValue }
+    /// For checks: how many screens the running walk has found, and what the two buttons say.
+    var knownScreens: Int { reached.known }
+    var walkTitle: String { walkButton.title }
+    var stopTitle: String { stopButton.isHidden ? "" : stopButton.title }
     /// Whether Export… is enabled, for checks.
     var canExportNow: Bool { exportButton.isEnabled }
     /// The `[head] compared with [base]` line and the strip, for checks.
@@ -548,8 +604,13 @@ final class ScreenMap: NSView {
         }
         refreshConfigSummary()
         let running = isWalking
-        walkButton.title = running ? "Stop walk" : (data == nil ? "Walk the app" : "Walk again")
+        let resumable = !running && pausedHere != nil
+        walkButton.title = running ? (signIn != nil || starting ? "Stop walk" : "Pause walk") : (resumable ? "Resume walk" : (data == nil ? "Walk the app" : "Walk again"))
         walkButton.style = running ? .record : .accent
+        walkButton.toolTip = running ? "Stop here and keep what was found: Resume goes on from it, now or after Greenroom was quit" : (resumable ? "Go on from where the walk was paused" : nil)
+        stopButton.isHidden = !(resumable || (running && signIn == nil && !starting))
+        stopButton.title = resumable ? "Start over" : "Stop"
+        stopButton.toolTip = resumable ? "Forget the paused walk and walk the app from the beginning" : "Stop the walk and keep nothing"
         walkButton.isEnabled = running || (effectiveAPK != nil && pythonURL != nil)
         exportButton.isEnabled = !running && host.canExport
         for c in [depthPopup, timePopup, capturePopup, signInPopup, offline, startField] as [NSControl] { c.isEnabled = !running }
@@ -586,20 +647,41 @@ final class ScreenMap: NSView {
 
     @objc private func walkPressed() {
         closeConfigPopover()
-        if isWalking, Date().timeIntervalSince(run?.startedAt ?? startedAt) > 15, let w = window {
-            // A long walk is not thrown away by one press: what it found goes with it.
-            let a = NSAlert()
-            a.messageText = "Stop the walk?"
-            a.informativeText = (reached.known > 0 ? "It has found \(reached.known) screen\(reached.known == 1 ? "" : "s") so far. " : "")
-                + "A stopped walk makes no map, and the next one starts from the beginning. Closing the map instead lets it go on in the background."
-            a.addButton(withTitle: "Keep Walking")
-            a.addButton(withTitle: "Stop Walk")
-            a.buttons[1].hasDestructiveAction = true
-            a.beginSheetModal(for: w) { [weak self] r in if r == .alertSecondButtonReturn { self?.stop() } }
+        // A walk that is running is paused: what it found is kept, and Resume goes on from it.
+        if isWalking { if signIn != nil || starting { stop() } else { pause() }; return }
+        walk(resume: pausedHere != nil)
+    }
+
+    @objc private func stopPressed() {
+        closeConfigPopover()
+        if !isWalking {
+            // "Start over": the paused walk is forgotten.
+            paused = nil
+            walk()
             return
         }
-        if isWalking { stop(); return }
-        walk()
+        guard Date().timeIntervalSince(run?.startedAt ?? startedAt) > 15, let w = window else { stop(); return }
+        // A long walk is not thrown away by one press: what it found goes with it.
+        let a = NSAlert()
+        a.messageText = "Stop the walk and keep nothing?"
+        a.informativeText = (reached.known > 0 ? "It has found \(reached.known) screen\(reached.known == 1 ? "" : "s") so far. " : "")
+            + "Stopping keeps none of it, and the next walk starts from the beginning. Pause keeps what was found so the walk can go on later."
+        a.addButton(withTitle: "Keep Walking")
+        a.addButton(withTitle: "Pause Instead")
+        a.addButton(withTitle: "Stop Walk")
+        a.buttons[2].hasDestructiveAction = true
+        a.beginSheetModal(for: w) { [weak self] r in
+            if r == .alertSecondButtonReturn { self?.pause() } else if r == .alertThirdButtonReturn { self?.stop() }
+        }
+    }
+
+    /// Stops the walk and keeps what it found: the engine writes its map so far and the screens still to open, and
+    /// "Resume walk" goes on from there (`walk(resume:)`). Before anything is found there is nothing to keep.
+    func pause() {
+        guard let run, run.isRunning else { stop(); return }
+        pausing = true
+        setSummary("Pausing: the walk is writing down what it found…")
+        run.cancel()
     }
 
     /// Stops the walk (or the sign-in before it), with nothing kept.
@@ -611,20 +693,38 @@ final class ScreenMap: NSView {
 
     /// Starts a walk with the settings shown. False when there is nothing to walk or no Python.
     @discardableResult
-    func walk() -> Bool {
+    func walk(resume: Bool = false) -> Bool {
         guard !isWalking else { return true }
         guard let apk = effectiveAPK, let python = pythonURL ?? SnapshotRun.python() else { refresh(); return false }
+        let from = resume ? pausedHere : nil
         UserDefaults.standard.set(startField.stringValue, forKey: "mapStart")
         let base = Engine.shared.state.appendingPathComponent("maps", isDirectory: true)
         SnapshotRun.prune(base, keep: 5)
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let out = base.appendingPathComponent("run-" + stamp)
-        let walkSettings = settings
+        var walkSettings = settings
+        showsPaused = false
+        resumedFrom = nil
+        walkOut = out
+        if let from {
+            // Going on from a paused walk: the same settings it ran with (the engine refuses another set of captures),
+            // its folder as the seed, and the screens it had still to open as the ones to walk.
+            let folder = URL(fileURLWithPath: from.folder)
+            let json = (try? Data(contentsOf: folder.appendingPathComponent("crawl.json"))).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let ids = (json?["unexplored"] as? [String]) ?? []
+            let only = folder.appendingPathComponent("resume-only.txt")
+            try? Data((ids.joined(separator: "\n") + (ids.isEmpty ? "" : "\n")).utf8).write(to: only)
+            walkSettings.depth = from.depth; walkSettings.seconds = from.seconds; walkSettings.appearances = from.appearances
+            walkSettings.start = from.start; walkSettings.offline = from.offline
+            walkSettings.seed = folder
+            walkSettings.onlyFile = only
+            resumedFrom = folder
+        } else { paused = nil }
         lastSignedIn = signInScript != nil
         toldBackground = false
         data = nil
-        reached = (0, 0)
-        explored = 0
+        reached = (from?.found ?? 0, 0)
+        explored = from.map { max(0, $0.found - $0.toOpen) } ?? 0
         generation += 1
         snapshot = nil
         host.clear()
@@ -673,19 +773,46 @@ final class ScreenMap: NSView {
         return true
     }
 
+    /// While a walk runs: what it will be once it ends ("It becomes the map of main at 753faed: pull request diffs
+    /// start from it"). Nil until the build's place in the history is known, and for a build with none.
+    private(set) var feedsNote: String?
+
+    /// The repository of the walked build (its `.greenroom/map.json`): the context's, else the session's worktree.
+    private var repoRoot: URL?
+
     private func startCrawl(python: URL, apk: URL, out: URL, settings: CrawlRun.Settings) {
         var settings = settings
+        feedsNote = nil
+        repoRoot = worktree()
+        let whole = settings.depth == 0 && settings.seconds == 0 && (settings.start ?? "").isEmpty
+        Task { @MainActor [weak self] in
+            guard let self, let ctx = await self.context(apk) else { return }
+            let sha = String(ctx.commit.prefix(7))
+            if let name = ctx.baseBranch, !settings.keepData, !ctx.unsignedCounts {
+                self.feedsNote = "This walk is not signed in, so it is not the map of \(name) that pull request diffs use: that one is walked signed in, to have every screen. Pick a sign-in above for it to count."
+            } else if let name = ctx.baseBranch {
+                self.feedsNote = whole ? "This walk becomes the map of \(name) at \(sha): pull request diffs start from it and are compared with it."
+                    : "This walk is saved as a map of \(name) at \(sha), but pull request diffs use the map of the whole app with no limit."
+            } else { self.feedsNote = "This walk is saved as the map of \(sha)." }
+            self.tick()
+        }
         devices = max(1, settings.jobs)
         let gen = generation
         starting = true
         startedAt = Date()
         // What this crawler offers is asked off the main thread (its --help, once); the walk starts when that is known.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let events = CrawlRun.support(python: python).events
+            let support = CrawlRun.support(python: python)
+            let events = support.events
             DispatchQueue.main.async {
                 guard let self, gen == self.generation, self.starting, self.run == nil else { return }
                 self.starting = false
                 settings.events = events
+                settings.standby = support.standby
+                if support.dataIgnore { settings.dataIgnore = RepoMapSettings.dataIgnore(in: self.repoRoot) }
+                // What each screen depends on is recorded, so this walk can be the map a later walk starts from and a
+                // pull request is compared with (without it, the next walk of the app is a full one again).
+                settings.recordDeps = support.recordDeps
                 let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
                 self.run = r
                 r.onEvent = { [weak self] e in self?.event(e) }
@@ -712,6 +839,7 @@ final class ScreenMap: NSView {
         let on = devices == 1 ? "1 hidden device" : "\(devices) hidden devices"
         let whole = settings.depth == 0
         let screens = "\(reached.known) screen\(reached.known == 1 ? "" : "s")"
+        let feeds = feedsNote.map { "\n" + $0 } ?? ""
         // The share of the screens found so far that are opened: it can go back as more are found, and is honest about that.
         let fraction = explored > 0 && reached.known > 0 ? min(1, Double(explored) / Double(reached.known)) : nil
         let detail: String, short: String
@@ -724,7 +852,7 @@ final class ScreenMap: NSView {
         } else if whole {
             // The whole app: how much is found and how much of that is still to open (a count; how long it takes is not known before the end).
             let toOpen = explored > 0 && explored < reached.known ? reached.known - explored : 0
-            detail = "Mapping the whole app\(signedIn): \(screens) found" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(on)  ·  \(t)"
+            detail = "Mapping the whole app\(signedIn): \(screens) found" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(on)  ·  \(t)" + feeds
             short = "Mapping: \(screens)" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(t)"
         } else {
             let deep = reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"
@@ -767,8 +895,32 @@ final class ScreenMap: NSView {
             signedInSlot = nil
             DispatchQueue.global(qos: .utility).async { MapSignIn.discard(slot) }
         }
+        let wasPausing = pausing
+        pausing = false
         switch outcome {
+        case .cancelled where wasPausing:
+            // Paused: the engine wrote what it found. That is shown, and kept for "Resume walk".
+            let s = settings
+            if let out = walkOut, let part = ScreenMapData.read(out), !part.screens.isEmpty, let apk = effectiveAPK {
+                let json = (try? Data(contentsOf: out.appendingPathComponent("crawl.json"))).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let was = resumedFrom.flatMap { _ in paused }
+                if resumedFrom != nil { try? Data().write(to: out.appendingPathComponent(Self.resumedMarker)) }
+                let p = Paused(folder: out.path, apk: apk.path, found: part.screens.count, toOpen: ((json?["unexplored"] as? [String]) ?? []).count,
+                               depth: was?.depth ?? s.depth, seconds: was?.seconds ?? s.seconds, appearances: was?.appearances ?? s.appearances,
+                               start: was?.start ?? s.start, offline: was?.offline ?? s.offline)
+                paused = p
+                showsPaused = true
+                present(part, animated: isOpen, live: false)
+                setSummary(Self.pausedWords(p))
+                onSay?("Walk paused: \(p.found) screens found", false)
+            } else {
+                host.clear()
+                setSummary("Paused before the walk had found anything to keep: the next walk starts from the beginning.")
+            }
         case .finished(let map):
+            relaunchNote = RepoMapSettings.relaunchNote(map.folder)
+            if resumedFrom != nil { try? Data().write(to: map.folder.appendingPathComponent(Self.resumedMarker)) }
+            paused = nil
             lastFolder = map.folder
             present(map, animated: isOpen)
             let crashes = map.crashes.count
@@ -782,6 +934,7 @@ final class ScreenMap: NSView {
             setSummary("Walk stopped.")
         }
         run = nil
+        resumedFrom = nil
         refresh()
     }
 
@@ -797,7 +950,8 @@ final class ScreenMap: NSView {
         parts.append(String(format: "%.0f s", map.seconds))
         // A sign-in the walk met: said after the counts, with what to do about it.
         let wall = live ? SignInWall.find(map).note(kept: lastSignedIn) : nil
-        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  ") + (wall.map { "\n" + $0.replacingOccurrences(of: "\"Sign In Once…\"", with: "\"Sign In Once…\" in the sign-in menu").replacingOccurrences(of: "\"Sign In Again…\"", with: "\"Sign In Again…\" in the sign-in menu") } ?? ""), problem: wall != nil)
+        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  ") + (wall.map { "\n" + $0.replacingOccurrences(of: "\"Sign In Once…\"", with: "\"Sign In Once…\" in the sign-in menu").replacingOccurrences(of: "\"Sign In Again…\"", with: "\"Sign In Again…\" in the sign-in menu") } ?? "")
+                   + ((live ? relaunchNote : nil).map { "\n" + $0 } ?? ""), problem: wall != nil)
         let crashes = map.crashes.count
         crashChip.isHidden = crashes == 0
         crashChip.title = crashes == 1 ? "1 crash" : "\(crashes) crashes"
@@ -836,22 +990,36 @@ final class ScreenMap: NSView {
         var filed: Bool
         var baselineBehind: Int?
         var baselineCommit: String?
+        /// The base branch's name when this walk is its map; whether it recorded what its screens depend on.
+        var baseBranch: String? = nil
+        var hasDeps = false
+        /// False for a walk that was not signed in where only signed-in walks count as a map of the base branch.
+        var counts = true
     }
 
     nonisolated static func makeSource(_ map: ScreenMapData, context ctx: MapContext?, profile: MapProfile, engine: String) async -> Made? {
         let folder = map.folder
         let walked = Date()
         if let ctx {
-            guard let imported = ctx.store.importWalk(folder, commit: ctx.commit, tree: ctx.tree, profile: profile, engine: engine, walked: walked) else { return nil }
+            // A walk that went on from a paused one is one walk of this commit: what it took over was walked here too.
+            let resumed = FileManager.default.fileExists(atPath: folder.appendingPathComponent(ScreenMap.resumedMarker).path)
+            guard let imported = ctx.store.importWalk(folder, commit: ctx.commit, tree: ctx.tree, profile: profile, engine: engine, walked: walked, continuation: resumed) else { return nil }
             let found = await ctx.baseline(profile)
             // A baseline that is this commit's own snapshot says nothing: the map opens plain.
             let base = found.flatMap { $0.snapshot.commit == ctx.commit ? nil : $0 }
             let (paired, _) = MapPairing.pair(head: imported, base: base?.snapshot)
             var filed = true
-            if ctx.store.snapshot(profile: profile.id, commit: ctx.commit) == nil { filed = ctx.store.save(paired) }
+            // A commit's map is kept once, except that a walk that recorded what its screens depend on takes the place
+            // of one that did not (only such a map can be what later walks start from), as a full walk does of one
+            // that carried screens.
+            let was = ctx.store.snapshot(profile: profile.id, commit: ctx.commit)
+            let better = was.map { ($0.startDeps == nil && paired.startDeps != nil) || $0.screens.contains { $0.carriedFrom != nil } } ?? true
+            if better { filed = ctx.store.save(paired) }
+            let kept = better ? paired : (was ?? paired)
             let stored = loadStored(ctx.store, profile: profile.id)
             let src = MapSource.make(head: paired, base: base?.snapshot, history: stored.isEmpty ? [paired] : stored, blobURL: { ctx.store.blobURL($0) })
-            return Made(source: src, store: ctx.store, stored: stored, filed: filed, baselineBehind: base?.behind, baselineCommit: base?.snapshot.commit)
+            return Made(source: src, store: ctx.store, stored: stored, filed: filed, baselineBehind: base?.behind, baselineCommit: base?.snapshot.commit,
+                        baseBranch: ctx.baseBranch, hasDeps: kept.startDeps != nil, counts: profile.signIn != nil || ctx.unsignedCounts)
         }
         // No commit: an import into a store of its own, never filed.
         let root = Engine.shared.state.appendingPathComponent("maps-unsaved", isDirectory: true)
@@ -924,15 +1092,26 @@ final class ScreenMap: NSView {
 
     /// `[head] compared with [base]`, and how far behind the baseline is.
     private func headerText(_ m: Made) -> String {
+        if showsPaused { return "a paused walk  ·  not saved yet: it is saved once it has finished" }
         let head = m.filed ? "\(String(m.source.head.commit.prefix(7)))" : "this walk"
+        // What the saved walk is for: the base branch's map is what pull request diffs start from.
+        let whole = m.source.head.profile.depth == 0 && m.source.head.profile.seconds == 0 && m.source.head.profile.starts.isEmpty
+        var feeds = ""
+        if m.filed, let name = m.baseBranch {
+            if !m.counts { feeds = "saved, but not signed in, so it is not the map of \(name) that pull request diffs use (that one is walked signed in, to have every screen)" }
+            else if !m.hasDeps { feeds = "saved as the map of \(name), but with no record of what its screens depend on, so a pull request's walk cannot start from it" }
+            else if whole { feeds = "saved as the map of \(name): pull request diffs start from it and are compared with it" + (m.source.head.cutShort ? " (the walk was cut short, so screens may be missing)" : "") }
+            else { feeds = "saved as a map of \(name) with these limits; pull request diffs use the map of the whole app with no limit" }
+        }
         guard let base = m.source.base else {
+            if !feeds.isEmpty { return "\(head)  ·  \(feeds)" }
             return m.filed ? "\(head)  ·  saved to the history  ·  the first map of this app: later walks are compared with it"
                            : "\(head)  ·  not saved to the history: the build has no commit, or was made with uncommitted changes"
         }
         let behind = m.baselineBehind.map { $0 > 0 ? "  ·  the baseline is \($0) commit\($0 == 1 ? "" : "s") behind" : "" } ?? ""
         let c = m.source.diff?.counts
         let changes = c.map { $0.differing == 0 ? "  ·  nothing changed" : "  ·  \($0.added) new, \($0.modified) changed, \($0.removed) gone" } ?? ""
-        return "\(head) compared with \(String(base.commit.prefix(7)))" + behind + changes
+        return "\(head) compared with \(String(base.commit.prefix(7)))" + behind + changes + (feeds.isEmpty ? "" : "  ·  " + feeds)
     }
 
     nonisolated static func timelineEntries(_ list: [MapSnapshot]) -> [MapTimelineEntry] {

@@ -261,6 +261,9 @@ enum History {
         /// Why the walk is full, in words; nil for a full walk the engine gives no choice about (as before I1).
         var reason: String?
         var recordDeps = false
+        /// The stored map of this very commit, when it has one: a walk that was not asked for by hand is not made again.
+        var existing: MapSnapshot?
+        var existingStore: MapStore?
         /// Changes that could not be traced to screens, in words ("app start changed (App.kt)"): the screens they
         /// reach were not walked again, so the comparison may be missing them. Only for a branch's build.
         var unplaced: [String] = []
@@ -283,7 +286,7 @@ enum History {
     /// recorded its dependencies, and `MapImpact` says only some screens. The seed's
     /// folder and only-file are written into `folder`. Off the main thread.
     static func plan(build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String, support: CrawlRun.Support,
-                     forceFull: Bool, fullReason: String? = nil, folder: URL) async -> WalkPlan {
+                     forceFull: Bool, fullReason: String? = nil, unsignedCounts: Bool = true, folder: URL) async -> WalkPlan {
         var plan = WalkPlan(recordDeps: support.recordDeps)
         guard support.seed, support.recordDeps else { return plan }
         guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return plan }
@@ -295,12 +298,26 @@ enum History {
         for r in [ref, ref.hasPrefix("origin/") ? String(ref.dropFirst(7)) : nil].compactMap({ $0 }) where !onMain {
             onMain = await Git.run(["merge-base", "--is-ancestor", p.commit, r], in: p.workspace.root) != nil
         }
+        // The commit's own map, when it has one (by commit, else by tree): a walk nobody asked for by hand takes it.
+        if let own = p.store.snapshot(profile: profile.id, commit: p.commit) ?? p.store.snapshot(profile: profile.id, tree: p.tree) {
+            plan.existing = own
+            plan.existingStore = p.store
+        }
+        // A walk that is not signed in has no map to start from where only signed-in walks count as one.
+        if profile.signIn == nil, !unsignedCounts { plan.reason = "not signed in, so it starts from no map and is not compared with the base branch's"; return plan }
         let shared = await sharedBaseline(place: p, profile: profile)
         plan.shareProblem = shared.problem
         guard let base = shared.found else {
             plan.reason = "no earlier walk to start from"; return plan
         }
-        if base.snapshot.commit == p.commit { plan.reason = "this commit was walked before, so it is walked again in full"; return plan }
+        if base.snapshot.commit == p.commit {
+            // The commit has its map already (a walk from the Screen Map sheet, or of another build of it): a walk
+            // nobody asked for by hand takes that map instead of making it again.
+            plan.existing = base.snapshot
+            plan.existingStore = p.store
+            plan.reason = "this commit was walked before, so it is walked again in full"
+            return plan
+        }
         guard let diff = await MapImpact.changes(base: base.snapshot.commit, head: p.commit, in: p.workspace.root) else {
             plan.reason = "git could not list what changed since the last walk"; return plan
         }

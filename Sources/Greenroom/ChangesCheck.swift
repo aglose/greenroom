@@ -329,6 +329,27 @@ enum ChangesCheck {
                        "with no map of main the comparison is held and nothing is walked (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(90)))")
                 shot("7-held.png")
 
+                // Signed in or nothing: with the repository's default (walks that are not signed in do not count) and no
+                // sign-in kept, a build is not walked by itself, and the row and the comparison say what to do.
+                SessionsController.unsignedForChecks = nil
+                let unwalked = ev.started
+                if let b0 = sessions.builds[s0.worktree.path] ?? s0.build {
+                    ev.buildArrived(worktree: s0.worktree.path, build: b0, auto: .onBuild, withData: false)
+                    await sleep(1)
+                    let e0 = ev.entry(of: s0.worktree.path)
+                    expect(e0?.status == .needsSignIn && ev.started == unwalked && e0.map { ev.label($0) } == "sign in to walk" && e0.map { ev.detail($0).contains("Sign In Once") } == true,
+                           "with no sign-in kept a build is not walked by itself, and the row says why (\(e0.map { ev.label($0) } ?? "no row"))")
+                    expect(!sessions.countsUnsigned(s0.workspace) && ev.walkProfiles(worktree: s0.worktree.path, withData: false).allSatisfy { $0.signIn != nil },
+                           "only a signed-in walk counts as a map of this repository")
+                }
+                if let i = sessions.workspaces.firstIndex(where: { $0.root.path == s0.workspace.path }) {
+                    sessions.setUnsignedBaseline(true, for: sessions.workspaces[i].root)
+                    expect(sessions.countsUnsigned(s0.workspace) && ev.walkProfiles(worktree: s0.worktree.path, withData: false).count == 2,
+                           "\u{201C}Count Walks That Are Not Signed In\u{201D} lets the others count for this repository")
+                    ev.stop(worktree: s0.worktree.path)
+                }
+                SessionsController.unsignedForChecks = true
+
                 // Main's one walk: the whole app (a walk cut at a depth leaves its last screens with no record of what
                 // they depend on, and those are walked again every time). A build of its own: `vb` is filed with no commit.
                 ev.budget = Evidence.Budget(depth: 0, seconds: 300, jobs: 2)
@@ -463,6 +484,21 @@ enum ChangesCheck {
                 expect(words.contains { $0.contains("NOT TRACED TO SCREENS") } && words.contains { $0.contains("build.gradle.kts") } && sheet.summaryText.contains("1 change not traced to screens"),
                        "the Summary lists it and the header counts it: \(sheet.summaryText)")
                 shot("11-not-traced.png")
+
+                // Another build of a commit that has its map: an automatic walk takes the stored map and walks nothing.
+                if let v6 = variant(), let b6 = store.record(apk: v6, source: .local, sha: sha4, ref: "feature", dirty: false, date: Date().addingTimeInterval(30)) {
+                    let t6 = Date()
+                    ev.buildArrived(worktree: s2.worktree.path, build: b6, auto: .onBuild, withData: false)
+                    var most = 0
+                    let taken = await wait("the stored map to be taken", 60) {
+                        most = max(most, crawlers())
+                        if let e = ev.entry(of: s2.worktree.path), e.key == b6.key, case .done = e.status { return true }
+                        return false
+                    }
+                    let e6 = ev.entry(of: s2.worktree.path)
+                    expect(taken && most == 0 && e6?.impact?.reason?.hasPrefix("this commit's map was already there") == true,
+                           "another build of a walked commit takes its stored map in \(String(format: "%.1f", Date().timeIntervalSince(t6))) s with no walk (\(e6?.impact?.reason ?? "no note"); crawlers seen: \(most))")
+                } else { expect(false, "another build of the commit is filed") }
             }
 
             let lastLogs = await wait("the last tour's logs to go", 20) { ((try? fm.contentsOfDirectory(atPath: Engine.shared.logs.path)) ?? []).allSatisfy { !$0.hasPrefix("tour-") } }

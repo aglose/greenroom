@@ -34,7 +34,7 @@ final class MapStore {
     /// `"carried"`. A carried screen's `carriedFrom` is the commit its entry was walked at: the seed's own entry's
     /// `carriedFrom`, else the seed's commit; "unknown" when no `seed` is given. A carried screen the engine wrote without
     /// `deps` keeps the seed entry's. `deps`, `start_deps` and `deps_unreliable` (`--record-deps`) are read as they are.
-    func importWalk(_ walk: URL, commit: String, tree: String, profile: MapProfile, engine: String, walked: Date, seed: MapSnapshot? = nil) -> MapSnapshot? {
+    func importWalk(_ walk: URL, commit: String, tree: String, profile: MapProfile, engine: String, walked: Date, seed: MapSnapshot? = nil, continuation: Bool = false) -> MapSnapshot? {
         guard MapStore.safe(commit) != nil,
               let data = try? Data(contentsOf: walk.appendingPathComponent("crawl.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -67,7 +67,8 @@ final class MapStore {
             let activity = ((s["activity"] as? String) ?? id).split(separator: ".").last.map(String.init) ?? id
             var carriedFrom: String?
             var deps = MapStore.deps(s["deps"])
-            if (s["origin"] as? String) == "carried" {
+            // `continuation`: the walk went on from a paused one of the same commit, so what it took over is its own.
+            if (s["origin"] as? String) == "carried", !continuation {
                 let was = seed?.screen(id)
                 carriedFrom = was.map { $0.carriedFrom ?? seed!.commit } ?? seed?.commit ?? "unknown"
                 if deps == nil { deps = was?.deps }
