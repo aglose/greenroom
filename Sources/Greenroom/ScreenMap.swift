@@ -113,6 +113,8 @@ final class ScreenMap: NSView {
     private var pausing = false
     /// What the map shows is a paused walk's part, not a finished walk.
     private var showsPaused = false
+    /// What the finished walk relaunched for most, when that was most of its launches (RepoMapSettings.relaunchNote).
+    private(set) var relaunchNote: String?
     private var walkOut: URL?
     /// The paused walk the running one goes on from.
     private var resumedFrom: URL?
@@ -775,9 +777,13 @@ final class ScreenMap: NSView {
     /// start from it"). Nil until the build's place in the history is known, and for a build with none.
     private(set) var feedsNote: String?
 
+    /// The repository of the walked build (its `.greenroom/map.json`): the context's, else the session's worktree.
+    private var repoRoot: URL?
+
     private func startCrawl(python: URL, apk: URL, out: URL, settings: CrawlRun.Settings) {
         var settings = settings
         feedsNote = nil
+        repoRoot = worktree()
         let whole = settings.depth == 0 && settings.seconds == 0 && (settings.start ?? "").isEmpty
         Task { @MainActor [weak self] in
             guard let self, let ctx = await self.context(apk) else { return }
@@ -802,6 +808,8 @@ final class ScreenMap: NSView {
                 guard let self, gen == self.generation, self.starting, self.run == nil else { return }
                 self.starting = false
                 settings.events = events
+                settings.standby = support.standby
+                if support.dataIgnore { settings.dataIgnore = RepoMapSettings.dataIgnore(in: self.repoRoot) }
                 // What each screen depends on is recorded, so this walk can be the map a later walk starts from and a
                 // pull request is compared with (without it, the next walk of the app is a full one again).
                 settings.recordDeps = support.recordDeps
@@ -910,6 +918,7 @@ final class ScreenMap: NSView {
                 setSummary("Paused before the walk had found anything to keep: the next walk starts from the beginning.")
             }
         case .finished(let map):
+            relaunchNote = RepoMapSettings.relaunchNote(map.folder)
             if resumedFrom != nil { try? Data().write(to: map.folder.appendingPathComponent(Self.resumedMarker)) }
             paused = nil
             lastFolder = map.folder
@@ -941,7 +950,8 @@ final class ScreenMap: NSView {
         parts.append(String(format: "%.0f s", map.seconds))
         // A sign-in the walk met: said after the counts, with what to do about it.
         let wall = live ? SignInWall.find(map).note(kept: lastSignedIn) : nil
-        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  ") + (wall.map { "\n" + $0.replacingOccurrences(of: "\"Sign In Once…\"", with: "\"Sign In Once…\" in the sign-in menu").replacingOccurrences(of: "\"Sign In Again…\"", with: "\"Sign In Again…\" in the sign-in menu") } ?? ""), problem: wall != nil)
+        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  ") + (wall.map { "\n" + $0.replacingOccurrences(of: "\"Sign In Once…\"", with: "\"Sign In Once…\" in the sign-in menu").replacingOccurrences(of: "\"Sign In Again…\"", with: "\"Sign In Again…\" in the sign-in menu") } ?? "")
+                   + ((live ? relaunchNote : nil).map { "\n" + $0 } ?? ""), problem: wall != nil)
         let crashes = map.crashes.count
         crashChip.isHidden = crashes == 0
         crashChip.title = crashes == 1 ? "1 crash" : "\(crashes) crashes"

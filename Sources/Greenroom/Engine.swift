@@ -59,36 +59,6 @@ final class Engine {
 
     var launcher: URL { root.appendingPathComponent("apksim") }
 
-    /// What the engine's startup cache (`app.aot`, which roughly halves the time of every launch) was built for: the
-    /// engine's version and its jar's size and date.
-    var startupCacheStamp: String {
-        let jar = root.appendingPathComponent("work/apksim.jar")
-        let a = try? FileManager.default.attributesOfItem(atPath: jar.path)
-        let size = (a?[.size] as? NSNumber)?.int64Value ?? 0, date = Int((a?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)
-        return "\(version) \(size) \(date)"
-    }
-
-    /// The engine rebuilds its startup cache only when it finds itself in another folder, and an update of Greenroom
-    /// puts a new engine in the same one: the JVM then refuses the old cache at every launch ("apksim.jar ... has
-    /// changed") and every launch is a cold one, which a walk of an app makes thousands of. A cache that was built for
-    /// another engine is removed here, so the engine builds a new one in the background on its next launch (a minute
-    /// or two, once per engine). True when one was removed. Not while this copy has simulators running.
-    @discardableResult
-    func dropStaleStartupCache() -> Bool {
-        let fm = FileManager.default
-        let stamp = engineState.appendingPathComponent("app.aot.engine"), cache = engineState.appendingPathComponent("app.aot")
-        let want = startupCacheStamp
-        guard (try? String(contentsOf: stamp, encoding: .utf8)) != want, simulators.isEmpty else { return false }
-        let had = fm.fileExists(atPath: cache.path)
-        if had {
-            try? fm.removeItem(at: cache)
-            try? fm.removeItem(at: engineState.appendingPathComponent("app.aot.root"))
-            NSLog("Greenroom: the engine's startup cache was built for another engine; it is rebuilt on the next launch")
-        }
-        try? Data(want.utf8).write(to: stamp, options: .atomic)
-        return had
-    }
-
     var version: String {
         let v = try? String(contentsOf: root.appendingPathComponent("work/release"), encoding: .utf8)
         return v?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
@@ -107,7 +77,6 @@ final class Engine {
             try? fm.removeItem(at: engineState.appendingPathComponent("tokens", isDirectory: true))
             DeviceData.sweep(in: engineState.appendingPathComponent("cache/data", isDirectory: true))   // copies an earlier run left
         }
-        dropStaleStartupCache()
         let bundled = root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
         let wanted = engineState.appendingPathComponent("testapp-\(version).apk")
         if fm.fileExists(atPath: bundled.path), !fm.fileExists(atPath: wanted.path) {

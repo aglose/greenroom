@@ -427,23 +427,6 @@ enum MapImpactCheck {
         let support = CrawlRun.support(python: python, script: script)
         expect(support.seed && support.recordDeps, "live: the crawler's --help offers --seed, --only-file and --record-deps")
 
-        // The engine's startup cache: one built for another engine is removed (the engine then builds its own), one
-        // built for this engine is left alone.
-        if script == nil {
-            let state = Engine.shared.engineState, cache = state.appendingPathComponent("app.aot"), stamp = state.appendingPathComponent("app.aot.engine")
-            try? fm.createDirectory(at: state, withIntermediateDirectories: true)
-            let had = fm.fileExists(atPath: cache.path) ? try? Data(contentsOf: cache, options: .mappedIfSafe) : nil
-            try? fm.removeItem(at: cache)
-            try? Data("old".utf8).write(to: cache)
-            try? Data("0.60.1 1 1".utf8).write(to: stamp)
-            let dropped = Engine.shared.dropStaleStartupCache()
-            expect(dropped && !fm.fileExists(atPath: cache.path) && (try? String(contentsOf: stamp, encoding: .utf8)) == Engine.shared.startupCacheStamp,
-                   "live: a startup cache built for another engine is removed and this engine noted (\(Engine.shared.startupCacheStamp))")
-            try? Data("new".utf8).write(to: cache)
-            expect(!Engine.shared.dropStaleStartupCache() && fm.fileExists(atPath: cache.path), "live: one built for this engine is left alone")
-            try? fm.removeItem(at: cache)
-            if let had { try? had.write(to: cache) }
-        }
 
         func walk(_ name: String, seed: URL? = nil, only: URL? = nil, maxActions: Int? = nil, diffControls: String? = nil) -> (ok: Bool, seconds: Double, folder: URL, why: String) {
             let out = dir.appendingPathComponent(name, isDirectory: true)

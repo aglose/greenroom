@@ -160,14 +160,23 @@ nearly every control tried cost a launch (aglose/apksim#644). That is the engine
 
 What Greenroom does:
 
-- **The engine's startup cache.** The engine rebuilds `app.aot` only when it finds itself in another folder, and an
+- **The engine's startup cache.** The engine rebuilt `app.aot` only when it found itself in another folder, and an
   update of Greenroom puts the new engine in the same one, so the JVM refused the old cache at every launch
-  (aglose/apksim#645). `Engine.dropStaleStartupCache` removes a cache built for another engine (version, and the jar's
-  size and date, kept in `app.aot.engine`); the engine builds a new one in the background on its next launch. Measured
-  with 0.63.1 and its test app, headless: first frame 1.59 s without the cache, 1.03 s with it.
+  (aglose/apksim#645). apksim 0.64.0 records the release a cache was built for and rebuilds it after an upgrade in
+  place; Greenroom no longer does anything about it. Measured with 0.63.1 and its test app, headless: first frame 1.59
+  s without the cache, 1.03 s with it.
+- **Write-ahead logs.** apksim 0.64.0 compares a SQLite database by its content (a hash per table, Room's bookkeeping
+  left out) and ignores `-wal` and `-journal` files (aglose/apksim#644), so a replay after a write no screen shows is
+  no longer a new launch. Nothing to do in Greenroom.
+- **`dataIgnore`.** What an app writes at every action and no screen reads can be listed in the repository's
+  `.greenroom/map.json`, `{"dataIgnore": ["databases/app.db#events", "shared_prefs/x.xml#last_seen*"]}`, and every walk
+  in the app passes each as `--data-ignore` (`RepoMapSettings`). A finished Screen Map walk says what most of its
+  launches were for when one or two things the app wrote account for half of them, and points there.
+- **Warm launches.** Walks pass `--standby` when the crawler offers it. apksim keeps one warm JVM per folder, so with
+  several devices most relaunches still start cold, and a walk with `--record-deps` (every walk Greenroom makes, so it
+  can be a map) stays cold altogether.
 - **No second walk of one commit** (above).
 
-Asked of the engine: standby JVMs for plain walks, not only `--diff-seed` (aglose/apksim#646).
 
 ## Decisions the brief left open
 
