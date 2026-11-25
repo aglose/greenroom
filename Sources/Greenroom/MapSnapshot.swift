@@ -150,6 +150,14 @@ struct MapSnapshot: Codable, Equatable {
     /// Set when the engine says its dependency record cannot be trusted (why, in its words): a walk seeded from this
     /// snapshot would not be honest, so the next one is full.
     var depsUnreliable: String?
+    /// How the walk read its screens, which a walk seeded from this snapshot must read them the same way: crawl.json's
+    /// `screen_ids` (how ids were made), `clock` (the time the app was told) and, with `--freeze-network`, the blob of
+    /// its `network.har` (every server answer the walk's screens showed). Nil in a snapshot written before they were kept,
+    /// or by an engine that does not write them. The recording stays in this Mac's store: it holds the signed-in
+    /// account's own data, so a shared map names it and does not carry it.
+    var screenIds: Int?
+    var clock: String?
+    var network: String?
 
     func screen(_ id: String) -> Screen? { screens.first { $0.id == id } }
 

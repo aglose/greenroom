@@ -67,7 +67,7 @@ walk("empty", {"screens": [{"id": "Only-0001", "activity": "com.example.Only", "
      {"a.png": png(9)})
 # a walk with no screens at all and no seconds
 walk("nothing", {"screens": []}, {})
-# --record-deps (package I1): per-screen deps in no order with unicode, an empty deps object, a list that is not all
+# --record-deps (package I1), and screen_ids / clock / network: per-screen deps in no order with unicode, an empty deps object, a list that is not all
 # strings, deps that is not an object, the app start's deps, why they cannot be trusted, and walked and carried screens
 walk("deps", {
     "screens": [
@@ -82,8 +82,10 @@ walk("deps", {
     ],
     "edges": [{"from": "Deps-0001", "action": "Open", "cmd": "tap 1", "to": "Deps-0002"}],
     "start_deps": {"classes": ["com.example.App"], "sources": ["com/example/App.kt"], "resources": ["style/Theme.App", "mipmap/ic_launcher"]},
-    "deps_unreliable": "the probes were reset mid-screen", "seconds": {"total": 3.25}},
-    {"a.png": png(11), "b.png": png(12)})
+    "deps_unreliable": "the probes were reset mid-screen", "seconds": {"total": 3.25},
+    # how it read its screens: id rule, clock, and the --freeze-network recording (named by hash, not carried)
+    "screen_ids": 2, "clock": "2026-11-25T21:04:00Z", "network": {"recording": "network.har", "entries": 1, "fetched": 1}},
+    {"a.png": png(11), "b.png": png(12), "network.har": b'{"log": {"version": "1.2", "entries": []}}'})
 # seeded from the deps walk's snapshot: a carried screen the seed walked, one the seed carried, one the seed lacks, and a
 # carried screen with no deps of its own (it keeps the seed's)
 walk("deps2", {

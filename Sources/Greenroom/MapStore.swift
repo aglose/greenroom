@@ -99,7 +99,9 @@ final class MapStore {
                            // A seeded walk says what its seed left unfinished as "seed: ...": the same fact for this walk.
                            incomplete: ((json["incomplete"] as? [String]) ?? []).map { $0.hasPrefix("seed: ") ? String($0.dropFirst(6)) : $0 },
                            seconds: ((json["seconds"] as? [String: Any])?["total"] as? Double) ?? 0,
-                           startDeps: MapStore.deps(json["start_deps"]), depsUnreliable: json["deps_unreliable"] as? String).canonical()
+                           startDeps: MapStore.deps(json["start_deps"]), depsUnreliable: json["deps_unreliable"] as? String,
+                           screenIds: json["screen_ids"] as? Int, clock: json["clock"] as? String,
+                           network: json["network"] != nil ? blob("network.har") : nil).canonical()
     }
 
     /// crawl.json's `actions` list. Nil when the screen has none written (a walk that did not read its controls).
@@ -192,6 +194,14 @@ final class MapStore {
         ]
         if let d = snapshot.startDeps { json["start_deps"] = depsJSON(d) }
         if let u = snapshot.depsUnreliable { json["deps_unreliable"] = u }
+        // How the seed's walk read its screens: the walk seeded from it reads them the same way (its ids, its clock, and
+        // with --freeze-network the server answers it saw). A recording not in this store (a shared map) is left out.
+        if let n = snapshot.screenIds { json["screen_ids"] = n }
+        if let c = snapshot.clock { json["clock"] = c }
+        if let h = snapshot.network, let from = blobURL(h) {
+            let to = folder.appendingPathComponent("network.har")
+            if clonefile(from.path, to.path, 0) == 0 || (try? fm.copyItem(at: from, to: to)) != nil { json["network"] = ["recording": "network.har"] }
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .prettyPrinted]),
               (try? data.write(to: folder.appendingPathComponent("crawl.json"), options: .atomic)) != nil else { return false }
         return complete
@@ -269,6 +279,7 @@ final class MapStore {
                     removedSnapshots += 1
                 } else if let data = try? Data(contentsOf: dir.appendingPathComponent(name)), let s = MapSnapshot.read(data) {
                     for screen in s.screens { used.formUnion(screen.captures.values) }
+                    if let n = s.network { used.insert(n) }
                 } else {
                     // Unreadable: keep what it might name rather than lose captures to a bad file.
                     return (removedSnapshots, 0)

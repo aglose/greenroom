@@ -311,6 +311,41 @@ enum MapImpactCheck {
             let only = (try? JSONSerialization.jsonObject(with: Data(contentsOf: seedFolder.appendingPathComponent("crawl.json")))) as? [String: Any]
             expect((only?["screens"] as? [[String: Any]])?.allSatisfy { (($0["captures"] as? [String: String])?["light"]).map { fm.fileExists(atPath: seedFolder.appendingPathComponent($0).path) } ?? false } == true,
                    "the seed folder has every capture, cloned from the store's blobs")
+
+            // How the walk read its screens (crawl.json's screen_ids, clock, and the --freeze-network recording) goes into
+            // the snapshot and back out into a seed, so the walk seeded from it makes the same ids at the same time with
+            // the same server answers.
+            let read = walks.appendingPathComponent("quick-c1-read")
+            try? fm.removeItem(at: read)
+            try? fm.copyItem(at: quick1, to: read)
+            let har = Data(#"{"log": {"version": "1.2", "entries": [{"request": {"method": "GET", "url": "https://api.example/w"}}]}}"#.utf8)
+            try? har.write(to: read.appendingPathComponent("network.har"))
+            if var j = (try? JSONSerialization.jsonObject(with: Data(contentsOf: read.appendingPathComponent("crawl.json")))) as? [String: Any] {
+                j["screen_ids"] = 2; j["clock"] = "2026-11-25T21:04:00Z"; j["network"] = ["recording": "network.har", "entries": 1]
+                try? JSONSerialization.data(withJSONObject: j).write(to: read.appendingPathComponent("crawl.json"))
+            }
+            let withRead = store.importWalk(read, commit: quick.commit, tree: quick.tree, profile: quick.profile, engine: quick.engine,
+                                            walked: ISO8601DateFormatter().date(from: quick.walked) ?? now, seed: filed0?.snapshot)
+            expect(withRead?.screenIds == 2 && withRead?.clock == "2026-11-25T21:04:00Z" && withRead?.network.flatMap { store.blobURL($0) } != nil,
+                   "a walk's screen_ids, clock and recording are kept with its snapshot")
+            if let withRead {
+                let seed2 = walks.appendingPathComponent("seed-roundtrip-read")
+                let wrote2 = store.writeSeed(withRead, to: seed2)
+                let sj = (try? JSONSerialization.jsonObject(with: Data(contentsOf: seed2.appendingPathComponent("crawl.json")))) as? [String: Any]
+                expect(wrote2 && sj?["screen_ids"] as? Int == 2 && sj?["clock"] as? String == "2026-11-25T21:04:00Z"
+                       && (try? Data(contentsOf: seed2.appendingPathComponent("network.har"))) == har,
+                       "a seed written from it has the same screen_ids and clock, and the recording as network.har")
+                let back2 = store.importWalk(seed2, commit: withRead.commit, tree: withRead.tree, profile: withRead.profile, engine: withRead.engine,
+                                             walked: ISO8601DateFormatter().date(from: withRead.walked) ?? now, seed: withRead)
+                var bare2 = withRead
+                for i in bare2.screens.indices { bare2.screens[i].lineage = "" }
+                expect(back2 == bare2, "that seed reads back to the same snapshot")
+                var shared = withRead
+                shared.network = String(repeating: "0", count: 64)  // a teammate's map: the recording named, not in this store
+                let seed3 = walks.appendingPathComponent("seed-shared")
+                expect(store.writeSeed(shared, to: seed3) && !fm.fileExists(atPath: seed3.appendingPathComponent("network.har").path),
+                       "a seed from a map whose recording is not in this store has none (the walk starts its own)")
+            }
         }
 
         // 4. A planted miss: a full walk of c1 where screen 7, which the quick walk carried, differs.

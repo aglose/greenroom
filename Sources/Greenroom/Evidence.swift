@@ -761,6 +761,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     let known = CrawlRun.knownSupport(python: python)
                     settings.events = known?.events ?? false
                     settings.standby = known?.standby ?? false
+                    settings.freezeNetwork = known?.freezeNetwork ?? false
+                    settings.deterministic = known?.deterministic ?? false
                     if known?.dataIgnore == true { settings.dataIgnore = RepoMapSettings.dataIgnore(in: self.controller?.workspaceRoot(ofOwner: job.verifyOf ?? job.owner)) }
                     if !job.isChanges, var e = self.entries[job.owner], e.key == job.build.key { e.whole = plan?.seed == nil && settings.depth == 0; self.entries[job.owner] = e }
                     if let plan {

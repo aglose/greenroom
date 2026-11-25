@@ -216,6 +216,15 @@ def import_walk(walk, commit, tree, profile, engine, walked, seed=None):
     start = deps_of(data.get("start_deps"))
     if start is not None: snap["startDeps"] = sorted_deps(start)
     if isinstance(data.get("deps_unreliable"), str): snap["depsUnreliable"] = data["deps_unreliable"]
+    # How the walk read its screens (MapSnapshot.screenIds, clock, network). The recording is named by its hash only:
+    # MapGit carries captures, never the signed-in account's server answers, so it is not one of `files`.
+    if isinstance(data.get("screen_ids"), int) and not isinstance(data.get("screen_ids"), bool): snap["screenIds"] = data["screen_ids"]
+    if isinstance(data.get("clock"), str): snap["clock"] = data["clock"]
+    if data.get("network") is not None:
+        har = os.path.realpath(os.path.join(walk, "network.har"))
+        if har.startswith(root.rstrip("/") + "/") and os.path.isfile(har):
+            with open(har, "rb") as f:
+                snap["network"] = hashlib.sha256(f.read()).hexdigest()
     return snap, files
 
 
