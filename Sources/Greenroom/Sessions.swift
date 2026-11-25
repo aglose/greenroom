@@ -106,7 +106,10 @@ struct Session {
     }
 
     var isMain: Bool { worktree.standardizedFileURL.path == workspace.standardizedFileURL.path }
-    var title: String { claude?.title ?? branch ?? "(detached \(String(head.prefix(7))))" }
+    var title: String {
+        if let b = branch, b == "main" || b == "master" { return b }
+        return claude?.title ?? branch ?? "(detached \(String(head.prefix(7))))"
+    }
     var shortHead: String { String(head.prefix(7)) }
     /// The engine's data slot for this worktree: its own app data, kept across rebuilds and restarts.
     var slot: String { SessionStore.slot(for: worktree) }   // cached by path
