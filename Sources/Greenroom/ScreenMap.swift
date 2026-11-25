@@ -247,6 +247,7 @@ final class ScreenMap: NSView {
         func fieldRow(_ name: String, _ control: NSView) -> NSStackView {
             let l = label(name, size: 11.5, weight: .medium, color: Design.mute)
             l.widthAnchor.constraint(equalToConstant: 74).isActive = true
+            control.setContentHuggingPriority(.init(1), for: .horizontal)
             let r = NSStackView(views: [l, control])
             r.alignment = .centerY
             r.spacing = 8
@@ -301,6 +302,13 @@ final class ScreenMap: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         for v in rows { v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28).isActive = true }
 
+        let popTint = NSView()
+        popTint.wantsLayer = true
+        popTint.layer?.backgroundColor = NSColor(srgbRed: 0.105, green: 0.11, blue: 0.125, alpha: 0.90).cgColor
+        popTint.layer?.cornerRadius = 14
+        popTint.layer?.cornerCurve = .continuous
+        popTint.translatesAutoresizingMaskIntoConstraints = false
+        configPopover.addSubview(popTint)
         configPopover.addSubview(stack)
         configPopover.translatesAutoresizingMaskIntoConstraints = false
         configPopover.isHidden = true
@@ -310,6 +318,8 @@ final class ScreenMap: NSView {
         configPopover.layer?.shadowOffset = CGSize(width: 0, height: -8)
         panel.addSubview(configPopover)
         NSLayoutConstraint.activate([
+            popTint.topAnchor.constraint(equalTo: configPopover.topAnchor), popTint.bottomAnchor.constraint(equalTo: configPopover.bottomAnchor),
+            popTint.leadingAnchor.constraint(equalTo: configPopover.leadingAnchor), popTint.trailingAnchor.constraint(equalTo: configPopover.trailingAnchor),
             stack.topAnchor.constraint(equalTo: configPopover.topAnchor), stack.bottomAnchor.constraint(equalTo: configPopover.bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: configPopover.leadingAnchor), stack.trailingAnchor.constraint(equalTo: configPopover.trailingAnchor),
             configPopover.widthAnchor.constraint(equalToConstant: 350),
@@ -464,6 +474,7 @@ final class ScreenMap: NSView {
         signInPopup.lastItem?.representedObject = "new"
         let i = scripts.firstIndex { $0.name == wanted }.map { $0 + 1 } ?? (wanted == nil ? keptAt : nil) ?? 0
         signInPopup.selectItem(at: i)
+        refreshConfigSummary()
     }
 
     /// The script chosen in the menu, if any.
@@ -477,6 +488,7 @@ final class ScreenMap: NSView {
         if let url, !scripts.contains(where: { $0.url == url }) { scripts.append(.init(url: url, fromWorktree: false)); signInPopup.insertItem(withTitle: "Sign in with " + url.lastPathComponent, at: scripts.count) }
         let i = url.flatMap { u in scripts.firstIndex { $0.url == u } }.map { $0 + 1 } ?? 0
         signInPopup.selectItem(at: i)
+        refreshConfigSummary()
     }
 
     /// For checks: the kept sign-in, when the app has one. False when it has none.
@@ -485,6 +497,7 @@ final class ScreenMap: NSView {
         reloadScripts()
         let i = signInPopup.indexOfItem(withRepresentedObject: "kept")
         if i >= 0 { signInPopup.selectItem(at: i) }
+        refreshConfigSummary()
         return i >= 0
     }
 

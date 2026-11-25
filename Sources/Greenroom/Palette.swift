@@ -65,6 +65,7 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
         footerWrap.layer?.cornerRadius = 16
         footerWrap.layer?.cornerCurve = .continuous
         footerWrap.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        footerWrap.layer?.masksToBounds = true
         footer.translatesAutoresizingMaskIntoConstraints = false
         footerWrap.addSubview(footer)
         NSLayoutConstraint.activate([
@@ -287,15 +288,20 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
         let q = Array(query.lowercased().filter { !$0.isWhitespace })
         guard !q.isEmpty else { return base }
         var qi = 0
-        for (i, ch) in text.lowercased().enumerated() where qi < q.count && ch == q[qi] {
-            let nsIndex = (text as NSString).rangeOfComposedCharacterSequence(at: i)
-            if nsIndex.location + nsIndex.length <= base.length {
-                base.addAttributes([
-                    .foregroundColor: Design.accent,
-                    .font: NSFont.systemFont(ofSize: 13.5, weight: .semibold),
-                ], range: nsIndex)
+        var idx = text.startIndex
+        while idx < text.endIndex && qi < q.count {
+            let next = text.index(after: idx)
+            if String(text[idx]).lowercased().first == q[qi] {
+                let nsRange = NSRange(idx..<next, in: text)
+                if nsRange.location + nsRange.length <= base.length {
+                    base.addAttributes([
+                        .foregroundColor: Design.accent,
+                        .font: NSFont.systemFont(ofSize: 13.5, weight: .semibold),
+                    ], range: nsRange)
+                }
+                qi += 1
             }
-            qi += 1
+            idx = next
         }
         return base
     }

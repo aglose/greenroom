@@ -54,7 +54,9 @@ enum MatrixSheet {
             window.endSheet(sheet, returnCode: .OK)
             done(matrix)
         })
-        sheet.contentView = NSHostingView(rootView: view)
+        let host = NSHostingController(rootView: view)
+        host.sizingOptions = [.preferredContentSize]
+        sheet.contentViewController = host
         window.beginSheet(sheet) { _ in sheet.orderOut(nil) }
     }
 }
@@ -131,7 +133,7 @@ private struct MatrixConfiguratorView: View {
                 axisRow("DEVICES", Matrix.devices, selection: $devices)
                 axisRow("APPEARANCE", Matrix.appearances, selection: $appearances)
                 axisRow("LANGUAGE", Matrix.locales, selection: $locales)
-                axisRow("TEXT SIZE", Matrix.fontScales, selection: $fontScales)
+                axisRow("TEXT SIZE", Matrix.fontScales.map { ($0.0, $0.1.replacingOccurrences(of: "Text ", with: "")) }, selection: $fontScales)
             }
 
             // Live grid preview

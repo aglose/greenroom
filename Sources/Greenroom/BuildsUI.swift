@@ -216,6 +216,7 @@ final class BuildLogPopover: NSViewController, NSPopoverDelegate {
         popover?.close()
         let c = BuildLogPopover(job: job, onCancel: onCancel)
         let p = NSPopover()
+        p.appearance = NSAppearance(named: .darkAqua)
         p.behavior = .transient
         p.delegate = c
         p.contentViewController = c

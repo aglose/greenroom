@@ -107,6 +107,7 @@ final class SettingsWindow: NSWindowController {
                               styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Settings"
         window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.backgroundColor = Design.stage
         window.appearance = NSAppearance(named: .darkAqua)
         window.minSize = NSSize(width: 660, height: 480)
@@ -156,6 +157,7 @@ struct SettingsView: View {
         crashes = Reports.shared.crashes
         usage = Reports.shared.usage
         automatic = Updates.shared.checksAutomatically
+        reopenLast = LastOpened.enabled
         sessionsWarm = max(1, min(6, UserDefaults.standard.object(forKey: "sessionsWarm") as? Int ?? 3))
         variableCount = Variables.shared.names().count
         let scripts = Scripts.list(in: Scripts.folder)
@@ -178,6 +180,7 @@ struct SettingsView: View {
             .background(SettingsTheme.stage)
         }
         .background(SettingsTheme.stage)
+        .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(.dark)
         .tint(SettingsTheme.accent)
         .onAppear(perform: refresh)
@@ -206,7 +209,7 @@ struct SettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Spacer().frame(height: 28)
+            Spacer().frame(height: 36)
             ForEach(SettingsTab.allCases) { tab in
                 let isSelected = selectedTab == tab
                 Button {
