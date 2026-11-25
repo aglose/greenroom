@@ -9,6 +9,9 @@
 #              build's hash, so every new build asks for every variable again.
 # --engine     an unpacked apksim release to bundle instead of the one engine.lock names (with --testapp)
 # GREENROOM_BUILD  the build number (CFBundleVersion, which Sparkle compares); the commit count by default
+# GREENROOM_SWIFT_FLAGS  more flags for `swift build` (word-split). CI (ci.yml) passes
+#              "-Xswiftc -no-whole-module-optimization": the module's files compile on every core rather than one,
+#              ~20% faster on a 3-core runner; releases keep whole-module optimization.
 # --check      afterwards, run the bundled training app headless through the app and verify the signatures
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,7 +39,8 @@ fi
 ENGINE_VERSION=$(tr -d '[:space:]' < "$ENGINE/work/release")
 
 cd "$ROOT"
-swift build -c release --arch arm64 -Xswiftc -g
+# shellcheck disable=SC2086  # word-split on purpose
+swift build -c release --arch arm64 -Xswiftc -g ${GREENROOM_SWIFT_FLAGS:-}
 if [[ "$VARIANT" == debug ]]; then APP="$ROOT/build/Greenroom Debug.app"; else APP="$ROOT/build/Greenroom.app"; fi; C="$APP/Contents"
 rm -rf "$APP"; mkdir -p "$C/MacOS" "$C/Resources"
 BIN_PATH=$(swift build -c release --arch arm64 --show-bin-path)
