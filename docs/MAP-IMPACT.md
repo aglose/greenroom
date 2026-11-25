@@ -11,6 +11,37 @@ the git reading, the workspace's ledger), `History.swift` (`plan`, `filed`, the 
 `--record-deps`; `--record-deps` alone is passed whenever offered. apksim 0.58.0 and later offer them; with an
 older engine (0.57.1 and before) nothing changes: no plan, no note, no extra option, no `greenroom-impact.json`.
 
+## Comparing a walk with its seed (apksim 0.62.0)
+
+When the crawler offers `--diff-seed` and `--diff-controls` (`Support.diffSeed`), every seeded walk but a
+verification passes them: the engine keeps its instances parked on the screens it walks and compares them with the seed.
+
+- **What a snapshot keeps for it.** `--diff-controls changed` carries a screen's transitions for the controls the seed
+  already has and taps only the new ones. It needs each seed screen's `actions` and each edge's `kind` and `steps`, so
+  `MapSnapshot.Screen.actions` and `Edge.kind`/`.steps` are kept (optional: an older snapshot has none, and its
+  screens are walked with every control tried). `writeSeed` writes them back.
+- **When `changed` is used.** Only off main, when no Kotlin or Java file changed and every named screen has its
+  `actions`: a changed handler can change where an existing control leads, and the engine would not try it
+  (aglose/apksim#632). Otherwise `all`.
+- **Why each screen was walked** (`MapImpact`'s reasons, "strings.xml changed") is kept in `greenroom-impact.json` as
+  `why`, by screen id.
+- **Main is walked.** `MainBuilds.land` hands each build of main to Evidence under the trunk's path, with the
+  repository's kept sign-in, so a pull request's walk has main's map to start from. The first is a full walk; later
+  ones are seeded like any other. The every-tenth full walk of main is gone: a full walk is the first of a project, a
+  settings change, a change `MapImpact` cannot place, or "Walk Everything Again".
+- **A pull request row's head is fetched** into `refs/greenroom/pulls/N` (nothing is checked out), so its walk is
+  filed in the history and compared with main's.
+- **An engine update keeps the map.** A baseline walked by another engine no longer starts a full walk. The walk is
+  seeded as usual (`WalkPlan.engineChanged`), and once it is filed its carried screens are verified
+  (`verifyCarried(afterEngine:)`, `--max-actions 0`). A carried screen whose structure the new engine reads
+  differently starts a full walk of that build, with the reason on the row; a capture that differs is kept as a miss
+  and starts nothing (a screen reached with no control tried can look different for other reasons). Limits: captures
+  carried from the old engine are compared with ones the new engine takes, so a rendering change in the engine can
+  show as a visual change; and a verification that never ran (the app quit first) is not started again.
+- **Measured** (`--map-impact-check DIR APK`, engine 0.62.0, its test app, one instance): full walk 144.9 s; one screen
+  seeded 13.6 s; the same with `--diff-seed --diff-controls all` 13.8 s; with `changed` 2.2 s. All three gave the
+  full walk's map.
+
 ## Decisions the brief left open
 
 - **Where the per-workspace state lives.** `Workspace` (Sessions.swift) is not this package's, so the full-walk
@@ -42,7 +73,7 @@ older engine (0.57.1 and before) nothing changes: no plan, no note, no extra opt
 - **Walking the same commit again** (its own snapshot is the baseline) is a full walk: a seeded walk of a commit
   against itself would redo nothing.
 - **A main-branch walk** is a walk of a commit that is an ancestor of the workspace's base ref (`git merge-base
-  --is-ancestor`). The count is per profile and is advanced when the walk is planned (a cancelled walk still counts).
+  --is-ancestor`). They are no longer counted: see "Comparing a walk with its seed".
 - **A full walk replaces a quick snapshot of the same commit** (it is the more truthful of the two) after being
   compared with it. Before I2, the first snapshot of a commit was never replaced; that still holds for full snapshots.
 - **Comparing with an earlier quick walk.** With no quick snapshot of its own commit, a full walk is compared with the

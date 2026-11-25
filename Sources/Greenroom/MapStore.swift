@@ -64,10 +64,12 @@ final class MapStore {
                 carriedFrom = was.map { $0.carriedFrom ?? seed!.commit } ?? seed?.commit ?? "unknown"
                 if deps == nil { deps = was?.deps }
             }
+            var actions = MapStore.actions(s["actions"])
+            if actions == nil, (s["origin"] as? String) == "carried" { actions = seed?.screen(id)?.actions }
             return MapSnapshot.Screen(id: id, lineage: "", activity: activity, title: (s["title"] as? String) ?? "",
                                       depth: (s["depth"] as? Int) ?? 0, parent: s["parent"] as? String, start: path["start"] as? String,
                                       steps: (path["steps"] as? [String]) ?? [], captures: captures, texts: (s["texts"] as? [String]) ?? [],
-                                      settled: (s["settled"] as? Bool) ?? true, flaky: s["flaky"] as? String, carriedFrom: carriedFrom, deps: deps)
+                                      settled: (s["settled"] as? Bool) ?? true, flaky: s["flaky"] as? String, carriedFrom: carriedFrom, deps: deps, actions: actions)
         }
 
         var next: [String: Int] = [:]       // each screen's controls are numbered in the order the file lists them
@@ -76,7 +78,8 @@ final class MapStore {
             let order = next[from, default: 0]
             next[from] = order + 1
             return MapSnapshot.Edge(from: from, order: order, action: (e["action"] as? String) ?? "", cmd: (e["cmd"] as? String) ?? "",
-                                    to: e["to"] as? String, note: e["note"] as? String)
+                                    to: e["to"] as? String, note: e["note"] as? String,
+                                    kind: e["kind"] as? String, steps: e["steps"] as? [String])
         }
         let findings: [MapSnapshot.Finding] = ((json["findings"] as? [[String: Any]]) ?? []).map { f in
             MapSnapshot.Finding(kind: (f["kind"] as? String) ?? "", detail: (f["detail"] as? String) ?? "",
@@ -88,6 +91,16 @@ final class MapStore {
                            incomplete: ((json["incomplete"] as? [String]) ?? []).map { $0.hasPrefix("seed: ") ? String($0.dropFirst(6)) : $0 },
                            seconds: ((json["seconds"] as? [String: Any])?["total"] as? Double) ?? 0,
                            startDeps: MapStore.deps(json["start_deps"]), depsUnreliable: json["deps_unreliable"] as? String).canonical()
+    }
+
+    /// crawl.json's `actions` list. Nil when the screen has none written (a walk that did not read its controls).
+    private static func actions(_ value: Any?) -> [MapSnapshot.Action]? {
+        guard let list = value as? [[String: Any]] else { return nil }
+        return list.compactMap { a in
+            guard let label = a["label"] as? String, let cmd = a["cmd"] as? String else { return nil }
+            return MapSnapshot.Action(label: label, cmd: cmd, kind: (a["kind"] as? String) ?? "control", box: a["box"] as? [Int],
+                                      skipped: a["skipped"] as? String, scrolls: (a["scrolls"] as? Int) ?? 0)
+        }
     }
 
     /// crawl.json's `deps` object: each list read when it is a list of strings, else empty. Nil when it is not an object.
@@ -140,12 +153,21 @@ final class MapStore {
             o["parent"] = sc.parent ?? NSNull()
             if let f = sc.flaky { o["flaky"] = f }
             if let d = sc.deps { o["deps"] = depsJSON(d) }
+            if let list = sc.actions {
+                o["actions"] = list.map { a -> [String: Any] in
+                    var j: [String: Any] = ["label": a.label, "cmd": a.cmd, "kind": a.kind, "scrolls": a.scrolls, "skipped": a.skipped ?? NSNull()]
+                    if let b = a.box { j["box"] = b }
+                    return j
+                }
+            }
             screens.append(o)
         }
         let edges: [[String: Any]] = snapshot.edges.map { e in
             var o: [String: Any] = ["from": e.from, "action": e.action, "cmd": e.cmd]
             if let to = e.to { o["to"] = to }
             if let n = e.note { o["note"] = n }
+            if let k = e.kind { o["kind"] = k }
+            if let st = e.steps { o["steps"] = st }
             return o
         }
         // The combinations as the walk named them (the engine's matrix labels, "phone-light-en-US-1"), which the crawler

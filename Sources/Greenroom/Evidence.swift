@@ -70,6 +70,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var misses: Int?
         /// "Verify carried screens", in words, while it runs and after.
         var verify: String?
+        /// Why each walked screen was walked again ("SettingsFragment.kt changed"), by screen id. Nil for a full walk.
+        var why: [String: [String]]?
     }
 
     /// What a comparison of two builds found, from the `compare` list of crawl.json.
@@ -131,6 +133,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
     private var lastBuild: [String: Build] = [:]
     /// Worktrees whose next walk is full ("Walk Everything Again").
     private var fullNext = Set<String>()
+    /// Why the next walk of a worktree is full when it was not the person who asked (a verification after an engine update).
+    private var fullWhy: [String: String] = [:]
     private var queue: [Job] = []
     private var current: Job?
     private var retry: Timer?
@@ -162,6 +166,10 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var workDir: URL?
         /// "Verify carried screens" of this worktree's map (its part and final folders are `verify.part`, `verify`).
         var verifyOf: String?
+        /// The verification follows an engine update (the engine the map was carried from): a screen whose structure
+        /// the new engine reads differently starts a full walk.
+        var engineCheck: String?
+        var fullWhy: String?
         /// The session or repository went: the walk's folder goes with it.
         var forgotten = false
         struct Waiter {
@@ -182,6 +190,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
             self.owner = owner; self.build = build; self.kind = kind; self.part = part; self.final = final
         }
         var isChanges: Bool { if case .changes = kind { return true } else { return false } }
+        /// The walk uses a data slot that is not the kept sign-in's: the session's own data was asked for.
+        var withData: Bool { if case .walk(let slot) = kind { return slot != nil && !kept } else { return false } }
         /// A walk a comparison waits for, or the comparison itself: its progress goes to its waiters.
         var forwardsProgress: Bool { isChanges || owner.hasPrefix("map:") }
     }
@@ -300,6 +310,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         job.kept = kept != nil
         job.force = force
         job.forceFull = fullNext.remove(worktree) != nil
+        job.fullWhy = fullWhy.removeValue(forKey: worktree)
         queue.append(job)
         onChange?()
         pump()
@@ -410,7 +421,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     private func planWalk(_ job: Job, python: URL, then: @escaping (History.WalkPlan?) -> Void) {
         guard !job.isChanges, let profile = job.profile else { then(nil); return }
         let candidates = candidates(for: job), root = store.root, engine = Engine.shared.version, build = job.build
-        let force = job.forceFull, verify = job.verifyOf != nil
+        let force = job.forceFull, why = job.fullWhy, verify = job.verifyOf != nil
         let work = job.part.deletingLastPathComponent().appendingPathComponent(verify ? "verify-work" : "impact-work", isDirectory: true)
         job.workDir = work
         Task { @MainActor in
@@ -424,7 +435,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     return await History.verifyPlan(build: build, profile: profile, candidates: candidates, stateRoot: root, folder: work)
                 }
                 return await History.plan(build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine, support: support,
-                                          forceFull: force, folder: work)
+                                          forceFull: force, fullReason: why, folder: work)
             }.value
             then(plan)
         }
@@ -440,7 +451,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     /// captures, trying no control. The engine has no mode for that alone, so it is a walk seeded from the map with
     /// `--max-actions 0` over the carried ids. What differs is a miss, as for a full walk. False when there is nothing to do.
     @discardableResult
-    func verifyCarried(worktree: String, withData: Bool = false) -> Bool {
+    func verifyCarried(worktree: String, withData: Bool = false, afterEngine: String? = nil) -> Bool {
         guard let build = lastBuild[worktree], let e = entries[worktree], e.key == build.key, case .done = e.status, History.fileable(build) else { return false }
         let owner = "verify:" + worktree
         guard current?.owner != owner, !queue.contains(where: { $0.owner == owner }) else { return true }
@@ -452,6 +463,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                       final: dir.appendingPathComponent("verify", isDirectory: true))
         job.force = true
         job.verifyOf = worktree
+        job.engineCheck = afterEngine
         queue.append(job)
         updateImpact(owner: worktree, key: build.key, folder: mapFolder(for: build.key)) { $0.verify = "verifying carried screens…" }
         pump()
@@ -482,6 +494,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
                         : "verified \(r.checked) carried screen\(r.checked == 1 ? "" : "s"): \(MapImpact.missWords(r.misses.count))"
                 } else { words = "verifying carried screens failed: its walk could not be read" }
                 self?.updateImpact(owner: worktree, key: key, folder: map) { $0.verify = words; if let r, !r.misses.isEmpty { $0.misses = ($0.misses ?? 0) + r.misses.count } }
+                // After an engine update: a carried screen the new engine no longer reads as the same screen means the
+                // kept map cannot be trusted, so this build is walked in full. A capture that differs is only a lead.
+                if let was = job.engineCheck, let r, let self {
+                    let moved = r.misses.filter { $0.why == "its structure changed" }.count
+                    if moved > 0, self.lastBuild[worktree]?.key == key {
+                        self.fullNext.insert(worktree)
+                        self.fullWhy[worktree] = "engine \(Engine.shared.version) reads \(moved) screen\(moved == 1 ? "" : "s") differently than \(was) did"
+                        self.request(worktree: worktree, build: build, force: true, walk: true, withData: job.withData)
+                    }
+                }
             }
         }
     }
@@ -676,6 +698,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                         settings.seed = plan.seed
                         settings.onlyFile = plan.onlyFile
                         if job.verifyOf != nil { settings.maxActions = 0 }
+                        else if plan.diffSeed, plan.seed != nil { settings.diffControls = plan.diffControls }
                     }
                     if job.verifyOf != nil, plan == nil { self.finish(job, .finished); return }
                     let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
@@ -763,6 +786,14 @@ final class Evidence: NSObject, NSMenuItemValidation {
                 if let plan = job.plan, !plan.isFull || plan.reason != nil { Self.writeImpactNote(Self.note(plan, walk: final), final) }
                 result = .success(ChangesResult(folder: final, map: data, summary: Self.summary(of: final)))
                 if !job.isChanges { file(job, folder: final) }
+                // The map was kept across an engine update: once this walk is filed, the screens it carried are verified.
+                if !job.isChanges, let was = job.plan?.engineChanged {
+                    let build = job.build, owner = job.owner, withData = job.withData
+                    Task { @MainActor [weak self] in
+                        await self?.awaitFiling(build)
+                        self?.verifyCarried(worktree: owner, withData: withData, afterEngine: was)
+                    }
+                }
             } else {
                 status = .failed("The walk finished but its map could not be read.")
                 result = .failure(Failure(message: "the walk's map could not be read"))
@@ -800,7 +831,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["screens"] as? [[String: Any]]) ?? []
         let carried = list.filter { ($0["origin"] as? String) == "carried" }.count
         return ImpactNote(full: plan.isFull, reason: plan.reason, walked: list.count - carried, total: list.count, files: plan.files,
-                          base: plan.seedSnapshot.map { String($0.commit.prefix(7)) })
+                          base: plan.seedSnapshot.map { String($0.commit.prefix(7)) }, why: plan.reasons.isEmpty ? nil : plan.reasons)
     }
 
     /// Kills the walk's processes and removes its clone (app quit).
@@ -1044,7 +1075,13 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     /// The key of the app's kept sign-in: one for a repository, whatever the worktree.
     func signInKey(_ worktree: String) -> String? {
-        controller?.sessions.first { $0.worktree.path == worktree }.map { SignIns.key(workspace: $0.workspace) }
+        guard let c = controller else { return nil }
+        if let s = c.sessions.first(where: { $0.worktree.path == worktree }) { return SignIns.key(workspace: s.workspace) }
+        // Main's walks (owned by the trunk's path) and a pull request row's ("pr:ID") are of the same app as the
+        // repository's sessions, and must be walked the same way to be compared with them.
+        if let ws = c.workspaces.first(where: { c.mainBuilds.trunk(of: $0.root).path == worktree }) { return SignIns.key(workspace: ws.root) }
+        if worktree.hasPrefix("pr:"), let p = c.pulls.all.first(where: { "pr:" + $0.id == worktree }) { return SignIns.key(workspace: URL(fileURLWithPath: p.workspace)) }
+        return nil
     }
     func keptSignIn(_ worktree: String) -> SignIns.Record? { SignIns.shared.record(signInKey(worktree)) }
 

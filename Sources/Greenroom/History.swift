@@ -261,29 +261,36 @@ enum History {
         /// Why the walk is full, in words; nil for a full walk the engine gives no choice about (as before I1).
         var reason: String?
         var recordDeps = false
+        /// Why each screen of `ids` is walked again, in words ("SettingsFragment.kt changed").
+        var reasons: [String: [String]] = [:]
+        /// `--diff-seed`: the engine compares the walk with its seed and keeps its instances parked on the screens it
+        /// walks (apksim 0.62.0). `diffControls` is its `--diff-controls`: "changed" taps only the controls the seed
+        /// does not have, and is chosen only when no source file changed (a changed handler would not be tried).
+        var diffSeed = false
+        var diffControls = "all"
+        /// The baseline was walked by another engine (its version): the map is kept, and the screens this walk carries
+        /// are verified once it is filed. A screen the new engine reads differently then starts a full walk.
+        var engineChanged: String?
         /// Fetching teammates' maps before looking for the baseline went wrong, in words.
         var shareProblem: String?
         var isFull: Bool { seed == nil }
     }
 
     /// Decides how to walk `build`: seeded when the engine can, the build has a commit with a stored baseline that
-    /// recorded its dependencies, it is not the tenth walk of main, and `MapImpact` says only some screens. The seed's
+    /// recorded its dependencies, and `MapImpact` says only some screens. The seed's
     /// folder and only-file are written into `folder`. Off the main thread.
     static func plan(build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String, support: CrawlRun.Support,
-                     forceFull: Bool, folder: URL) async -> WalkPlan {
+                     forceFull: Bool, fullReason: String? = nil, folder: URL) async -> WalkPlan {
         var plan = WalkPlan(recordDeps: support.recordDeps)
         guard support.seed, support.recordDeps else { return plan }
         guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return plan }
-        if forceFull { plan.reason = "asked to walk everything again"; return plan }
-        // Every tenth walk of a commit on main is full, whatever the impact says.
+        if forceFull { plan.reason = fullReason ?? "asked to walk everything again"; return plan }
+        // A commit on main is walked like any other: where its changes reach. (Every tenth used to be walked in full
+        // to audit the quick ones; a full walk is now the first of a project, or one the person asks for.)
         let ref = p.workspace.baseRef
         var onMain = false
         for r in [ref, ref.hasPrefix("origin/") ? String(ref.dropFirst(7)) : nil].compactMap({ $0 }) where !onMain {
             onMain = await Git.run(["merge-base", "--is-ancestor", p.commit, r], in: p.workspace.root) != nil
-        }
-        if onMain {
-            let n = p.store.updateLedger { l -> Int in l.mainWalks[profile.id, default: 0] += 1; return l.mainWalks[profile.id]! }
-            if n % MapImpact.fullEvery == 0 { plan.reason = "every \(MapImpact.fullEvery)th walk of main is a full walk"; return plan }
         }
         let shared = await sharedBaseline(place: p, profile: profile)
         plan.shareProblem = shared.problem
@@ -299,7 +306,7 @@ enum History {
                                     fullWalkPatterns: p.store.ledger.patterns)
         switch MapImpact.decide(input) {
         case .full(let why): plan.reason = why
-        case .screens(let ids, _):
+        case .screens(let ids, let reasons):
             let seed = folder.appendingPathComponent("seed", isDirectory: true), only = folder.appendingPathComponent("only.txt")
             guard p.store.writeSeed(base.snapshot, to: seed),
                   (try? Data((ids.joined(separator: "\n") + (ids.isEmpty ? "" : "\n")).utf8).write(to: only, options: .atomic)) != nil else {
@@ -311,6 +318,13 @@ enum History {
             plan.seedSnapshot = base.snapshot
             plan.ids = ids
             plan.total = base.snapshot.screens.count
+            plan.reasons = reasons
+            if base.snapshot.engine != engine, ids.count < base.snapshot.screens.count { plan.engineChanged = base.snapshot.engine }
+            plan.diffSeed = support.diffSeed
+            // Resources say exactly which screens show them; code may also change where a control leads.
+            let codeChanged = diff.changes.contains { if case .source = MapImpact.kind(of: $0.path) { return true } else { return false } }
+            let allKnown = ids.allSatisfy { base.snapshot.screen($0)?.actions != nil }
+            plan.diffControls = !onMain && !codeChanged && allKnown ? "changed" : "all"
         }
         return plan
     }
