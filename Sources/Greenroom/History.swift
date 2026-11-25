@@ -261,6 +261,9 @@ enum History {
         /// Why the walk is full, in words; nil for a full walk the engine gives no choice about (as before I1).
         var reason: String?
         var recordDeps = false
+        /// Changes that could not be traced to screens, in words ("app start changed (App.kt)"): the screens they
+        /// reach were not walked again, so the comparison may be missing them. Only for a branch's build.
+        var unplaced: [String] = []
         /// Why each screen of `ids` is walked again, in words ("SettingsFragment.kt changed").
         var reasons: [String: [String]] = [:]
         /// `--diff-seed`: the engine compares the walk with its seed and keeps its instances parked on the screens it
@@ -304,8 +307,13 @@ enum History {
         plan.files = diff.changes.count
         let input = MapImpact.Input(baseline: base.snapshot, changes: diff.changes, valueDiff: diff.valueDiff, engine: engine, profile: profile,
                                     fullWalkPatterns: p.store.ledger.patterns)
-        switch MapImpact.decide(input) {
-        case .full(let why): plan.reason = why
+        // A branch's build is not walked in full for a file that cannot be traced to screens: what can be traced is
+        // walked and the rest is said. Main's builds keep the strict rules (their map is what the others start from).
+        let decision: MapImpact.Decision
+        if onMain { decision = MapImpact.decide(input) }
+        else { let l = MapImpact.decideLenient(input); decision = l.decision; plan.unplaced = l.unplaced }
+        switch decision {
+        case .full(let why): plan.reason = why; plan.unplaced = []
         case .screens(let ids, let reasons):
             let seed = folder.appendingPathComponent("seed", isDirectory: true), only = folder.appendingPathComponent("only.txt")
             guard p.store.writeSeed(base.snapshot, to: seed),

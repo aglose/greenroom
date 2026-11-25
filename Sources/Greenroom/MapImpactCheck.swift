@@ -264,6 +264,18 @@ enum MapImpactCheck {
         expect(full(decide(c1, baseline: unreliable))?.contains("cannot be trusted (probes lost)") == true, "a baseline whose deps cannot be trusted walks everything")
         var older = snap0; older.engine = "e0"
         expect(screens(decide(c1, baseline: older)) == screens(kotlin), "a baseline walked by another engine is kept: the same 2 screens are walked")
+        // A branch's build: what cannot be traced is named, what can is walked.
+        func lenient(_ changes: [MapImpact.FileChange]) -> (decision: MapImpact.Decision, unplaced: [String]) {
+            MapImpact.decideLenient(MapImpact.Input(baseline: snap0, changes: changes, engine: "e1", profile: profile))
+        }
+        let kotlinFile = "app/src/main/java/com/example/trips/TripsActivity.kt"
+        let mixed = lenient([.init(status: "M", path: "app/build.gradle.kts"), .init(status: "M", path: kotlinFile)])
+        expect(screens(mixed.decision) == screens(kotlin) && mixed.unplaced.count == 1 && full(decide(gradle)) != nil,
+               "for a branch, a build file beside a Kotlin change walks the Kotlin file's 2 screens and names the build file (\(mixed.unplaced.joined(separator: "; ")))")
+        let onlyGradle = lenient([.init(status: "M", path: "app/build.gradle.kts")])
+        expect(screens(onlyGradle.decision) == [] && onlyGradle.unplaced.count == 1, "a build file alone walks no screen and is named")
+        expect(full(MapImpact.decideLenient(MapImpact.Input(baseline: noDeps, changes: [.init(status: "M", path: kotlinFile)], engine: "e1", profile: profile)).decision) != nil,
+               "a baseline with no deps is still a full walk for a branch")
         var otherProfile = snap0; otherProfile.profile.depth = 5
         expect(full(decide(c1, baseline: otherProfile)) == "the walk's settings changed", "another profile walks everything")
         expect(full(decide(c1, patterns: [src])) == "a file under \(src) changed, where a quick walk missed a change before", "a workspace full-walk pattern is honoured")

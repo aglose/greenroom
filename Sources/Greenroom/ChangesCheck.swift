@@ -313,6 +313,102 @@ enum ChangesCheck {
                 expect(reset, "reopening after a rebuild drops the old comparison and compares the new build (\(sheet.stateTitleText))")
             } else { expect(false, "a third build could be filed") }
 
+            // Against the base branch: held back until the project has a map of it, then answered from that map with
+            // only the screens this branch's files reach walked. Main's map is made here by walking the same app once
+            // and writing a text into one screen of it that the branch's build does not have.
+            fromMain: do {
+                guard let python = SnapshotRun.python() else { expect(false, "Python 3 is there for the base branch's walk"); break fromMain }
+                let support = await Task.detached { CrawlRun.support(python: python) }.value
+                guard support.seed, support.recordDeps else { say("skipped: this engine's crawler cannot start from an earlier walk"); break fromMain }
+                let before = ev.started
+                guard let s0 = row() else { expect(false, "the row is there"); break fromMain }
+                sheet.open(session: s0, compare: false)
+                sheet.compare(base: .baseBranch)
+                let held = await wait("the comparison to be held", 30) { sheet.stateTitleText.contains("has not been walked yet") }
+                expect(held && sheet.changeSet == nil && ev.started == before && sheet.run?.isActive == false,
+                       "with no map of main the comparison is held and nothing is walked (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(90)))")
+                shot("7-held.png")
+
+                // Main's one walk: the whole app (a walk cut at a depth leaves its last screens with no record of what
+                // they depend on, and those are walked again every time). A build of its own: `vb` is filed with no commit.
+                ev.budget = Evidence.Budget(depth: 0, seconds: 300, jobs: 2)
+                guard let vm = variant() else { expect(false, "main's build is made"); break fromMain }
+                let mainWalk = base.appendingPathComponent("main-walk", isDirectory: true)
+                var cs = CrawlRun.Settings()
+                cs.depth = ev.budget.depth; cs.seconds = ev.budget.seconds; cs.jobs = 2; cs.appearances = ["light"]; cs.recordDeps = true
+                cs.engineOptions = ["--data-slots", SlotClone.freshName(prefix: "evg")]
+                let crawl = CrawlRun(python: python, apk: vm, out: mainWalk, settings: cs)
+                var outcome: CrawlRun.Outcome?
+                crawl.onFinish = { outcome = $0 }
+                let t0 = Date()
+                crawl.start()
+                _ = await wait("main's walk", 600) { outcome != nil }
+                let fullSeconds = Date().timeIntervalSince(t0)
+                guard case .finished? = outcome, let data = try? Data(contentsOf: mainWalk.appendingPathComponent("crawl.json")),
+                      var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], var list = json["screens"] as? [[String: Any]] else {
+                    expect(false, "main's walk finished"); break fromMain
+                }
+                let startSources = Set(((json["start_deps"] as? [String: Any])?["sources"] as? [String]) ?? [])
+                func sources(_ sc: [String: Any]) -> [String] { ((sc["deps"] as? [String: Any])?["sources"] as? [String]) ?? [] }
+                var uses: [String: Int] = [:]
+                for sc in list { for f in sources(sc) where !startSources.contains(f) { uses[f, default: 0] += 1 } }
+                // The file on the fewest screens: those are the ones the branch's walk must redo.
+                guard let file = uses.sorted(by: { ($0.value, $0.key) < ($1.value, $1.key) }).first?.key, let at = list.firstIndex(where: { sources($0).contains(file) }) else {
+                    say("skipped: no source file of the test app is outside app start"); break fromMain
+                }
+                let reached = uses[file] ?? 1
+                let target = (list[at]["id"] as? String) ?? "", targetTitle = (list[at]["title"] as? String) ?? ""
+                list[at]["texts"] = ((list[at]["texts"] as? [String]) ?? []) + ["Only on main"]
+                json["screens"] = list
+                try? JSONSerialization.data(withJSONObject: json).write(to: mainWalk.appendingPathComponent("crawl.json"))
+                let profile = ev.walkProfiles(worktree: s0.worktree.path, withData: false)[0]
+                guard let mainBuild = store.record(apk: vm, source: .local, sha: firstSha, ref: "main", dirty: false, date: Date()) else { expect(false, "main's build is filed"); break fromMain }
+                let root = ev.store.root, engine = Engine.shared.version, spaces = sessions.workspaces
+                let filed = await Task.detached { await History.filed(walk: mainWalk, build: mainBuild, profile: profile, candidates: spaces, stateRoot: root, engine: engine) }.value
+                expect(filed != nil, "main's walk (\(list.count) screens, \(Int(fullSeconds)) s) is the project's map of main")
+
+                // The branch changes the one file that screen depends on, and is built again.
+                let changedFile = wt.appendingPathComponent("app/src/main/java/" + file)
+                try? fm.createDirectory(at: changedFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? "// changed\n".write(to: changedFile, atomically: true, encoding: .utf8)
+                _ = git(["add", "."], in: wt); _ = git(["commit", "-q", "-m", "third"], in: wt)
+                guard let sha3 = git(["rev-parse", "HEAD"], in: wt)?.trimmingCharacters(in: .whitespacesAndNewlines), let v4 = variant(),
+                      let b4 = store.record(apk: v4, source: .local, sha: sha3, ref: "feature", dirty: false, date: Date().addingTimeInterval(10)) else {
+                    expect(false, "the branch's new build is filed"); break fromMain
+                }
+                sessions.adopt(b4, forWorktree: s0.worktree.path)
+                guard let s1 = row() else { break fromMain }
+                sheet.open(session: s1, compare: false)
+                let t1 = Date()
+                sheet.compare(base: .baseBranch)
+                let done = await wait("the comparison with main's map", 400) { sheet.changeSet != nil || sheet.stateTitleText.contains("Could not") }
+                let quickSeconds = Date().timeIntervalSince(t1)
+                guard done, let set = sheet.changeSet else { expect(false, "the comparison with main's map finished (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(160)))"); break fromMain }
+                let note = ev.entry(of: s1.worktree.path)?.impact
+                let noRecord = list.filter { $0["deps"] == nil }.count
+                expect(note?.full == false && (note?.walked ?? 0) >= reached && (note?.walked ?? 99) <= reached + noRecord && (note?.walked ?? 99) < list.count && note?.total == list.count,
+                       "the branch's walk walked the \(reached) screen(s) \((file as NSString).lastPathComponent) is on and at most the \(noRecord) main's walk has no record for, of \(list.count) (\(note.map { "\($0.walked) of \($0.total)\($0.full ? ", full: " + ($0.reason ?? "") : "")" } ?? "no note")), \(String(format: "%.1f", quickSeconds)) s against \(Int(fullSeconds)) s for main's")
+                // The screens the file is on were walked again; the app's own noise may make more of them differ than
+                // the one written into, but nothing that was carried can.
+                let differing = set.differing
+                let onFile = Set(list.filter { sources($0).contains(file) }.compactMap { $0["id"] as? String })
+                let mine = differing.first { $0.baseID == target }
+                // A carried screen can differ only in where a control leads: one of its controls led to a screen that was
+                // walked again and is now read as another (the test app's Bind does that from run to run).
+                expect(mine?.status == .changed && differing.allSatisfy { c in c.baseID.map(onFile.contains) ?? true || set.change(of: c)?.reasons == [.routes] },
+                       "the screen written into differs, and a carried screen only in where a control leads (\(differing.map { "\($0.title) \($0.status.word) \($0.baseID ?? "-")" }.joined(separator: ", ")); expected \(targetTitle) \(target); the file is on \(onFile.sorted().joined(separator: " ")))")
+                expect(set.baseline?.contains("main at " + String(firstSha.prefix(7))) == true, "the header says what it was compared with: \(set.baseline ?? "nothing")")
+                sheet.selectTab(.screens)
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                expect(sheet.groupTitles.contains("Changed \(differing.filter { $0.status == .changed }.count)"), "the Screens tab groups them: \(sheet.groupTitles.joined(separator: ", "))")
+                if let mine { sheet.selectScreen(mine.id) }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                let notes = sheet.detailNotesText
+                expect(notes.contains("Only on main") && notes.contains("Walked again because") && notes.contains((file as NSString).lastPathComponent),
+                       "its detail says what changed and why it was walked: \(notes.replacingOccurrences(of: "\n", with: " | "))")
+                shot("8-from-main.png")
+            }
+
             let lastLogs = await wait("the last tour's logs to go", 20) { ((try? fm.contentsOfDirectory(atPath: Engine.shared.logs.path)) ?? []).allSatisfy { !$0.hasPrefix("tour-") } }
             expect(lastLogs, "the last tour's logs are gone too, so none is left for the next run")
             let leftovers = hidden()
