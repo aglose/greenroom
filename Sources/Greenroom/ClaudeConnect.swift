@@ -264,56 +264,119 @@ enum ClaudeConnect {
     }
 }
 
-/// Settings > Claude Code, "Connect Claude Code": the command, a button, and what happened.
+/// Settings > Agents, "Connect Claude Code": status badge, action button, and copyable MCP or Plugin setup.
 struct ClaudeConnectView: View {
+    var onStatusChange: ((ClaudeConnect.State) -> Void)? = nil
+
     @State private var state: ClaudeConnect.State?
     @State private var busy = false
     @State private var message: String?
     @State private var failed = false
+    @State private var method = 0   // 0: Direct MCP, 1: Claude Plugin
 
     private var connected: Bool { state == .connected }
     private var otherCopy: Bool { if case .otherCopy = state { return true }; return false }
 
+    private var statusColor: Color {
+        if connected { return SettingsTheme.accent }
+        if otherCopy { return SettingsTheme.warning }
+        return SettingsTheme.mute
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(connected ? "Claude Code is connected to Greenroom" : (otherCopy ? "Claude Code is connected to another copy of Greenroom" : "Give Claude Code these simulators"))
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 9, height: 9)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Claude Code")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(SettingsTheme.ink)
+                    Text(connected ? "Connected as MCP server \(ClaudeConnect.serverName)" : (otherCopy ? "Connected to another copy of Greenroom" : "Give Claude Code access to these simulators"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(connected ? SettingsTheme.accent : SettingsTheme.mute)
+                }
                 Spacer()
                 if otherCopy {
-                    Button("Reconnect") { act { ClaudeConnect.reconnect() } }.disabled(busy)
+                    actionButton("Reconnect", accent: true) { act { ClaudeConnect.reconnect() } }
                 } else if connected {
-                    Button("Disconnect") { act { ClaudeConnect.disconnect() } }.disabled(busy)
+                    actionButton("Disconnect", accent: false) { act { ClaudeConnect.disconnect() } }
                 } else {
-                    Button("Connect Claude Code") { act { ClaudeConnect.connect() } }.disabled(busy || state == .missing)
+                    actionButton("Connect", accent: true) { act { ClaudeConnect.connect() } }
+                        .disabled(busy || state == .missing)
                 }
             }
-            Text(ClaudeConnect.displayCommand())
-                .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                .foregroundStyle(.secondary)
+
+            // Segmented method switcher (Direct MCP vs Plugin)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    HStack(spacing: 2) {
+                        methodTab("Direct MCP", index: 0)
+                        methodTab("Claude Plugin (/verify)", index: 1)
+                    }
+                    .padding(2)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(SettingsTheme.wellFill))
+                    Spacer()
+                    Text("Use one or the other")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SettingsTheme.mute)
+                }
+
+                if method == 0 {
+                    SettingsCopyChip(text: ClaudeConnect.displayCommand())
+                    Text("Runs via your login shell\u{2019}s claude CLI to register only Greenroom\u{2019}s MCP server.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SettingsTheme.mute)
+                } else {
+                    SettingsCopyChip(text: ClaudeConnect.pluginMarketplaceCommand + "\n" + ClaudeConnect.pluginInstallCommand)
+                    Text("Type inside Claude Code for the same simulators plus the /greenroom:verify skill.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SettingsTheme.mute)
+                }
+            }
+
             if state == .missing {
-                Text(ClaudeConnect.missingMessage).font(.caption).foregroundStyle(.secondary)
+                Text(ClaudeConnect.missingMessage)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(SettingsTheme.warning)
             }
             if let message {
-                Text(message).font(.caption).foregroundStyle(failed ? .red : .secondary).textSelection(.enabled)
+                Text(message)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(failed ? SettingsTheme.record : SettingsTheme.accent)
+                    .textSelection(.enabled)
             }
-            Text("Runs the command above with your own claude program, from your login shell\u{2019}s PATH. It changes only Claude Code\u{2019}s own list of servers; \"Disconnect\" removes it again.")
-                .font(.caption).foregroundStyle(.secondary)
-            Divider().padding(.vertical, 2)
-            Text("Or install the Greenroom plugin: the same simulators, and a skill that teaches Claude Code to verify a change with them (/greenroom:verify). Type these inside Claude Code:")
-                .font(.caption).foregroundStyle(.secondary)
-            Text(ClaudeConnect.pluginMarketplaceCommand + "\n" + ClaudeConnect.pluginInstallCommand)
-                .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                .foregroundStyle(.secondary)
-            Text("The plugin starts the Greenroom installed on this Mac (Applications first, then the copy Spotlight finds). Use one or the other: with both, Claude Code lists the simulators\u{2019} tools twice. The state above is about Connect only.")
-                .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear { look() }
+    }
+
+    private func methodTab(_ title: String, index: Int) -> some View {
+        Button(title) { method = index }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(method == index ? SettingsTheme.ink : SettingsTheme.mute)
+            .padding(.horizontal, 8).padding(.vertical, 3.5)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(method == index ? Color.white.opacity(0.14) : Color.clear))
+    }
+
+    private func actionButton(_ title: String, accent: Bool, action: @escaping () -> Void) -> some View {
+        Button(busy ? "Working…" : title, action: action)
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(accent ? SettingsTheme.onAccent : SettingsTheme.ink)
+            .padding(.horizontal, 11).padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(accent ? SettingsTheme.accent : Color.white.opacity(0.09)))
     }
 
     private func look() {
         DispatchQueue.global(qos: .userInitiated).async {
             let s = ClaudeConnect.status()
-            DispatchQueue.main.async { state = s }
+            DispatchQueue.main.async {
+                state = s
+                onStatusChange?(s)
+            }
         }
     }
 

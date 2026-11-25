@@ -118,41 +118,10 @@ extension SessionsController {
 
     // MARK: Settings
 
-    /// The CI artifact, APK pattern and workflow, and the remote sandbox and template, of a session's workspace.
+    /// Opens Settings directly to the Build Recipes tab for this session's workspace.
     func showBuildSettings(for session: Session) {
-        guard let window = workbench?.window, let ws = workspace(of: session) else { return }
-        let alert = NSAlert()
-        alert.messageText = "Build settings for \(ws.root.lastPathComponent)"
-        alert.informativeText = "Read by the ci and remote recipes. Empty means: for CI, the only artifact with an APK, matching *.apk, and no workflow is started; for remote, nothing."
-        let labels = ["CI artifact", "CI APK pattern", "CI workflow", "Remote sandbox id", "Remote template"]
-        let values = [ws.ci.artifact, ws.ci.apk, ws.ci.workflow, ws.remote.sandbox, ws.remote.template]
-        let hints = ["name of the artifact", "*.apk", "ci.yml (needs workflow_dispatch)", "an existing sandbox, resumed and stopped each build", "a snapshot to create one from"]
-        let fields = zip(values, hints).map { v, h -> NSTextField in
-            let f = NSTextField(string: v); f.placeholderString = h; f.frame.size = NSSize(width: 300, height: 22); return f
-        }
-        let rows = zip(labels, fields).map { l, f -> NSStackView in
-            let label = NSTextField(labelWithString: l); label.alignment = .right
-            label.widthAnchor.constraint(equalToConstant: 120).isActive = true
-            let row = NSStackView(views: [label, f]); row.spacing = 8; return row
-        }
-        let stack = NSStackView(views: rows)
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.frame = NSRect(x: 0, y: 0, width: 440, height: CGFloat(rows.count) * 28)
-        alert.accessoryView = stack
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak self] r in
-            guard r == .alertFirstButtonReturn, let self, let i = self.workspaces.firstIndex(where: { $0.root.path == ws.root.path }) else { return }
-            let t = fields.map { $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
-            self.workspaces[i].ci.artifact = t[0]
-            self.workspaces[i].ci.apk = t[1]
-            self.workspaces[i].ci.workflow = t[2]
-            self.workspaces[i].remote.sandbox = t[3]
-            self.workspaces[i].remote.template = t[4]
-            self.store.saveWorkspaces(self.workspaces)
-        }
+        guard let ws = workspace(of: session) else { return }
+        SettingsWindow.shared.show(tab: .recipes, workspacePath: ws.root.path)
     }
 
     // MARK: Menu and palette

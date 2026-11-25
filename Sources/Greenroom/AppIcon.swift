@@ -74,7 +74,16 @@ struct AppIconSection: View {
     @State private var selected = AppIcon.current
 
     var body: some View {
-        Section("App Icon") {
+        SettingsCard {
+            HStack {
+                Text("App Icon")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(SettingsTheme.ink)
+                Spacer()
+                Text("Shown in Dock & App Switcher")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(SettingsTheme.mute)
+            }
             HStack(spacing: 12) {
                 ForEach(AppIconStyle.allCases) { style in
                     let isSelected = selected == style
@@ -82,32 +91,41 @@ struct AppIconSection: View {
                         selected = style
                         AppIcon.current = style
                     } label: {
-                        VStack(spacing: 6) {
-                            if let img = AppIcon.image(for: style) {
-                                Image(nsImage: img)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .frame(width: 64, height: 64)
-                            } else {
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(.quaternary)
-                                    .frame(width: 54, height: 54)
-                                    .padding(5)
+                        VStack(spacing: 8) {
+                            ZStack(alignment: .topTrailing) {
+                                if let img = AppIcon.image(for: style) {
+                                    Image(nsImage: img)
+                                        .resizable()
+                                        .interpolation(.high)
+                                        .frame(width: 60, height: 60)
+                                } else {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(Color.white.opacity(0.08))
+                                        .frame(width: 52, height: 52)
+                                        .padding(4)
+                                }
+                                if isSelected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 15, weight: .bold))
+                                        .foregroundStyle(SettingsTheme.accent)
+                                        .background(Circle().fill(SettingsTheme.stage).padding(2))
+                                        .offset(x: 4, y: -4)
+                                }
                             }
                             Text(style.title)
-                                .font(.caption.weight(isSelected ? .semibold : .regular))
-                                .foregroundStyle(isSelected ? .primary : .secondary)
+                                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                                .foregroundStyle(isSelected ? SettingsTheme.ink : SettingsTheme.mute)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                         .padding(.horizontal, 8)
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+                                .fill(isSelected ? SettingsTheme.accent.opacity(0.12) : Color.white.opacity(0.025))
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.08),
+                                .strokeBorder(isSelected ? SettingsTheme.accent : SettingsTheme.stroke,
                                               lineWidth: isSelected ? 1.5 : 1)
                         )
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -116,9 +134,6 @@ struct AppIconSection: View {
                     .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
-            Text("Studio Bay is the default. An alternate icon appears in the Dock and App Switcher while Greenroom is running.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .onReceive(NotificationCenter.default.publisher(for: AppIcon.didChangeNotification)) { _ in
             selected = AppIcon.current

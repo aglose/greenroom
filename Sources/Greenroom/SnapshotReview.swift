@@ -205,14 +205,14 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
     // Views.
     private let dim = NSView()
     private let panel = GlassView(radius: 18)
-    private let specLabel = NSTextField(labelWithString: "")
-    private let apkLabel = NSTextField(labelWithString: "")
-    private let goldensLabel = NSTextField(labelWithString: "")
+    private let specButton = GlassButton(symbol: "doc.text", title: "Spec: None", label: "Choose the spec.json that lists the screens", style: .well, target: nil, action: nil)
+    private let apkButton = GlassButton(symbol: "app.dashed", title: "APK: Active", label: "Choose the APK to test", style: .well, target: nil, action: nil)
+    private let goldensButton = GlassButton(symbol: "folder", title: "Goldens: Beside spec", label: "Choose the folder of golden images", style: .well, target: nil, action: nil)
     private let runButton = GlassButton(symbol: "play.fill", title: "Run", label: "Run the screenshot tests", style: .accent, target: nil, action: nil)
     private let recordButton = GlassButton(symbol: "record.circle", title: "Record goldens", label: "Capture every screen and keep it as the golden", style: .well, target: nil, action: nil)
     private let progress = NSProgressIndicator()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
-    private let filterControl = NSSegmentedControl(labels: ["All", "Different", "New", "Errors"], trackingMode: .selectOne, target: nil, action: nil)
+    private var filterButtons: [GlassButton] = []
     private let acceptDifferent = GlassButton(symbol: "checkmark.circle", title: "Accept all different", label: "Keep every different capture as its golden", style: .well, target: nil, action: nil)
     private let acceptNew = GlassButton(symbol: "plus.circle", title: "Accept all new", label: "Keep every new capture as its golden", style: .well, target: nil, action: nil)
     private let collection = NSCollectionView()
@@ -220,9 +220,10 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
     // Detail.
     private let detailTitle = NSTextField(labelWithString: "")
     private let detailStatus = NSTextField(wrappingLabelWithString: "")
-    private let modeControl = NSSegmentedControl(labels: ["Side by side", "Wipe"], trackingMode: .selectOne, target: nil, action: nil)
+    private var modeButtons: [GlassButton] = []
+    private var compareMode = 0   // 0: side by side, 1: wipe, 2: diff solo
     private let acceptButton = GlassButton(symbol: "checkmark", title: "Accept as golden", label: "Copy this capture over its golden", style: .accent, target: nil, action: nil)
-    private let goldenPane = SnapshotPicture(), actualPane = SnapshotPicture(), diffPane = SnapshotPicture()
+    private let goldenPane = SnapshotPicture(), actualPane = SnapshotPicture(), diffPane = SnapshotPicture(), diffSoloPane = SnapshotPicture()
     private let wipe = SnapshotWipe()
     private let wipeSlider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
     private var sideBySide = NSStackView()
@@ -265,62 +266,56 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
             panel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28), panel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
         ])
 
-        // Header.
-        let title = label("Screenshot tests", size: 15, weight: .semibold, color: Design.ink)
-        let close = GlassButton(symbol: "xmark", label: "Close (Esc)", target: self, action: #selector(closePressed))
-        let hspacer = NSView(); hspacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let header = NSStackView(views: [title, hspacer, close])
-
-        // Setup: the spec, the APK, the goldens.
-        func setupRow(_ name: String, _ value: NSTextField, _ choose: Selector, _ tip: String) -> NSStackView {
-            let n = label(name)
-            n.widthAnchor.constraint(equalToConstant: 58).isActive = true
-            value.font = .systemFont(ofSize: 12, weight: .medium)
-            value.textColor = Design.ink
-            value.lineBreakMode = .byTruncatingMiddle
-            value.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-            let b = GlassButton(symbol: nil, title: "Choose…", label: tip, style: .well, target: self, action: choose)
-            return NSStackView(views: [n, value, b])
+        // Header: title + compact 1-line configuration pills + Run / Record + close.
+        let title = label("Screenshot Tests", size: 15, weight: .semibold, color: Design.ink)
+        specButton.target = self; specButton.action = #selector(chooseSpec)
+        apkButton.target = self; apkButton.action = #selector(chooseAPK)
+        goldensButton.target = self; goldensButton.action = #selector(chooseGoldens)
+        for b in [specButton, apkButton, goldensButton] {
+            b.font = .systemFont(ofSize: 12, weight: .medium)
+            b.widthAnchor.constraint(lessThanOrEqualToConstant: 210).isActive = true
         }
-        let specRow = setupRow("Spec", specLabel, #selector(chooseSpec), "Choose the spec.json that lists the screens")
-        let apkRow = setupRow("APK", apkLabel, #selector(chooseAPK), "Choose the APK to test")
-        let goldRow = setupRow("Goldens", goldensLabel, #selector(chooseGoldens), "Choose the folder of golden images")
-        for r in [specRow, apkRow, goldRow] { r.spacing = 8 }
-        let setup = NSStackView(views: [specRow, apkRow, goldRow])
-        setup.orientation = .vertical
-        setup.alignment = .leading
-        setup.spacing = 4
-        for r in [specRow, apkRow, goldRow] { r.trailingAnchor.constraint(equalTo: setup.trailingAnchor).isActive = true }
-
         runButton.target = self; runButton.action = #selector(runPressed)
         recordButton.target = self; recordButton.action = #selector(recordPressed)
-        let buttons = NSStackView(views: [runButton, recordButton])
-        buttons.orientation = .vertical
-        buttons.alignment = .trailing
-        buttons.spacing = 6
-        let top = NSStackView(views: [setup, buttons])
-        top.spacing = 18
-        top.alignment = .centerY
+        let close = GlassButton(symbol: "xmark", label: "Close (Esc)", target: self, action: #selector(closePressed))
+        let hspacer = NSView(); hspacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let header = NSStackView(views: [title, specButton, apkButton, goldensButton, hspacer, recordButton, runButton, close])
+        header.alignment = .centerY
+        header.spacing = 8
 
-        // Progress and filter.
+        // Progress and color-coded pill filter chips.
         progress.style = .bar
         progress.isIndeterminate = false
         progress.controlSize = .small
         progress.minValue = 0; progress.maxValue = 1
         progress.isHidden = true
-        progress.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        progress.widthAnchor.constraint(equalToConstant: 180).isActive = true
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = Design.mute
-        statusLabel.maximumNumberOfLines = 2
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        filterControl.selectedSegment = 0
-        filterControl.target = self; filterControl.action = #selector(filterChanged)
-        filterControl.controlSize = .small
+
+        let filterTitles = ["All", "Different", "New", "Errors"]
+        filterButtons = filterTitles.enumerated().map { idx, t in
+            let b = GlassButton(symbol: nil, title: t, label: "Filter: \(t)", style: .well, target: self, action: #selector(filterPicked(_:)))
+            b.tag = idx
+            b.font = .systemFont(ofSize: 11.5, weight: .medium)
+            b.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            b.layer?.cornerRadius = 12
+            return b
+        }
+        filterButtons[0].isOn = true
+        let filterRow = NSStackView(views: filterButtons)
+        filterRow.spacing = 5
+        filterRow.alignment = .centerY
+
         acceptDifferent.target = self; acceptDifferent.action = #selector(acceptAllDifferent)
         acceptNew.target = self; acceptNew.action = #selector(acceptAllNew)
         acceptDifferent.isHidden = true; acceptNew.isHidden = true
         let spacer2 = NSView(); spacer2.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [progress, statusLabel, spacer2, filterControl, acceptNew, acceptDifferent])
+        let bar = NSStackView(views: [filterRow, progress, statusLabel, spacer2, acceptNew, acceptDifferent])
+        bar.alignment = .centerY
         bar.spacing = 10
 
         // Grid.
@@ -364,13 +359,25 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         detailStatus.font = .systemFont(ofSize: 12)
         detailStatus.textColor = Design.mute
         detailStatus.maximumNumberOfLines = 2
-        modeControl.selectedSegment = 0
-        modeControl.target = self; modeControl.action = #selector(modeChanged)
-        modeControl.controlSize = .small
+
+        modeButtons = ["Side by side", "Wipe", "Diff"].enumerated().map { idx, text in
+            let b = GlassButton(symbol: nil, title: text, label: "Comparison view: \(text)", style: .well, target: self, action: #selector(modePicked(_:)))
+            b.tag = idx
+            b.font = .systemFont(ofSize: 11.5, weight: .medium)
+            b.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            b.layer?.cornerRadius = 8
+            return b
+        }
+        modeButtons[0].isOn = true
+        let modeRow = NSStackView(views: modeButtons)
+        modeRow.spacing = 4
+
+        let hint = label("↑↓ navigate · W wipe · A accept", size: 11, color: Design.mute.withAlphaComponent(0.75))
         acceptButton.target = self; acceptButton.action = #selector(acceptSelected)
         acceptButton.isHidden = true
         let dspacer = NSView(); dspacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let dhead = NSStackView(views: [detailTitle, dspacer, modeControl, acceptButton])
+        let dhead = NSStackView(views: [detailTitle, dspacer, hint, modeRow, acceptButton])
+        dhead.alignment = .centerY
         dhead.spacing = 10
 
         func column(_ name: String, _ pane: SnapshotPicture) -> NSStackView {
@@ -399,8 +406,9 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         wipeBar.leadingAnchor.constraint(equalTo: wipeBox.leadingAnchor).isActive = true
         wipeBar.trailingAnchor.constraint(equalTo: wipeBox.trailingAnchor).isActive = true
         wipe.widthAnchor.constraint(equalTo: wipeBox.widthAnchor).isActive = true
+        diffSoloPane.isHidden = true
         detailBody.translatesAutoresizingMaskIntoConstraints = false
-        for v in [sideBySide, wipeBox] as [NSView] {
+        for v in [sideBySide, wipeBox, diffSoloPane] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             detailBody.addSubview(v)
             NSLayoutConstraint.activate([v.topAnchor.constraint(equalTo: detailBody.topAnchor), v.bottomAnchor.constraint(equalTo: detailBody.bottomAnchor),
@@ -416,6 +424,8 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         detailWell.layer?.backgroundColor = Design.well.cgColor
         detailWell.layer?.cornerRadius = 12
         detailWell.layer?.cornerCurve = .continuous
+        detailWell.layer?.borderWidth = 1
+        detailWell.layer?.borderColor = Design.stroke.cgColor
         detail.translatesAutoresizingMaskIntoConstraints = false
         detailWell.addSubview(detail)
         NSLayoutConstraint.activate([detail.topAnchor.constraint(equalTo: detailWell.topAnchor, constant: 12), detail.bottomAnchor.constraint(equalTo: detailWell.bottomAnchor, constant: -12),
@@ -427,13 +437,14 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
 
         let rule = NSView(); rule.wantsLayer = true; rule.layer?.backgroundColor = Design.stroke.cgColor
         rule.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        let column = NSStackView(views: [header, top, rule, bar, body])
+        let column = NSStackView(views: [header, rule, bar, body])
         column.orientation = .vertical
         column.spacing = 10
         column.alignment = .leading
         column.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(column)
-        for v in [header, top, rule, bar, body] as [NSView] { v.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
+        for v in [header, rule, bar, body] as [NSView] { v.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
+        body.setContentHuggingPriority(.init(1), for: .vertical)
         NSLayoutConstraint.activate([column.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), column.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -16),
                                      column.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18), column.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -18)])
     }
@@ -470,7 +481,21 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
 
     @objc private func closePressed() { close() }
     override func cancelOperation(_ sender: Any?) { close() }
-    override func keyDown(with event: NSEvent) { if event.keyCode == 53 { close() } else { super.keyDown(with: event) } }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { close(); return }
+        if event.keyCode == 125 || event.keyCode == 124 { stepSelection(1); return }
+        if event.keyCode == 126 || event.keyCode == 123 { stepSelection(-1); return }
+        if event.charactersIgnoringModifiers?.lowercased() == "w" { setMode(wipe: compareMode != 1); return }
+        if event.charactersIgnoringModifiers?.lowercased() == "a", let s = selected, s.kind == .different || s.kind == .new { accept([s.id]); return }
+        super.keyDown(with: event)
+    }
+
+    private func stepSelection(_ delta: Int) {
+        guard !shown.isEmpty else { return }
+        let cur = shown.firstIndex { $0.id == selectedID } ?? 0
+        let next = max(0, min(shown.count - 1, cur + delta))
+        select(shown[next].id, in: next)
+    }
     override func mouseDown(with event: NSEvent) { if !panel.frame.contains(convert(event.locationInWindow, from: nil)) { close() } }
 
     // MARK: Setup
@@ -507,11 +532,26 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
     private func refreshSetup() {
         if let specURL {
             let screens = (specJSON()?["screens"] as? [Any])?.count
-            specLabel.stringValue = specURL.lastPathComponent + (screens.map { "  ·  \($0) screens" } ?? "  ·  cannot read this file") + "  ·  " + tilde(specURL.deletingLastPathComponent().path)
-        } else { specLabel.stringValue = "None: pick the spec.json that lists the screens" }
-        if let apk = effectiveAPK { apkLabel.stringValue = apk.lastPathComponent + (apkURL == nil ? "  ·  the selected simulator's" : "") }
-        else { apkLabel.stringValue = specURL == nil ? "The selected simulator's, or choose one" : "The spec's own, or choose one" }
-        goldensLabel.stringValue = goldensDir.map { tilde($0.path) + (goldensExist ? "" : "  ·  no goldens yet") } ?? "Beside the spec"
+            specButton.title = specURL.lastPathComponent + (screens.map { " (\($0))" } ?? "")
+            specButton.toolTip = tilde(specURL.path)
+        } else {
+            specButton.title = "Choose spec.json…"
+            specButton.toolTip = "Choose the spec.json that lists the screens"
+        }
+        if let apk = effectiveAPK {
+            apkButton.title = apk.lastPathComponent + (apkURL == nil ? " · active" : "")
+            apkButton.toolTip = tilde(apk.path)
+        } else {
+            apkButton.title = "Choose APK…"
+            apkButton.toolTip = "Choose the APK to test"
+        }
+        if let dir = goldensDir {
+            goldensButton.title = dir.lastPathComponent + (goldensExist ? "/" : " (empty)")
+            goldensButton.toolTip = tilde(dir.path)
+        } else {
+            goldensButton.title = "Goldens: beside spec"
+            goldensButton.toolTip = "Choose the folder of golden images"
+        }
         let running = run?.isRunning == true
         let ready = specURL != nil && pythonURL != nil
         runButton.isEnabled = running || (ready && goldensExist)
@@ -627,7 +667,11 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
 
     // MARK: Grid
 
-    @objc private func filterChanged() { filter = filterControl.selectedSegment; applyFilter() }
+    @objc private func filterPicked(_ sender: GlassButton) {
+        filter = sender.tag
+        for b in filterButtons { b.isOn = b.tag == filter }
+        applyFilter()
+    }
 
     private func applyFilter() {
         switch filter {
@@ -654,10 +698,11 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         refreshBulk()
         updateEmpty()
         let c = Self.counts(results)
-        filterControl.setLabel("All \(results.count)", forSegment: 0)
-        filterControl.setLabel("Different \(c[.different] ?? 0)", forSegment: 1)
-        filterControl.setLabel("New \((c[.new] ?? 0) + (c[.recorded] ?? 0))", forSegment: 2)
-        filterControl.setLabel("Errors \(c[.error] ?? 0)", forSegment: 3)
+        let titles = ["All \(results.count)", "Different \(c[.different] ?? 0)", "New \((c[.new] ?? 0) + (c[.recorded] ?? 0))", "Errors \(c[.error] ?? 0)"]
+        for (i, t) in titles.enumerated() where filterButtons.indices.contains(i) {
+            filterButtons[i].title = t
+            filterButtons[i].isOn = filter == i
+        }
     }
 
     private func updateEmpty() {
@@ -704,7 +749,7 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
             detailTitle.stringValue = results.isEmpty ? "" : "Pick a tile"
             detailStatus.stringValue = ""
             acceptButton.isHidden = true
-            for p in [goldenPane, actualPane, diffPane] { p.show(nil, empty: "") }
+            for p in [goldenPane, actualPane, diffPane, diffSoloPane] { p.show(nil, empty: "") }
             wipe.show(golden: nil, actual: nil)
             return
         }
@@ -718,6 +763,7 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         goldenPane.show(nil, empty: noGolden ? "No golden yet" : "")
         actualPane.show(nil, empty: "")
         diffPane.show(nil, empty: "")
+        diffSoloPane.show(nil, empty: "")
         wipe.show(golden: nil, actual: nil)
         var golden: CGImage?, actual: CGImage?
         func refreshWipe() { if selectedID == id { wipe.show(golden: golden, actual: actual) } }
@@ -733,31 +779,39 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
                 actual = img; self?.actualPane.show(img, empty: ""); refreshWipe()
             }
         } else { actualPane.show(nil, empty: "No capture") }
+        func showDiff(_ img: CGImage?, empty: String) {
+            diffPane.show(img, empty: empty)
+            diffSoloPane.show(img, empty: empty)
+        }
         switch r.kind {
         case .different:
-            if let img = differences[id] { diffPane.show(img, empty: "") }
+            if let img = differences[id] { showDiff(img, empty: "") }
             else if let u = r.diff {
-                SnapshotImages.load(u, maxPixel: 1700) { [weak self] img in if self?.selectedID == id { self?.diffPane.show(img, empty: "") } }
+                SnapshotImages.load(u, maxPixel: 1700) { [weak self] img in if self?.selectedID == id { showDiff(img, empty: "") } }
             } else if let g = r.golden, let a = r.actual {
-                diffPane.show(nil, empty: "Working out the difference…")
+                showDiff(nil, empty: "Working out the difference…")
                 SnapshotImages.difference(golden: g, actual: a) { [weak self] img in
                     guard let self else { return }
                     if let img { self.differences[id] = img }
-                    if self.selectedID == id { self.diffPane.show(img, empty: "Sizes differ: no map") }
+                    if self.selectedID == id { showDiff(img, empty: "Sizes differ: no map") }
                 }
-            } else { diffPane.show(nil, empty: "No difference map") }
-        case .same, .recorded: diffPane.show(nil, empty: "No difference")
-        default: diffPane.show(nil, empty: "Nothing to compare")
+            } else { showDiff(nil, empty: "No difference map") }
+        case .same, .recorded: showDiff(nil, empty: "No difference")
+        default: showDiff(nil, empty: "Nothing to compare")
         }
     }
 
-    @objc private func modeChanged() { setMode(wipe: modeControl.selectedSegment == 1) }
+    @objc private func modePicked(_ sender: GlassButton) { setCompareMode(sender.tag) }
 
-    func setMode(wipe on: Bool) {
-        modeControl.selectedSegment = on ? 1 : 0
-        sideBySide.isHidden = on
-        wipeBox.isHidden = !on
+    func setCompareMode(_ mode: Int) {
+        compareMode = max(0, min(2, mode))
+        for b in modeButtons { b.isOn = b.tag == compareMode }
+        sideBySide.isHidden = compareMode != 0
+        wipeBox.isHidden = compareMode != 1
+        diffSoloPane.isHidden = compareMode != 2
     }
+
+    func setMode(wipe on: Bool) { setCompareMode(on ? 1 : 0) }
 
     @objc private func wipeSliderMoved() { wipe.position = CGFloat(wipeSlider.doubleValue) }
     func setWipe(_ p: CGFloat) { wipe.position = p }
@@ -828,7 +882,7 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
     /// Selects the first tile of this kind. False when there is none.
     func selectFirst(_ kind: SnapshotResult.Kind) -> Bool {
         guard let r = results.first(where: { $0.kind == kind }) else { return false }
-        if !shown.contains(where: { $0.id == r.id }) { filterControl.selectedSegment = 0; filter = 0; applyFilter() }
+        if !shown.contains(where: { $0.id == r.id }) { filter = 0; applyFilter() }
         select(r.id)
         return true
     }

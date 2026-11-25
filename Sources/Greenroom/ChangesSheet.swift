@@ -113,7 +113,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private let copyButton = GlassButton(symbol: "doc.on.doc", title: "Copy summary", label: "Copy the summary as Markdown, for a pull request", style: .well, target: nil, action: nil)
     private let exportButton = GlassButton(symbol: "square.and.arrow.up", title: "Export…", label: "Export the map as a folder with an index.html anyone can open in a browser", style: .well, target: nil, action: nil)
     private let reportButton = GlassButton(symbol: "safari", title: "Open report", label: "Open the crawler's report of this pair", style: .well, target: nil, action: nil)
-    private let tabControl = NSSegmentedControl(labels: Tab.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private var tabButtons: [GlassButton] = []
+    private let diffPills = NSStackView()
     private let statusLabel = NSTextField(labelWithString: "")
     private let body = NSView()
 
@@ -136,9 +137,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private let screensEmpty = NSTextField(wrappingLabelWithString: "")
     private let detailTitle = NSTextField(labelWithString: "")
     private let detailStatus = NSTextField(wrappingLabelWithString: "")
-    private let modeControl = NSSegmentedControl(labels: ["Side by side", "Wipe"], trackingMode: .selectOne, target: nil, action: nil)
+    private var modeButtons: [GlassButton] = []
+    private var compareMode = 0   // 0: side by side, 1: wipe, 2: diff solo
     private let goButton = GlassButton(symbol: "arrow.forward.circle.fill", title: "Go there", label: "Open this screen on the session's simulator", style: .accent, target: nil, action: nil)
-    private let basePane = SnapshotPicture(), headPane = SnapshotPicture(), diffPane = SnapshotPicture()
+    private let basePane = SnapshotPicture(), headPane = SnapshotPicture(), diffPane = SnapshotPicture(), diffSoloPane = SnapshotPicture()
     private let wipe = SnapshotWipe()
     private let wipeSlider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
     private var sideBySide = NSStackView()
@@ -229,15 +231,29 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         let header = NSStackView(views: [title, headLabel, againstLabel, basePopup, hs, compareButton, copyButton, exportButton, reportButton, close])
         header.spacing = 10
 
-        tabControl.controlSize = .small
-        tabControl.selectedSegment = 0
-        tabControl.target = self; tabControl.action = #selector(tabChanged)
+        tabButtons = Tab.allCases.map { t in
+            let b = GlassButton(symbol: nil, title: t.title, label: "Show \(t.title)", style: .plain, target: self, action: #selector(tabPicked(_:)))
+            b.tag = t.rawValue
+            b.font = .systemFont(ofSize: 12, weight: .semibold)
+            b.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            b.layer?.cornerRadius = 9
+            b.isEnabled = false
+            return b
+        }
+        tabButtons[0].isOn = true
+        let tabRow = NSStackView(views: tabButtons)
+        tabRow.spacing = 4
+        tabRow.alignment = .centerY
+
+        diffPills.spacing = 6
+        diffPills.alignment = .centerY
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = Design.mute
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         let ss = NSView(); ss.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [tabControl, statusLabel, ss])
+        let bar = NSStackView(views: [tabRow, diffPills, ss, statusLabel])
+        bar.alignment = .centerY
         bar.spacing = 12
 
         buildSummary()
@@ -342,12 +358,21 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         detailStatus.font = .systemFont(ofSize: 12)
         detailStatus.textColor = Design.mute
         detailStatus.maximumNumberOfLines = 2
-        modeControl.selectedSegment = 0
-        modeControl.target = self; modeControl.action = #selector(modeChanged)
-        modeControl.controlSize = .small
+        modeButtons = ["Side by side", "Wipe", "Diff"].enumerated().map { idx, text in
+            let b = GlassButton(symbol: nil, title: text, label: "Comparison view: \(text)", style: .well, target: self, action: #selector(modePicked(_:)))
+            b.tag = idx
+            b.font = .systemFont(ofSize: 11.5, weight: .medium)
+            b.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            b.layer?.cornerRadius = 8
+            return b
+        }
+        modeButtons[0].isOn = true
+        let modeRow = NSStackView(views: modeButtons)
+        modeRow.spacing = 4
         goButton.target = self; goButton.action = #selector(goPressed)
         let dspacer = NSView(); dspacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let dhead = NSStackView(views: [detailTitle, dspacer, modeControl, goButton])
+        let dhead = NSStackView(views: [detailTitle, dspacer, modeRow, goButton])
+        dhead.alignment = .centerY
         dhead.spacing = 10
 
         func column(_ name: String, _ pane: SnapshotPicture) -> NSStackView {
@@ -375,9 +400,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         wipeBar.leadingAnchor.constraint(equalTo: wipeBox.leadingAnchor).isActive = true
         wipeBar.trailingAnchor.constraint(equalTo: wipeBox.trailingAnchor).isActive = true
         wipe.widthAnchor.constraint(equalTo: wipeBox.widthAnchor).isActive = true
+        diffSoloPane.isHidden = true
         let detailBody = NSView()
         detailBody.translatesAutoresizingMaskIntoConstraints = false
-        for v in [sideBySide, wipeBox] as [NSView] { pin(v, in: detailBody) }
+        for v in [sideBySide, wipeBox, diffSoloPane] as [NSView] { pin(v, in: detailBody) }
         let detail = NSStackView(views: [dhead, detailStatus, detailBody])
         detail.orientation = .vertical
         detail.spacing = 6
@@ -709,7 +735,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             card("Stopped", "The comparison was stopped. Nothing was kept.")
             statusLabel.stringValue = ""
         }
-        tabControl.isEnabled = changeSet != nil
+        for b in tabButtons { b.isEnabled = changeSet != nil }
         if run?.isActive != true { compareButton.title = changeSet == nil ? "Compare" : "Compare again"; compareButton.style = .accent }
     }
     private var offer: BuildOffer?
@@ -758,9 +784,33 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         reportButton.isHidden = changeSet?.reportURL == nil
         compareButton.isEnabled = true
         basePopup.isEnabled = !running
+        diffPills.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if let set = changeSet, let b = run?.base {
             let c = set.summary
             statusLabel.stringValue = "\(ChangeSet.describe(b, name: baseName))  ·  \(c.new) new, \(c.changed) changed, \(c.gone) gone, \(c.same) the same" + (set.unreached > 0 ? ", \(set.unreached) not reached" : "")
+            if tabButtons.indices.contains(Tab.screens.rawValue) {
+                let n = set.differing.count
+                tabButtons[Tab.screens.rawValue].title = n > 0 ? "Screens (\(n))" : "Screens"
+            }
+            func pill(_ text: String, _ color: NSColor) -> NSView {
+                let l = label(text, size: 11, weight: .semibold, color: color)
+                let box = NSView()
+                box.wantsLayer = true
+                box.layer?.cornerRadius = 9
+                box.layer?.backgroundColor = color.withAlphaComponent(0.16).cgColor
+                l.translatesAutoresizingMaskIntoConstraints = false
+                box.addSubview(l)
+                NSLayoutConstraint.activate([
+                    l.topAnchor.constraint(equalTo: box.topAnchor, constant: 2), l.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -2),
+                    l.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8), l.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+                ])
+                return box
+            }
+            if c.new > 0 { diffPills.addArrangedSubview(pill("+\(c.new) new", ChangeStatus.new.color)) }
+            if c.changed > 0 { diffPills.addArrangedSubview(pill("~\(c.changed) changed", ChangeStatus.changed.color)) }
+            if c.gone > 0 { diffPills.addArrangedSubview(pill("−\(c.gone) gone", ChangeStatus.gone.color)) }
+        } else if tabButtons.indices.contains(Tab.screens.rawValue) {
+            tabButtons[Tab.screens.rawValue].title = "Screens"
         }
     }
 
@@ -814,11 +864,11 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
 
     // MARK: Tabs
 
-    @objc private func tabChanged() { selectTab(Tab(rawValue: tabControl.selectedSegment) ?? .summary) }
+    @objc private func tabPicked(_ sender: GlassButton) { selectTab(Tab(rawValue: sender.tag) ?? .summary) }
 
     func selectTab(_ t: Tab) {
         tab = t
-        tabControl.selectedSegment = t.rawValue
+        for b in tabButtons { b.isOn = b.tag == t.rawValue }
         if changeSet != nil { showTab(t) }
         if t != .video { pausePlayers() }
     }
@@ -969,7 +1019,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             detailTitle.stringValue = shown.isEmpty ? "" : "Pick a tile"
             detailStatus.stringValue = ""
             goButton.isHidden = true
-            for p in [basePane, headPane, diffPane] { p.show(nil, empty: "") }
+            for p in [basePane, headPane, diffPane, diffSoloPane] { p.show(nil, empty: "") }
             wipe.show(golden: nil, actual: nil)
             return
         }
@@ -980,7 +1030,9 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         let id = c.id
         basePane.show(nil, empty: c.status == .new ? "Not in the base" : "")
         headPane.show(nil, empty: c.status == .gone ? "Not in the head" : "")
-        diffPane.show(nil, empty: c.status == .changed ? "No difference map" : "Nothing to compare")
+        let diffEmpty = c.status == .changed ? "No difference map" : "Nothing to compare"
+        diffPane.show(nil, empty: diffEmpty)
+        diffSoloPane.show(nil, empty: diffEmpty)
         wipe.show(golden: nil, actual: nil)
         var base: CGImage?, head: CGImage?
         func refreshWipe() { if selectedScreen == id { wipe.show(golden: base, actual: head) } }
@@ -997,16 +1049,24 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             }
         }
         if let u = c.diff {
-            SnapshotImages.load(u, maxPixel: 1700) { [weak self] img in if self?.selectedScreen == id { self?.diffPane.show(img, empty: "") } }
+            SnapshotImages.load(u, maxPixel: 1700) { [weak self] img in
+                if self?.selectedScreen == id {
+                    self?.diffPane.show(img, empty: "")
+                    self?.diffSoloPane.show(img, empty: "")
+                }
+            }
         }
     }
 
-    @objc private func modeChanged() { setMode(wipe: modeControl.selectedSegment == 1) }
-    func setMode(wipe on: Bool) {
-        modeControl.selectedSegment = on ? 1 : 0
-        sideBySide.isHidden = on
-        wipeBox.isHidden = !on
+    @objc private func modePicked(_ sender: GlassButton) { setCompareMode(sender.tag) }
+    func setCompareMode(_ mode: Int) {
+        compareMode = max(0, min(2, mode))
+        for b in modeButtons { b.isOn = b.tag == compareMode }
+        sideBySide.isHidden = compareMode != 0
+        wipeBox.isHidden = compareMode != 1
+        diffSoloPane.isHidden = compareMode != 2
     }
+    func setMode(wipe on: Bool) { setCompareMode(on ? 1 : 0) }
     @objc private func wipeMoved() { wipe.position = CGFloat(wipeSlider.doubleValue) }
 
     @objc private func goPressed() { if let id = selectedScreen { go(id) } }
