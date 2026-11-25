@@ -82,10 +82,56 @@ enum MapNavigatorCheck {
 
         func start() {
             mixed()
+            whole()
             large()
             print("[greenroom] map-navigator: \(ok ? "PASS" : "FAIL")")
             fflush(stdout)
             exit(ok ? 0 : 1)
+        }
+
+        // MARK: The changes in the whole map
+
+        /// Unfolded under a comparison: what did not change steps back, the view opens on the first place where
+        /// screens changed, and the stepper goes round the places.
+        func whole() {
+            let unit = MapSurface.regions(of: [CGRect(x: 0, y: 0, width: 10, height: 10), CGRect(x: 40, y: 0, width: 10, height: 10),
+                                               CGRect(x: 500, y: 0, width: 10, height: 10), CGRect(x: 20, y: 30, width: 10, height: 10)], reach: 25)
+            expect(unit == [CGRect(x: 0, y: 0, width: 50, height: 40), CGRect(x: 500, y: 0, width: 10, height: 10)],
+                   "frames near each other are one place, a far one another (\(unit.count))")
+
+            let pair = MapFixtures.golden().first { $0.name == "mixed" }!
+            nav.show(pair.head, diff: pair.expected, base: pair.base)
+            settle()
+            expect(!nav.surface.spotlight && nav.regions.isEmpty && nav.regionTitle.isEmpty, "folded to the changes, nothing is dimmed and there is no stepper")
+            nav.toggleFold()
+            settle(0.6)
+            guard let scroll = nav.surface.enclosingScrollView else { expect(false, "the surface is in a scroll view"); return }
+            let changed = nav.surface.changedFrames, regions = nav.regions
+            let covered = changed.allSatisfy { f in regions.contains { $0.contains(f) } }
+            let apart = regions.indices.allSatisfy { i in regions.indices.allSatisfy { j in i == j || !regions[i].insetBy(dx: -MapNavigator.regionReach, dy: -MapNavigator.regionReach).intersects(regions[j]) } }
+            expect(nav.surface.spotlight && !changed.isEmpty && !regions.isEmpty && covered && apart,
+                   "the whole map: \(changed.count) changed screens stand in \(regions.count) place(s), each screen in one, the places apart")
+            func centred(_ r: CGRect) -> Bool {
+                let v = scroll.contentView.bounds
+                return v.contains(CGPoint(x: r.midX, y: r.midY)) || v.contains(r)
+            }
+            let all = nav.surface.bounds.size
+            let closer = scroll.magnification > scroll.minMagnification * 1.05 || regions[0].width > all.width * 0.6 || regions[0].height > all.height * 0.6
+            expect(centred(regions[0]) && closer, "it opens on the first place, closer than the whole map (\(String(format: "%.2f", scroll.magnification))x against \(String(format: "%.2f", scroll.minMagnification))x to fit)")
+            expect(regions.count > 1 ? nav.regionTitle.contains("1 of \(regions.count)") : nav.regionTitle == "Show the changes", "the stepper says where: “\(nav.regionTitle)”")
+            capture("7-whole-first-place.png")
+            if regions.count > 1 {
+                nav.stepRegion(1)
+                settle(0.7)
+                expect(nav.regionIndex == 1 && centred(regions[1]) && nav.regionTitle.contains("2 of \(regions.count)"), "the stepper goes to the next place: “\(nav.regionTitle)”")
+                capture("8-whole-next-place.png")
+                nav.keyDown(with: key("r", code: 15, flags: .shift))
+                settle(0.7)
+                expect(nav.regionIndex == 0 && centred(regions[0]), "Shift-R goes back")
+            }
+            nav.toggleFold()
+            settle(0.6)
+            expect(!nav.surface.spotlight && nav.regions.isEmpty && nav.regionTitle.isEmpty, "folded again, the dimming and the stepper go")
         }
 
         // MARK: The 500-screen pair

@@ -31,10 +31,15 @@ version of it and adds the workbench.
   over pixels that differ, and a summary under the pictures. With Mirror Input, two builds are driven as one.
 - **Changes** (⌘D, "Changes…" in a session row's menu, or the command palette) shows what a session's build did to the
   app, against a base you pick: the repository's base branch, another session, a pull request, a branch or commit, or
-  an APK file. Greenroom walks both builds on hidden devices and shows, in tabs, **Summary** (screens new, changed
-  and gone, crashes on either side, what the walk did not finish), **Screens** (base, head and a difference map side
-  by side or under a wipe slider, and "Go there" to open the screen on the session's simulator), **Map** (the head's
-  screen map with new screens green, changed amber and gone red), **Video** (a recorded tour: both builds taken to
+  an APK file. Against the base branch nothing of the base is walked: the project's map of it (made by walking it
+  once; until that walk is done the sheet says so and compares nothing) is what the build is compared with, and only
+  the screens the branch's changed files reach are walked. A session's row then shows "N changed". Against anything
+  else Greenroom walks both builds on hidden devices. It shows, in tabs, **Summary** (screens new, changed
+  and gone, crashes on either side, what the walk did not finish), **Screens** (added, changed and removed screens in groups; base, head and a difference map side
+  by side or under a wipe slider, how the screen is reached, why it was walked again and the texts and controls that changed, and "Go there" to open the screen on the session's simulator), **Map** (the head's
+  screen map with new screens green, changed amber and gone red: first only the changes and what is next to them,
+  then, in the whole app, with everything else dimmed, the view on the place where screens changed and a stepper
+  between such places), **Video** (a recorded tour: both builds taken to
   each screen that differs, played together with a chapter per screen) and **Live** (both builds side by side with
   mirrored input). "Copy summary" puts a Markdown summary on the clipboard and "Open report" opens the crawler's own
   report. The base is never built for you: with no build of it stored or on CI the sheet says so and offers to check

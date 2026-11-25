@@ -313,6 +313,158 @@ enum ChangesCheck {
                 expect(reset, "reopening after a rebuild drops the old comparison and compares the new build (\(sheet.stateTitleText))")
             } else { expect(false, "a third build could be filed") }
 
+            // Against the base branch: held back until the project has a map of it, then answered from that map with
+            // only the screens this branch's files reach walked. Main's map is made here by walking the same app once
+            // and writing a text into one screen of it that the branch's build does not have.
+            fromMain: do {
+                guard let python = SnapshotRun.python() else { expect(false, "Python 3 is there for the base branch's walk"); break fromMain }
+                let support = await Task.detached { CrawlRun.support(python: python) }.value
+                guard support.seed, support.recordDeps else { say("skipped: this engine's crawler cannot start from an earlier walk"); break fromMain }
+                let before = ev.started
+                guard let s0 = row() else { expect(false, "the row is there"); break fromMain }
+                sheet.open(session: s0, compare: false)
+                sheet.compare(base: .baseBranch)
+                let held = await wait("the comparison to be held", 30) { sheet.stateTitleText.contains("has not been walked yet") }
+                expect(held && sheet.changeSet == nil && ev.started == before && sheet.run?.isActive == false,
+                       "with no map of main the comparison is held and nothing is walked (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(90)))")
+                shot("7-held.png")
+
+                // Main's one walk: the whole app (a walk cut at a depth leaves its last screens with no record of what
+                // they depend on, and those are walked again every time). A build of its own: `vb` is filed with no commit.
+                ev.budget = Evidence.Budget(depth: 0, seconds: 300, jobs: 2)
+                guard let vm = variant() else { expect(false, "main's build is made"); break fromMain }
+                let mainWalk = base.appendingPathComponent("main-walk", isDirectory: true)
+                var cs = CrawlRun.Settings()
+                cs.depth = ev.budget.depth; cs.seconds = ev.budget.seconds; cs.jobs = 2; cs.appearances = ["light"]; cs.recordDeps = true
+                cs.engineOptions = ["--data-slots", SlotClone.freshName(prefix: "evg")]
+                let crawl = CrawlRun(python: python, apk: vm, out: mainWalk, settings: cs)
+                var outcome: CrawlRun.Outcome?
+                crawl.onFinish = { outcome = $0 }
+                let t0 = Date()
+                crawl.start()
+                _ = await wait("main's walk", 600) { outcome != nil }
+                let fullSeconds = Date().timeIntervalSince(t0)
+                guard case .finished? = outcome, let data = try? Data(contentsOf: mainWalk.appendingPathComponent("crawl.json")),
+                      var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], var list = json["screens"] as? [[String: Any]] else {
+                    expect(false, "main's walk finished"); break fromMain
+                }
+                let startSources = Set(((json["start_deps"] as? [String: Any])?["sources"] as? [String]) ?? [])
+                func sources(_ sc: [String: Any]) -> [String] { ((sc["deps"] as? [String: Any])?["sources"] as? [String]) ?? [] }
+                var uses: [String: Int] = [:]
+                for sc in list { for f in sources(sc) where !startSources.contains(f) { uses[f, default: 0] += 1 } }
+                // The file on the fewest screens: those are the ones the branch's walk must redo.
+                guard let file = uses.sorted(by: { ($0.value, $0.key) < ($1.value, $1.key) }).first?.key, let at = list.firstIndex(where: { sources($0).contains(file) }) else {
+                    say("skipped: no source file of the test app is outside app start"); break fromMain
+                }
+                let reached = uses[file] ?? 1
+                let target = (list[at]["id"] as? String) ?? "", targetTitle = (list[at]["title"] as? String) ?? ""
+                list[at]["texts"] = ((list[at]["texts"] as? [String]) ?? []) + ["Only on main"]
+                json["screens"] = list
+                try? JSONSerialization.data(withJSONObject: json).write(to: mainWalk.appendingPathComponent("crawl.json"))
+                let profile = ev.walkProfiles(worktree: s0.worktree.path, withData: false)[0]
+                guard let mainBuild = store.record(apk: vm, source: .local, sha: firstSha, ref: "main", dirty: false, date: Date()) else { expect(false, "main's build is filed"); break fromMain }
+                let root = ev.store.root, engine = Engine.shared.version, spaces = sessions.workspaces
+                let filed = await Task.detached { await History.filed(walk: mainWalk, build: mainBuild, profile: profile, candidates: spaces, stateRoot: root, engine: engine) }.value
+                expect(filed != nil, "main's walk (\(list.count) screens, \(Int(fullSeconds)) s) is the project's map of main")
+
+                // The branch changes the one file that screen depends on, and is built again.
+                let changedFile = wt.appendingPathComponent("app/src/main/java/" + file)
+                try? fm.createDirectory(at: changedFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? "// changed\n".write(to: changedFile, atomically: true, encoding: .utf8)
+                _ = git(["add", "."], in: wt); _ = git(["commit", "-q", "-m", "third"], in: wt)
+                guard let sha3 = git(["rev-parse", "HEAD"], in: wt)?.trimmingCharacters(in: .whitespacesAndNewlines), let v4 = variant(),
+                      let b4 = store.record(apk: v4, source: .local, sha: sha3, ref: "feature", dirty: false, date: Date().addingTimeInterval(10)) else {
+                    expect(false, "the branch's new build is filed"); break fromMain
+                }
+                sessions.adopt(b4, forWorktree: s0.worktree.path)
+                guard let s1 = row() else { break fromMain }
+                sheet.open(session: s1, compare: false)
+                let t1 = Date()
+                sheet.compare(base: .baseBranch)
+                let done = await wait("the comparison with main's map", 900) { sheet.changeSet != nil || sheet.stateTitleText.contains("Could not") }
+                let quickSeconds = Date().timeIntervalSince(t1)
+                guard done, let set = sheet.changeSet else { expect(false, "the comparison with main's map finished (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(160)))"); break fromMain }
+                let note = ev.entry(of: s1.worktree.path)?.impact
+                let noRecord = list.filter { $0["deps"] == nil }.count
+                expect(note?.full == false && (note?.walked ?? 0) >= reached && (note?.walked ?? 99) <= reached + noRecord && (note?.walked ?? 99) < list.count && note?.total == list.count,
+                       "the branch's walk walked the \(reached) screen(s) \((file as NSString).lastPathComponent) is on and at most the \(noRecord) main's walk has no record for, of \(list.count) (\(note.map { "\($0.walked) of \($0.total)\($0.full ? ", full: " + ($0.reason ?? "") : "")" } ?? "no note")), \(String(format: "%.1f", quickSeconds)) s against \(Int(fullSeconds)) s for main's")
+                // The screens the file is on were walked again; the app's own noise may make more of them differ than
+                // the one written into, but nothing that was carried can.
+                let differing = set.differing
+                let onFile = Set(list.filter { sources($0).contains(file) }.compactMap { $0["id"] as? String })
+                let mine = differing.first { $0.baseID == target }
+                // A carried screen can differ only in where a control leads: one of its controls led to a screen that was
+                // walked again and is now read as another (the test app's Bind does that from run to run).
+                expect(mine?.status == .changed && differing.allSatisfy { c in c.baseID.map(onFile.contains) ?? true || set.change(of: c)?.reasons == [.routes] },
+                       "the screen written into differs, and a carried screen only in where a control leads (\(differing.map { "\($0.title) \($0.status.word) \($0.baseID ?? "-")" }.joined(separator: ", ")); expected \(targetTitle) \(target); the file is on \(onFile.sorted().joined(separator: " ")))")
+                expect(set.baseline?.contains("main at " + String(firstSha.prefix(7))) == true, "the header says what it was compared with: \(set.baseline ?? "nothing")")
+                sheet.selectTab(.screens)
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                expect(sheet.groupTitles.contains("Changed \(differing.filter { $0.status == .changed }.count)"), "the Screens tab groups them: \(sheet.groupTitles.joined(separator: ", "))")
+                if let mine { sheet.selectScreen(mine.id) }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                let notes = sheet.detailNotesText
+                expect(notes.contains("Only on main") && notes.contains("Walked again because") && notes.contains((file as NSString).lastPathComponent),
+                       "its detail says what changed and why it was walked: \(notes.replacingOccurrences(of: "\n", with: " | "))")
+                shot("8-from-main.png")
+
+                // The same comparison in the whole app: the Map tab opens on the changes; unfolded, the screens that did
+                // not change step back and the view is on the place where the changed ones stand.
+                sheet.selectTab(.map)
+                let drawn = await wait("the map of the comparison with main", 30) { sheet.mapIsReady }
+                await sleep(1)
+                let nav = sheet.mapHost.navigator
+                // A small app's changes and their neighbours are the whole map: nothing is folded and there is nothing to unfold.
+                let small = nav.plan?.folded == 0
+                expect(drawn && (small ? nav.surface.spotlight : nav.regions.isEmpty && nav.foldTitle.contains("show in the whole app")),
+                       small ? "the Map tab of a small app opens on the whole map, with nothing to unfold" : "the Map tab opens on the changes, with the rest one click away (\(nav.foldTitle))")
+                shot("9-map-changes.png")
+                if !small { nav.toggleFold(); await sleep(1.2) }
+                let frames = nav.surface.changedFrames
+                let view = nav.surface.enclosingScrollView?.contentView.bounds ?? .zero
+                expect(nav.surface.spotlight && frames.count == differing.count && !nav.regions.isEmpty && nav.regions.allSatisfy { r in frames.contains { r.contains($0) } }
+                       && view.intersects(nav.regions[0]) && !nav.regionTitle.isEmpty,
+                       "in the whole app the \(frames.count) changed screens stand in \(nav.regions.count) place(s) and the view is on the first (\(nav.regionTitle))")
+                shot("10-map-whole-app.png")
+
+                // The session's row counts the changes against main's map; a click on the count opens the comparison.
+                let counted = await wait("the row's count", 20) { ev.entry(of: s1.worktree.path)?.changed != nil }
+                func buttons(_ v: NSView?) -> [NSButton] { guard let v else { return [] }; return (v as? NSButton).map { [$0] } ?? v.subviews.flatMap { buttons($0) } }
+                let count = buttons(ev.badge(for: s1)).first { $0.title.hasSuffix("changed") }
+                expect(counted && ev.entry(of: s1.worktree.path)?.changed == differing.count && count?.title == "\(differing.count) changed",
+                       "the row says \(count?.title ?? "nothing") (\(ev.entry(of: s1.worktree.path)?.changedWords ?? "no words"))")
+                sheet.close()
+                await sleep(0.5)
+                count?.performClick(nil)
+                let reopened = await wait("the comparison from the row", 20) { sheet.isOpen && sheet.changeSet != nil }
+                expect(reopened && sheet.session?.worktree.path == s1.worktree.path, "a click on it opens the comparison")
+
+                // A build file changes too: nothing says which screens it reaches, so no screen is walked for it, the
+                // walk is not a full one, and the comparison says what it could not trace.
+                try? "android { }\n".write(to: wt.appendingPathComponent("app/build.gradle.kts"), atomically: true, encoding: .utf8)
+                _ = git(["add", "."], in: wt); _ = git(["commit", "-q", "-m", "fourth"], in: wt)
+                guard let sha4 = git(["rev-parse", "HEAD"], in: wt)?.trimmingCharacters(in: .whitespacesAndNewlines), let v5 = variant(),
+                      let b5 = store.record(apk: v5, source: .local, sha: sha4, ref: "feature", dirty: false, date: Date().addingTimeInterval(20)) else {
+                    expect(false, "the branch's build with a build file changed is filed"); break fromMain
+                }
+                sessions.adopt(b5, forWorktree: s1.worktree.path)
+                guard let s2 = row() else { break fromMain }
+                sheet.open(session: s2, compare: false)
+                sheet.compare(base: .baseBranch)
+                let again = await wait("the comparison with a build file changed", 900) { (sheet.changeSet != nil && sheet.run?.head?.key == b5.key) || sheet.stateTitleText.contains("Could not") }
+                guard again, let set2 = sheet.changeSet else { expect(false, "that comparison finished (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(160)))"); break fromMain }
+                let note2 = ev.entry(of: s2.worktree.path)?.impact
+                expect(note2?.full == false && (note2?.walked ?? 99) < list.count && set2.unplaced.count == 1 && set2.unplaced[0].contains("build.gradle.kts"),
+                       "a build file beside it is not a full walk (\(note2.map { "\($0.walked) of \($0.total)" } ?? "no note")) and is named as not traced: \(set2.unplaced.joined(separator: "; "))")
+                sheet.selectTab(.summary)
+                await sleep(0.6)
+                func texts(_ v: NSView) -> [String] { ((v as? NSTextField).map { [$0.stringValue] } ?? []) + v.subviews.flatMap { texts($0) } }
+                let words = texts(sheet)
+                expect(words.contains { $0.contains("NOT TRACED TO SCREENS") } && words.contains { $0.contains("build.gradle.kts") } && sheet.summaryText.contains("1 change not traced to screens"),
+                       "the Summary lists it and the header counts it: \(sheet.summaryText)")
+                shot("11-not-traced.png")
+            }
+
             let lastLogs = await wait("the last tour's logs to go", 20) { ((try? fm.contentsOfDirectory(atPath: Engine.shared.logs.path)) ?? []).allSatisfy { !$0.hasPrefix("tour-") } }
             expect(lastLogs, "the last tour's logs are gone too, so none is left for the next run")
             let leftovers = hidden()

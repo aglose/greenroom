@@ -264,6 +264,18 @@ enum MapImpactCheck {
         expect(full(decide(c1, baseline: unreliable))?.contains("cannot be trusted (probes lost)") == true, "a baseline whose deps cannot be trusted walks everything")
         var older = snap0; older.engine = "e0"
         expect(screens(decide(c1, baseline: older)) == screens(kotlin), "a baseline walked by another engine is kept: the same 2 screens are walked")
+        // A branch's build: what cannot be traced is named, what can is walked.
+        func lenient(_ changes: [MapImpact.FileChange]) -> (decision: MapImpact.Decision, unplaced: [String]) {
+            MapImpact.decideLenient(MapImpact.Input(baseline: snap0, changes: changes, engine: "e1", profile: profile))
+        }
+        let kotlinFile = "app/src/main/java/com/example/trips/TripsActivity.kt"
+        let mixed = lenient([.init(status: "M", path: "app/build.gradle.kts"), .init(status: "M", path: kotlinFile)])
+        expect(screens(mixed.decision) == screens(kotlin) && mixed.unplaced.count == 1 && full(decide(gradle)) != nil,
+               "for a branch, a build file beside a Kotlin change walks the Kotlin file's 2 screens and names the build file (\(mixed.unplaced.joined(separator: "; ")))")
+        let onlyGradle = lenient([.init(status: "M", path: "app/build.gradle.kts")])
+        expect(screens(onlyGradle.decision) == [] && onlyGradle.unplaced.count == 1, "a build file alone walks no screen and is named")
+        expect(full(MapImpact.decideLenient(MapImpact.Input(baseline: noDeps, changes: [.init(status: "M", path: kotlinFile)], engine: "e1", profile: profile)).decision) != nil,
+               "a baseline with no deps is still a full walk for a branch")
         var otherProfile = snap0; otherProfile.profile.depth = 5
         expect(full(decide(c1, baseline: otherProfile)) == "the walk's settings changed", "another profile walks everything")
         expect(full(decide(c1, patterns: [src])) == "a file under \(src) changed, where a quick walk missed a change before", "a workspace full-walk pattern is honoured")
@@ -345,6 +357,24 @@ enum MapImpactCheck {
         store.updateLedger { $0.mainWalks[profile.id] = 9 }
         let tenth = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: support, forceFull: false, folder: work) }
         expect(!tenth.isFull && tenth.diffControls == "all", "the tenth walk of main is seeded like the others, with every control of its screens tried: \(tenth.reason ?? "seeded")")
+
+        // A walk compared with its seed says a carried screen is gone (apksim 0.63.0's `compare`): it is left out of
+        // the snapshot, so the comparison with the seed shows it as removed. One the engine calls "unknown" stays.
+        if let seedSnap = store.snapshot(profile: profile.id, commit: c1) {
+            let goneWalk = walks.appendingPathComponent("gone-c2")
+            writeWalk(goneWalk, models: models, carried: Set(ids).subtracting([ids[2], ids[3]]))
+            let file = goneWalk.appendingPathComponent("crawl.json")
+            if var json = (try? Data(contentsOf: file)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) {
+                json["compare"] = [["id": NSNull(), "base": ids[7], "status": "gone", "why": "no screen of the new build reaches it"],
+                                   ["id": NSNull(), "base": ids[8], "status": "unknown", "why": "it may still be there"],
+                                   ["id": ids[2], "base": ids[2], "status": "same"]]
+                try? JSONSerialization.data(withJSONObject: json).write(to: file)
+            }
+            let without = store.importWalk(goneWalk, commit: c2, tree: "t", profile: profile, engine: "e1", walked: Date(), seed: seedSnap)
+            let removed = without.map { MapPairing.diff(head: MapPairing.pair(head: $0, base: seedSnap).0, base: seedSnap).screens.filter { $0.status == .removed }.compactMap(\.base) } ?? []
+            expect(without?.screens.count == 14 && without?.screen(ids[7]) == nil && without?.screen(ids[8]) != nil && without?.edges.contains { $0.from == ids[7] } == false && removed == [ids[7]],
+                   "a carried screen the engine calls gone is left out and shows as removed; one it calls unknown stays (removed: \(removed.joined(separator: ", ")))")
+        } else { expect(false, "c1 has its snapshot for the gone-screen step") }
 
         // 6. "Verify carried screens": a quick walk of c2 (its 2 screens walked, 13 carried), then the verification's walk,
         // which reaches the 13 again (here written by hand, with one of them changed).

@@ -49,8 +49,16 @@ final class MapStore {
             return h
         }
 
+        // A walk compared with its seed (`--diff-seed`, apksim 0.63.0) says which carried screens the new build no
+        // longer leads to (`compare` entries with status "gone"): they are in `screens` as carried, and are left out
+        // here with the transitions out of them, so the comparison with the base shows them as removed. "unknown"
+        // ones (they may still be there) stay.
+        let gone = Set(((json["compare"] as? [[String: Any]]) ?? []).compactMap { p -> String? in
+            guard seed != nil, (p["status"] as? String) == "gone", p["id"] == nil || p["id"] is NSNull else { return nil }
+            return p["base"] as? String
+        })
         let screens: [MapSnapshot.Screen] = list.compactMap { s in
-            guard let id = s["id"] as? String else { return nil }
+            guard let id = s["id"] as? String, !(gone.contains(id) && (s["origin"] as? String) == "carried") else { return nil }
             let path = (s["path"] as? [String: Any]) ?? [:]
             var captures: [String: String] = [:]
             for (combo, rel) in (s["captures"] as? [String: String]) ?? [:] {
@@ -74,7 +82,7 @@ final class MapStore {
 
         var next: [String: Int] = [:]       // each screen's controls are numbered in the order the file lists them
         let edges: [MapSnapshot.Edge] = ((json["edges"] as? [[String: Any]]) ?? []).compactMap { e in
-            guard let from = e["from"] as? String else { return nil }
+            guard let from = e["from"] as? String, !gone.contains(from) else { return nil }
             let order = next[from, default: 0]
             next[from] = order + 1
             return MapSnapshot.Edge(from: from, order: order, action: (e["action"] as? String) ?? "", cmd: (e["cmd"] as? String) ?? "",

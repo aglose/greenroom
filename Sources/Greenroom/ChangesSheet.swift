@@ -64,6 +64,31 @@ final class ChangeTileItem: NSCollectionViewItem {
     }
 }
 
+/// The heading of a group of tiles on the Screens tab: "Added · 2".
+final class ChangeGroupHeader: NSView, NSCollectionViewElement {
+    static let identifier = NSUserInterfaceItemIdentifier("change-group")
+    private let label = NSTextField(labelWithString: "")
+    private let dot = NSView()
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = Design.mute
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4
+        for v in [dot, label] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 8), dot.heightAnchor.constraint(equalToConstant: 8),
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6), dot.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 2),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 6), label.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    func configure(_ status: ChangeStatus, count: Int) {
+        label.stringValue = ChangesSheet.groupWord(status).uppercased() + "  \u{00B7}  \(count)"
+        dot.layer?.backgroundColor = status.color.cgColor
+    }
+}
+
 private final class ChangesFlipped: NSView { override var isFlipped: Bool { true } }
 
 final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout {
@@ -98,7 +123,24 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private var customChoice: String?
     private var lastBases: [String: (BaseRef, String?)] = [:]
     private var ticker: Timer?
+    /// The differing screens in the order of the tiles: added, then changed, then removed.
     private var shown: [ChangeScreen] = []
+    /// The groups of `shown`, each a status and its screens (empty groups left out).
+    private var groups: [(status: ChangeStatus, screens: [ChangeScreen])] = []
+    static func groupWord(_ s: ChangeStatus) -> String {
+        switch s { case .new: return "Added"; case .changed: return "Changed"; case .gone: return "Removed"; default: return s.word.capitalized }
+    }
+    private func indexPath(of id: String) -> IndexPath? {
+        for (g, group) in groups.enumerated() { if let i = group.screens.firstIndex(where: { $0.id == id }) { return IndexPath(item: i, section: g) } }
+        return nil
+    }
+    private func screen(at p: IndexPath) -> ChangeScreen? {
+        groups.indices.contains(p.section) && groups[p.section].screens.indices.contains(p.item) ? groups[p.section].screens[p.item] : nil
+    }
+    /// What changed on the selected screen, in lines: how it is reached, why it was walked again, texts and controls.
+    private let detailNotes = NSTextField(wrappingLabelWithString: "")
+    var detailNotesText: String { detailNotes.stringValue }
+    var groupTitles: [String] { groups.map { Self.groupWord($0.status) + " \($0.screens.count)" } }
     private var selectedScreen: String?
     private var shownImages: (base: Bool, head: Bool, diff: Bool) = (false, false, false)
 
@@ -325,8 +367,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         layout.minimumInteritemSpacing = 10
         layout.minimumLineSpacing = 10
         layout.sectionInset = NSEdgeInsets(top: 4, left: 4, bottom: 8, right: 4)
+        layout.headerReferenceSize = NSSize(width: 100, height: 26)
         collection.collectionViewLayout = layout
         collection.register(ChangeTileItem.self, forItemWithIdentifier: ChangeTileItem.identifier)
+        collection.register(ChangeGroupHeader.self, forSupplementaryViewOfKind: NSCollectionView.elementKindSectionHeader, withIdentifier: ChangeGroupHeader.identifier)
         collection.dataSource = self
         collection.delegate = self
         collection.isSelectable = true
@@ -358,6 +402,11 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         detailStatus.font = .systemFont(ofSize: 12)
         detailStatus.textColor = Design.mute
         detailStatus.maximumNumberOfLines = 2
+        detailNotes.font = .systemFont(ofSize: 11.5)
+        detailNotes.textColor = Design.mute
+        detailNotes.maximumNumberOfLines = 9
+        detailNotes.isSelectable = true
+        detailNotes.setContentCompressionResistancePriority(.defaultHigh, for: .vertical)
         modeButtons = ["Side by side", "Wipe", "Diff"].enumerated().map { idx, text in
             let b = GlassButton(symbol: nil, title: text, label: "Comparison view: \(text)", style: .well, target: self, action: #selector(modePicked(_:)))
             b.tag = idx
@@ -404,11 +453,11 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         let detailBody = NSView()
         detailBody.translatesAutoresizingMaskIntoConstraints = false
         for v in [sideBySide, wipeBox, diffSoloPane] as [NSView] { pin(v, in: detailBody) }
-        let detail = NSStackView(views: [dhead, detailStatus, detailBody])
+        let detail = NSStackView(views: [dhead, detailStatus, detailNotes, detailBody])
         detail.orientation = .vertical
         detail.spacing = 6
         detail.alignment = .leading
-        for v in [dhead, detailStatus, detailBody] as [NSView] { v.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true }
+        for v in [dhead, detailStatus, detailNotes, detailBody] as [NSView] { v.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true }
         let well = wellView()
         pin(detail, in: well, inset: 12)
 
@@ -720,6 +769,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             compareButton.style = .record
             tickWalking(since)
             ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tickWalking(since) }
+        case .needsMain(let title, let text, let waiting):
+            card(title, text, spinning: waiting)
+            statusLabel.stringValue = ""
+            if waiting { compareButton.title = "Stop"; compareButton.style = .record }
         case .done(let set):
             changeSet = set
             stateCard.isHidden = true
@@ -744,8 +797,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         guard case .walking(let depth, let known, _)? = run?.state else { return }
         let s = Int(Date().timeIntervalSince(since))
         let t = String(format: "%d:%02d", s / 60, s % 60)
-        var line = "Walking both builds, the head first and then the base"
-        if known > 0 { line = depth == -1 ? "Capturing \(known) screens" : "Walking \(depth == 0 ? "the first screen" : "\(depth) tap\(depth == 1 ? "" : "s") deep"), \(known) screen\(known == 1 ? "" : "s") found" }
+        // Against the base branch's stored map only this build is walked, and only where the branch changed it.
+        var line = run?.headOnly == true ? "Walking the screens this branch's changes reach" : "Walking both builds, the head first and then the base"
+        let d = depth ?? 0
+        if known > 0 { line = d == -1 ? "Capturing \(known) screens" : "Walking \(d == 0 ? "the first screen" : "\(d) tap\(d == 1 ? "" : "s") deep"), \(known) screen\(known == 1 ? "" : "s") found" }
         stateCard.isHidden = false
         stateSpinner.isHidden = false
         stateSpinner.startAnimation(nil)
@@ -785,9 +840,12 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         compareButton.isEnabled = true
         basePopup.isEnabled = !running
         diffPills.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        if let set = changeSet, let b = run?.base {
+        if let set = changeSet, run?.base != nil || set.baseline != nil {
             let c = set.summary
-            statusLabel.stringValue = "\(ChangeSet.describe(b, name: baseName))  ·  \(c.new) new, \(c.changed) changed, \(c.gone) gone, \(c.same) the same" + (set.unreached > 0 ? ", \(set.unreached) not reached" : "")
+            // A comparison with the base branch's stored map has no base build: it says which map.
+            let against = run?.base.map { ChangeSet.describe($0, name: baseName) } ?? set.baseline ?? ""
+            statusLabel.stringValue = "\(against)  ·  \(c.new) new, \(c.changed) changed, \(c.gone) gone, \(c.same) the same" + (set.unreached > 0 ? ", \(set.unreached) not reached" : "")
+                + (set.unplaced.isEmpty ? "" : "  ·  \(set.unplaced.count) change\(set.unplaced.count == 1 ? "" : "s") not traced to screens")
             if tabButtons.indices.contains(Tab.screens.rawValue) {
                 let n = set.differing.count
                 tabButtons[Tab.screens.rawValue].title = n > 0 ? "Screens (\(n))" : "Screens"
@@ -815,7 +873,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     }
 
     /// The base as the header says it, for the summary Markdown.
-    var baseDescription: String { run?.base.map { ChangeSet.describe($0, name: baseName) } ?? "the base" }
+    var baseDescription: String { run?.base.map { ChangeSet.describe($0, name: baseName) } ?? changeSet?.baseline ?? "the base" }
     var headDescription: String { run?.head.map { ChangeSet.describe($0, name: session?.branch ?? session?.title) } ?? "this build" }
 
     /// The Markdown "Copy summary" puts on the clipboard.
@@ -883,7 +941,12 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
 
     private func populate(_ set: ChangeSet) {
         fillSummary(set)
-        shown = set.differing
+        let differing = set.differing
+        groups = [ChangeStatus.new, .changed, .gone].compactMap { st in
+            let list = differing.filter { $0.status == st }
+            return list.isEmpty ? nil : (st, list)
+        }
+        shown = groups.flatMap(\.screens)
         collection.reloadData()
         screensEmpty.stringValue = shown.isEmpty ? "No screen differs from the base." : ""
         selectedScreen = nil
@@ -941,6 +1004,11 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
                 return (sign, c.status.color, c.title + "  ·  " + c.detail)
             }))
         }
+        if !set.unplaced.isEmpty {
+            // Changes the walk could not trace to screens: said, not walked for.
+            summaryStack.addArrangedSubview(section("NOT TRACED TO SCREENS", set.unplaced.map { ("?", Design.warning, $0.prefix(1).uppercased() + $0.dropFirst()) }
+                + [("", Design.mute, "Screens these reach were not walked again, so a difference there is not shown. \u{201C}Walk Everything Again\u{201D} in the session's menu walks the whole app.")]))
+        }
         if !set.crashes.isEmpty {
             summaryStack.addArrangedSubview(section("CRASHES", set.crashes.map { c in
                 ("!", Design.record, "\(c.side == .base ? "Base" : "Head"): " + (c.detail.split(separator: "\n").first.map(String.init) ?? c.detail))
@@ -988,25 +1056,30 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
 
     // MARK: Screens tab
 
-    func numberOfSections(in collectionView: NSCollectionView) -> Int { 1 }
-    func collectionView(_ cv: NSCollectionView, numberOfItemsInSection section: Int) -> Int { shown.count }
+    func numberOfSections(in collectionView: NSCollectionView) -> Int { groups.count }
+    func collectionView(_ cv: NSCollectionView, numberOfItemsInSection section: Int) -> Int { groups.indices.contains(section) ? groups[section].screens.count : 0 }
+    func collectionView(_ cv: NSCollectionView, viewForSupplementaryElementOfKind kind: NSCollectionView.SupplementaryElementKind, at indexPath: IndexPath) -> NSView {
+        let v = cv.makeSupplementaryView(ofKind: kind, withIdentifier: ChangeGroupHeader.identifier, for: indexPath)
+        if let h = v as? ChangeGroupHeader, groups.indices.contains(indexPath.section) { h.configure(groups[indexPath.section].status, count: groups[indexPath.section].screens.count) }
+        return v
+    }
     func collectionView(_ cv: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let item = cv.makeItem(withIdentifier: ChangeTileItem.identifier, for: indexPath) as! ChangeTileItem
-        item.configure(shown[indexPath.item])
+        if let c = screen(at: indexPath) { item.configure(c) }
         return item
     }
     func collectionView(_ cv: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
-        guard let i = indexPaths.first?.item, shown.indices.contains(i) else { return }
-        selectedScreen = shown[i].id
-        showDetail(shown[i])
+        guard let p = indexPaths.first, let c = screen(at: p) else { return }
+        selectedScreen = c.id
+        showDetail(c)
     }
 
     /// Selects a tile by id (checks, and the first one when the tab fills).
     func selectScreen(_ id: String) {
-        guard let i = shown.firstIndex(where: { $0.id == id }) else { return }
-        collection.selectItems(at: [IndexPath(item: i, section: 0)], scrollPosition: .centeredVertically)
+        guard let p = indexPath(of: id), let c = screen(at: p) else { return }
+        collection.selectItems(at: [p], scrollPosition: .centeredVertically)
         selectedScreen = id
-        showDetail(shown[i])
+        showDetail(c)
     }
 
     var tileCount: Int { shown.count }
@@ -1018,6 +1091,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         guard let c else {
             detailTitle.stringValue = shown.isEmpty ? "" : "Pick a tile"
             detailStatus.stringValue = ""
+            detailNotes.attributedStringValue = NSAttributedString()
+            detailNotes.isHidden = true
             goButton.isHidden = true
             for p in [basePane, headPane, diffPane, diffSoloPane] { p.show(nil, empty: "") }
             wipe.show(golden: nil, actual: nil)
@@ -1026,6 +1101,9 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         detailTitle.stringValue = c.title
         detailStatus.stringValue = c.status.word.capitalized + "  ·  " + c.detail + (c.activity.isEmpty ? "" : "  ·  " + c.activity)
         detailStatus.textColor = c.status.color
+        let notes = changeSet.map { Self.notes(of: c, in: $0) } ?? NSAttributedString()
+        detailNotes.attributedStringValue = notes
+        detailNotes.isHidden = notes.length == 0
         goButton.isHidden = c.status == .gone
         let id = c.id
         basePane.show(nil, empty: c.status == .new ? "Not in the base" : "")
@@ -1056,6 +1134,43 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
                 }
             }
         }
+    }
+
+    /// What a differing screen's detail says under its status: the way there, why the walk looked at it again, and the
+    /// texts and controls that were added or removed. Empty when the comparison knows none of it.
+    static func notes(of c: ChangeScreen, in set: ChangeSet) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let plain: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]
+        func line(_ head: String, _ body: String, _ color: NSColor = Design.ink) {
+            if out.length > 0 { out.append(NSAttributedString(string: "\n", attributes: plain)) }
+            out.append(NSAttributedString(string: head, attributes: plain))
+            out.append(NSAttributedString(string: body, attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: color]))
+        }
+        func quoted(_ list: [String], limit: Int = 4) -> String {
+            let shown = list.prefix(limit).map { "\u{201C}" + ChangeSet.plain($0).prefix(48) + "\u{201D}" }.joined(separator: ", ")
+            return list.count > limit ? shown + " and \(list.count - limit) more" : shown
+        }
+        // The way there: the titles of the screens on its route, from the start.
+        let map = c.status == .gone ? set.baseMap : set.headMap
+        if let map, let id = c.status == .gone ? c.baseID : c.headID {
+            var trail: [String] = []
+            var at = map.screen(id)?.parent, seen = Set<String>()
+            while let p = at, seen.insert(p).inserted, let s = map.screen(p) { trail.insert(s.label, at: 0); at = s.parent }
+            if !trail.isEmpty { line("Reached from  ", (trail + [c.title]).joined(separator: "  \u{203A}  ")) }
+        }
+        // The walk's reasons are by the base's id: a screen whose structure changed has another id in the head.
+        if let why = [c.baseID, c.headID].compactMap({ $0 }).compactMap({ set.walkedBecause[$0] }).first, !why.isEmpty {
+            line("Walked again because  ", why.prefix(3).joined(separator: ", ") + (why.count > 3 ? " and \(why.count - 3) more" : ""))
+        }
+        if let ch = set.change(of: c) {
+            if !ch.textAdded.isEmpty { line("+ text  ", quoted(ch.textAdded), Design.accent) }
+            if !ch.textRemoved.isEmpty { line("\u{2212} text  ", quoted(ch.textRemoved), Design.record) }
+        }
+        for l in set.controlLines(of: c).prefix(4) {
+            let color = l.hasPrefix("+") ? Design.accent : (l.hasPrefix("-") ? Design.record : Design.warning)
+            line("control  ", l, color)
+        }
+        return out
     }
 
     @objc private func modePicked(_ sender: GlassButton) { setCompareMode(sender.tag) }

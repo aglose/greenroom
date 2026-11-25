@@ -206,6 +206,8 @@ final class MapHost: NSView {
     /// when the map was laid out while hidden or the sheet has just opened; a one-screen map is never zoomed up to fill the pane.
     func settle() {
         guard let plan = navigator.plan else { return }
+        // The whole map under a comparison opens on the place where screens changed, here as when it is laid out in view.
+        if let place = navigator.regions.first { navigator.surface.show(region: place, animated: false); return }
         if plan.shown.count > 80 { navigator.surface.fitAll(); return }
         let s = navigator.scroll, clip = s.contentView
         s.magnification = 1
