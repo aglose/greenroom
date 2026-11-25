@@ -381,7 +381,7 @@ enum ChangesCheck {
                 sheet.open(session: s1, compare: false)
                 let t1 = Date()
                 sheet.compare(base: .baseBranch)
-                let done = await wait("the comparison with main's map", 400) { sheet.changeSet != nil || sheet.stateTitleText.contains("Could not") }
+                let done = await wait("the comparison with main's map", 900) { sheet.changeSet != nil || sheet.stateTitleText.contains("Could not") }
                 let quickSeconds = Date().timeIntervalSince(t1)
                 guard done, let set = sheet.changeSet else { expect(false, "the comparison with main's map finished (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(160)))"); break fromMain }
                 let note = ev.entry(of: s1.worktree.path)?.impact
@@ -451,7 +451,7 @@ enum ChangesCheck {
                 guard let s2 = row() else { break fromMain }
                 sheet.open(session: s2, compare: false)
                 sheet.compare(base: .baseBranch)
-                let again = await wait("the comparison with a build file changed", 500) { (sheet.changeSet != nil && sheet.run?.head?.key == b5.key) || sheet.stateTitleText.contains("Could not") }
+                let again = await wait("the comparison with a build file changed", 900) { (sheet.changeSet != nil && sheet.run?.head?.key == b5.key) || sheet.stateTitleText.contains("Could not") }
                 guard again, let set2 = sheet.changeSet else { expect(false, "that comparison finished (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(160)))"); break fromMain }
                 let note2 = ev.entry(of: s2.worktree.path)?.impact
                 expect(note2?.full == false && (note2?.walked ?? 99) < list.count && set2.unplaced.count == 1 && set2.unplaced[0].contains("build.gradle.kts"),

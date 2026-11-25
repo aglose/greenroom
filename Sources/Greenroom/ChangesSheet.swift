@@ -797,8 +797,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         guard case .walking(let depth, let known, _)? = run?.state else { return }
         let s = Int(Date().timeIntervalSince(since))
         let t = String(format: "%d:%02d", s / 60, s % 60)
-        var line = "Walking both builds, the head first and then the base"
-        if known > 0 { line = depth == -1 ? "Capturing \(known) screens" : "Walking \(depth == 0 ? "the first screen" : "\(depth) tap\(depth == 1 ? "" : "s") deep"), \(known) screen\(known == 1 ? "" : "s") found" }
+        // Against the base branch's stored map only this build is walked, and only where the branch changed it.
+        var line = run?.headOnly == true ? "Walking the screens this branch's changes reach" : "Walking both builds, the head first and then the base"
+        let d = depth ?? 0
+        if known > 0 { line = d == -1 ? "Capturing \(known) screens" : "Walking \(d == 0 ? "the first screen" : "\(d) tap\(d == 1 ? "" : "s") deep"), \(known) screen\(known == 1 ? "" : "s") found" }
         stateCard.isHidden = false
         stateSpinner.isHidden = false
         stateSpinner.startAnimation(nil)

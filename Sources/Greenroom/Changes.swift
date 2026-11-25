@@ -412,6 +412,8 @@ final class ChangesRun {
     var onState: ((State) -> Void)?
     private(set) var head: Build?
     private(set) var base: Build?
+    /// The comparison is with the base branch's stored map: only this build is walked.
+    private(set) var headOnly = false
     let session: Session
     private unowned let controller: SessionsController
     private var generation = 0
@@ -440,6 +442,7 @@ final class ChangesRun {
         cancel()
         generation += 1
         let gen = generation
+        headOnly = false
         state = .resolving
         let session = self.session
         Task { @MainActor [weak self] in
@@ -606,6 +609,7 @@ final class ChangesRun {
         var mine = await snapshot()
         if mine == nil {
             let since = Date()
+            headOnly = true
             state = .walking(depth: nil, known: 0, since: since)
             evidence.buildArrived(worktree: path, build: head, auto: .onBuild, withData: withData)
             walking: while true {
