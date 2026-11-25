@@ -286,7 +286,7 @@ enum History {
     /// recorded its dependencies, and `MapImpact` says only some screens. The seed's
     /// folder and only-file are written into `folder`. Off the main thread.
     static func plan(build: Build, profile: MapProfile, candidates: [Workspace], stateRoot: URL, engine: String, support: CrawlRun.Support,
-                     forceFull: Bool, fullReason: String? = nil, folder: URL) async -> WalkPlan {
+                     forceFull: Bool, fullReason: String? = nil, unsignedCounts: Bool = true, folder: URL) async -> WalkPlan {
         var plan = WalkPlan(recordDeps: support.recordDeps)
         guard support.seed, support.recordDeps else { return plan }
         guard let p = await place(build, candidates: candidates, stateRoot: stateRoot) else { return plan }
@@ -298,6 +298,13 @@ enum History {
         for r in [ref, ref.hasPrefix("origin/") ? String(ref.dropFirst(7)) : nil].compactMap({ $0 }) where !onMain {
             onMain = await Git.run(["merge-base", "--is-ancestor", p.commit, r], in: p.workspace.root) != nil
         }
+        // The commit's own map, when it has one (by commit, else by tree): a walk nobody asked for by hand takes it.
+        if let own = p.store.snapshot(profile: profile.id, commit: p.commit) ?? p.store.snapshot(profile: profile.id, tree: p.tree) {
+            plan.existing = own
+            plan.existingStore = p.store
+        }
+        // A walk that is not signed in has no map to start from where only signed-in walks count as one.
+        if profile.signIn == nil, !unsignedCounts { plan.reason = "not signed in, so it starts from no map and is not compared with the base branch's"; return plan }
         let shared = await sharedBaseline(place: p, profile: profile)
         plan.shareProblem = shared.problem
         guard let base = shared.found else {

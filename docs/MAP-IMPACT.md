@@ -114,6 +114,43 @@ A walk started by hand in the Screen Map sheet is the same kind of map as an aut
 Signed in or not is part of the profile. A map walked signed in (a script, or the kept sign-in) is compared only with
 walks made signed in; `ChangesRun.fromMain` looks first for the map its session's own walks will have.
 
+## Signed in, or it is not the map
+
+The map of the base branch is there to have every screen, and an app shows most of its screens only signed in. So by
+default only a walk made signed in (the kept sign-in, a sign-in script in the Screen Map, or the session's own data)
+counts as a map of a repository:
+
+- `Workspace.unsignedBaseline` ("Count Walks That Are Not Signed In" in the repository's + menu, off) lets walks that
+  were not signed in count, for an app with no sign-in or an owner who wants only that part compared.
+- With it off and no sign-in to walk with, a build is not walked by itself: the row says "sign in to walk"
+  (`Evidence.Status.needsSignIn`) and what to do. "Walk Again" by hand still walks.
+- `Evidence.walkProfiles` leaves the not-signed-in profile out, so a pull request diff looks only for a signed-in map
+  of the base branch, and the card that holds a comparison back says so. `History.plan` gives a not-signed-in walk no
+  map to start from.
+- The Screen Map says of a walk of the base branch that is not signed in that it is saved but is not the map pull
+  request diffs use.
+
+Checks walk apps with no sign-in in stand-in repositories: `SessionsController.unsignedForChecks` answers for them.
+
+## Pausing a walk
+
+A whole-app walk can take an hour, so a Screen Map walk can be paused and gone on with, now or after Greenroom was quit:
+
+- **Pause walk** stops the crawler (SIGTERM): the engine writes what it has found and the ids still to open
+  (`unexplored`). The sheet shows that part, says "Paused: 233 screens found, 66 still to open", and keeps the folder
+  and the walk's settings (`ScreenMap.Paused`, in the defaults).
+- **Resume walk** starts a walk seeded from that folder with `unexplored` as its `--only-file` and the same settings
+  (the engine refuses another set of captures). It can be paused again; each pause's folder holds everything so far.
+- The finished walk is one walk of its commit: a `greenroom-resumed` marker makes `importWalk(continuation:)` take
+  what was carried from the paused part as walked here.
+- **Start over** forgets the paused walk. **Stop** (while walking) keeps nothing, and asks first after 15 seconds,
+  offering to pause instead.
+
+Not yet: pausing an automatic walk (a session's or the base branch's own); "stop walking" there still keeps nothing.
+
+Checked by `--map-check DIR APK` (engine 0.63.1, its test app): paused 6 s in with 4 screens found and 3 to open,
+resumed, finished with 10 screens in 84 s, saved with nothing marked as carried.
+
 ## What makes a walk slow
 
 Measured on one whole-app walk of an app with two Room databases (`--keep-data -j 6`, stopped after 58 minutes, 233

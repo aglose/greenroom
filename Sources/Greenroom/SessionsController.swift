@@ -284,6 +284,10 @@ final class SessionsController {
             keep.state = ws.keepMain ? .on : .off
             keep.toolTip = "A row at the top runs the newest \(MainBuilds.shortName(ws.baseRef)): Greenroom fetches it and builds each new commit by itself"
             menu.addItem(keep)
+            let unsigned = ClosureMenuItem("Count Walks That Are Not Signed In") { [weak self] in self?.setUnsignedBaseline(!ws.unsignedBaseline, for: workspace) }
+            unsigned.state = ws.unsignedBaseline ? .on : .off
+            unsigned.toolTip = Workspace.unsignedExplanation
+            menu.addItem(unsigned)
         }
         menu.addItem(ClosureMenuItem("Add Repository…") { [weak self] in self?.chooseRepository() })
         return menu
@@ -616,6 +620,29 @@ final class SessionsController {
         if Engine.shared.simulators.contains(where: { ScreenRecording.shared.recorder(for: $0) != nil && !AgentRecording.isAgentTake($0) }) { return true }   // the person is recording (an agent's take is not)
         guard let s = sessions.first(where: { $0.worktree.path == owner }) else { return false }
         return buildQueue.isBuilding(workspace: s.workspace.path)
+    }
+
+    /// Whether a walk that was not signed in counts as a map of this repository (see `Workspace.unsignedBaseline`).
+    /// Checks walk apps with no sign-in in stand-in repositories: `unsignedForChecks` answers for them.
+    static var unsignedForChecks: Bool? = CommandLine.arguments.contains { $0.hasPrefix("--") && $0.hasSuffix("-check") } ? true : nil
+    func countsUnsigned(_ root: URL?) -> Bool {
+        if let forced = Self.unsignedForChecks { return forced }
+        return workspaces.first { $0.root.path == root?.path }?.unsignedBaseline ?? false
+    }
+    /// The repository a walk's owner belongs to: a session's worktree, the base branch's own (the trunk), or a pull request row.
+    func workspaceRoot(ofOwner owner: String) -> URL? {
+        if let s = sessions.first(where: { $0.worktree.path == owner }) { return s.workspace }
+        if let ws = workspaces.first(where: { mainBuilds.trunk(of: $0.root).path == owner }) { return ws.root }
+        if owner.hasPrefix("pr:"), let p = pulls.all.first(where: { "pr:" + $0.id == owner }) { return URL(fileURLWithPath: p.workspace) }
+        return nil
+    }
+    func setUnsignedBaseline(_ on: Bool, for root: URL) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == root.path }) else { return }
+        workspaces[i].unsignedBaseline = on
+        store.saveWorkspaces(workspaces)
+        // What was held back for want of a sign-in is walked now; main's too.
+        if on { for s in sessions where s.workspace.path == root.path { if let b = builds[s.worktree.path] ?? s.build { buildArrivedForEvidence(s.worktree.path, b) } }; mainBuilds.ensure(workspaces[i], force: true) }
+        onChange?()
     }
 
     func walksWithData(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.walkWithData ?? false }

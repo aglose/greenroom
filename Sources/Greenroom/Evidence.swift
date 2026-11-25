@@ -28,6 +28,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case done(screens: Int, crashes: Int, unfinished: Bool)
         case failed(String)
         case stopped
+        /// Not walked: the repository's maps are walked signed in, and there is no sign-in to walk with.
+        case needsSignIn
     }
 
     /// What the row of one session shows about its newest build.
@@ -316,6 +318,13 @@ final class Evidence: NSObject, NSMenuItemValidation {
             return
         }
         drop(worktree)
+        // A map is walked signed in, since only that reaches every screen: with no sign-in to walk with (the kept one,
+        // or the session's own data), a walk nobody asked for by hand is not made, and the row says what to do.
+        if !force, keptSignIn(worktree) == nil, !withData, controller?.countsUnsigned(controller?.workspaceRoot(ofOwner: worktree)) == false {
+            entries[worktree] = Entry(key: build.key, date: build.date, status: .needsSignIn, note: nil)
+            onChange?()
+            return
+        }
         if force { try? fm.removeItem(at: map) }
         // The data of this session is used only when the workspace asked for it.
         // The app's kept sign-in ("Sign In Once") comes first; else this session's own data, when the workspace asked for it.
@@ -355,7 +364,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
     func walkProfiles(worktree: String, withData: Bool) -> [MapProfile] {
         let quick = controller?.walksQuick(worktree: worktree) == true
         let signedInFirst = keptSignIn(worktree) != nil || withData
-        return (signedInFirst ? [true, false] : [false, true]).map {
+        // A map that was not walked signed in is none, unless the repository counts those.
+        let unsigned = controller?.countsUnsigned(controller?.workspaceRoot(ofOwner: worktree)) ?? true
+        return (signedInFirst ? [true, false] : [false, true]).filter { $0 || unsigned }.map {
             Self.profile(depth: quick ? 2 : budget.depth, seconds: quick ? 120 : budget.seconds, appearances: ["light"], start: nil, signedIn: $0, offline: false)
         }
     }
@@ -477,6 +488,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         guard !job.isChanges, let profile = job.profile else { then(nil); return }
         let candidates = candidates(for: job), root = store.root, engine = Engine.shared.version, build = job.build
         let force = job.forceFull, why = job.fullWhy, verify = job.verifyOf != nil
+        let unsigned = controller?.countsUnsigned(controller?.workspaceRoot(ofOwner: job.verifyOf ?? job.owner)) ?? true
         let work = job.part.deletingLastPathComponent().appendingPathComponent(verify ? "verify-work" : "impact-work", isDirectory: true)
         job.workDir = work
         Task { @MainActor in
@@ -490,7 +502,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     return await History.verifyPlan(build: build, profile: profile, candidates: candidates, stateRoot: root, folder: work)
                 }
                 return await History.plan(build: build, profile: profile, candidates: candidates, stateRoot: root, engine: engine, support: support,
-                                          forceFull: force, fullReason: why, folder: work)
+                                          forceFull: force, fullReason: why, unsignedCounts: unsigned, folder: work)
             }.value
             then(plan)
         }
@@ -1048,6 +1060,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             return (screens ?? "\(n) screen\(n == 1 ? "" : "s")") + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : "") + (unfinished ? ", not finished" : "") + signIn
         case .failed: return "walk failed"
         case .stopped: return "walk stopped"
+        case .needsSignIn: return "sign in to walk"
         }
     }
 
@@ -1056,6 +1069,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         switch e.status {
         case .failed(let why): lines.append(why)
         case .stopped: lines.append("The walk was stopped. \"Walk again\" starts it.")
+        case .needsSignIn: lines.append("A map is walked signed in, so it has every screen, and this app has no sign-in kept. Choose \"Sign In Once…\" in this row's menu (or the Screen Map's sign-in menu) and it is walked by itself. For an app with no sign-in, turn on \"Count Walks That Are Not Signed In\" in the repository's + menu.")
         case .done(_, _, true): lines.append("The walk ran out of time before it had tried everything. \"Walk again\" tries again.")
         case .queued, .walking:
             if e.whole { lines.append("Mapping the whole app, on up to \(budget.jobs) hidden devices at once. This is the long walk: once the app has a map, a new build only redoes the screens its changes could touch.") }

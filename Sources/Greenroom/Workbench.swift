@@ -999,6 +999,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             await History.baseline(commit: commit, mainRef: workspace.baseRef, in: workspace.root, store: store, profile: profile.id)
         }
         ctx.baseBranch = onBase ? MainBuilds.shortName(workspace.baseRef) : nil
+        ctx.unsignedCounts = sessions.countsUnsigned(workspace.root)
         return ctx
     }
 

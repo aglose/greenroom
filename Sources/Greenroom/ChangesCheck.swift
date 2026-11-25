@@ -329,6 +329,27 @@ enum ChangesCheck {
                        "with no map of main the comparison is held and nothing is walked (\(sheet.stateTitleText): \(sheet.stateDetailText.prefix(90)))")
                 shot("7-held.png")
 
+                // Signed in or nothing: with the repository's default (walks that are not signed in do not count) and no
+                // sign-in kept, a build is not walked by itself, and the row and the comparison say what to do.
+                SessionsController.unsignedForChecks = nil
+                let unwalked = ev.started
+                if let b0 = sessions.builds[s0.worktree.path] ?? s0.build {
+                    ev.buildArrived(worktree: s0.worktree.path, build: b0, auto: .onBuild, withData: false)
+                    await sleep(1)
+                    let e0 = ev.entry(of: s0.worktree.path)
+                    expect(e0?.status == .needsSignIn && ev.started == unwalked && e0.map { ev.label($0) } == "sign in to walk" && e0.map { ev.detail($0).contains("Sign In Once") } == true,
+                           "with no sign-in kept a build is not walked by itself, and the row says why (\(e0.map { ev.label($0) } ?? "no row"))")
+                    expect(!sessions.countsUnsigned(s0.workspace) && ev.walkProfiles(worktree: s0.worktree.path, withData: false).allSatisfy { $0.signIn != nil },
+                           "only a signed-in walk counts as a map of this repository")
+                }
+                if let i = sessions.workspaces.firstIndex(where: { $0.root.path == s0.workspace.path }) {
+                    sessions.setUnsignedBaseline(true, for: sessions.workspaces[i].root)
+                    expect(sessions.countsUnsigned(s0.workspace) && ev.walkProfiles(worktree: s0.worktree.path, withData: false).count == 2,
+                           "\u{201C}Count Walks That Are Not Signed In\u{201D} lets the others count for this repository")
+                    ev.stop(worktree: s0.worktree.path)
+                }
+                SessionsController.unsignedForChecks = true
+
                 // Main's one walk: the whole app (a walk cut at a depth leaves its last screens with no record of what
                 // they depend on, and those are walked again every time). A build of its own: `vb` is filed with no commit.
                 ev.budget = Evidence.Budget(depth: 0, seconds: 300, jobs: 2)

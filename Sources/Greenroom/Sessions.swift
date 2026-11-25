@@ -41,14 +41,19 @@ struct Workspace: Codable, Equatable {
     /// "Keep main built" (on): the repository's base branch is fetched and its newest commit built by itself, a
     /// row at the top that runs it (MainBuild.swift).
     var keepMain = true
+    /// "Count Walks That Are Not Signed In" (off): the map of the base branch, which pull request diffs start from and
+    /// are compared with, is one walked signed in, since only that reaches every screen. With this on a walk that
+    /// was not signed in counts too (an app with no sign-in, or one whose owner wants only that part walked).
+    var unsignedBaseline = false
 
+    static let unsignedExplanation = "The map of the base branch is walked signed in, so it has every screen, and walks that are not signed in are left out of pull request diffs. Turn this on for an app with no sign-in, or to compare only what is reachable without one."
     static let shareExplanation = "Stores each walk's map in this repository under refs/greenroom/maps and pushes it to origin, so teammates see a pull request's map without walking it. Captures of the app's screens are uploaded to your git remote."
     static let shareSignedInExplanation = "Maps walked on your signed-in data can show your account; they are pushed only with this on."
 
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain }
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain, unsignedBaseline }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -69,6 +74,7 @@ struct Workspace: Codable, Equatable {
         shareMaps = (try? c.decodeIfPresent(Bool.self, forKey: .shareMaps)) ?? shareMaps
         shareSignedInMaps = (try? c.decodeIfPresent(Bool.self, forKey: .shareSignedInMaps)) ?? shareSignedInMaps
         keepMain = (try? c.decodeIfPresent(Bool.self, forKey: .keepMain)) ?? keepMain
+        unsignedBaseline = (try? c.decodeIfPresent(Bool.self, forKey: .unsignedBaseline)) ?? unsignedBaseline
     }
 }
 

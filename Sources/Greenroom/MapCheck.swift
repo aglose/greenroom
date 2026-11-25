@@ -41,6 +41,54 @@ extension AppDelegate {
         let started = Date()
         guard map.walk() else { expect(false, "the walk starts (Python 3 found)"); end(); return }
         var shotWalking = false
+        /// A walk of the whole app, paused once it has found a few screens and resumed: what was found is kept and
+        /// shown, the walk goes on from it, and the finished map is one walk of its commit, saved.
+        func pauseResume(store: MapStore) {
+            map.configure(depth: 5, time: 5, captures: 0, start: "")
+            workbench.showMap()
+            map.chooseSignIn(nil)
+            guard map.walk() else { expect(false, "the walk to pause starts"); end(); return }
+            let began = Date()
+            var stage = 0
+            var kept: ScreenMap.Paused?
+            var resumedAt = Date()
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] timer in
+                let t = Date().timeIntervalSince(began)
+                switch stage {
+                case 0:
+                    guard map.knownScreens >= 3 || t > 200 else { return }
+                    expect(map.isWalking && map.walkTitle == "Pause walk" && map.stopTitle == "Stop", "while it walks the buttons are Pause walk and Stop (\(map.walkTitle), \(map.stopTitle); \(map.knownScreens) screens at \(Int(t)) s)")
+                    map.pause()
+                    stage = 1
+                case 1:
+                    guard !map.isWalking || t > 260 else { return }
+                    kept = map.paused
+                    expect(kept != nil && (kept?.found ?? 0) >= 3 && (kept?.toOpen ?? 0) > 0 && map.statusText.hasPrefix("Paused") && map.data != nil,
+                           "paused, what it found is kept and shown: \(map.statusText.prefix(80))")
+                    expect(map.walkTitle == "Resume walk" && map.stopTitle == "Start over", "the buttons are Resume walk and Start over (\(map.walkTitle), \(map.stopTitle))")
+                    expect(UserDefaults.standard.data(forKey: "mapPaused") != nil, "the paused walk is written down, so it is still there after Greenroom is quit")
+                    captureWindow(to: dir.appendingPathComponent("6-paused.png"))
+                    guard kept != nil, map.walk(resume: true) else { expect(false, "the paused walk resumes"); timer.invalidate(); end(); return }
+                    resumedAt = Date()
+                    stage = 2
+                default:
+                    guard (!map.isWalking && (map.snapshot != nil || map.data == nil) && !map.host.navigator.busy) || Date().timeIntervalSince(resumedAt) > 500 else { return }
+                    timer.invalidate()
+                    let found = map.data?.screens.count ?? 0
+                    let marker = map.data.map { FileManager.default.fileExists(atPath: $0.folder.appendingPathComponent(ScreenMap.resumedMarker).path) } ?? false
+                    expect(!map.isWalking && map.paused == nil && found >= (kept?.found ?? 99) && marker,
+                           "resumed, the walk finished with \(found) screens (\(kept?.found ?? 0) when paused, \(kept?.toOpen ?? 0) then still to open) in \(Int(Date().timeIntervalSince(resumedAt))) s")
+                    let snap = map.snapshot
+                    let saved = snap.flatMap { store.snapshot(profile: $0.profile.id, commit: "2222222222222222222222222222222222222222") }
+                    expect(saved != nil && saved?.screens.count == found && saved?.screens.contains { $0.carriedFrom != nil } == false && saved?.cutShort == false,
+                           "it is saved as one finished walk of its commit, with nothing marked as carried (\(saved?.screens.count ?? 0) screens)")
+                    expect(map.walkTitle == "Walk again" && map.stopTitle.isEmpty, "and the buttons are back to Walk again")
+                    captureWindow(to: dir.appendingPathComponent("7-resumed.png"))
+                    end()
+                }
+            }
+        }
+
         /// A second walk from the slot screen, compared with the first as if the first were the baseline commit's.
         func diffWalk(first: ScreenMapData) {
             let fm = FileManager.default
@@ -104,7 +152,7 @@ extension AppDelegate {
                         // The screens the base alone had are gone from the view, so a card that hung from one slides to the left; it keeps its row.
                         let kept = moved.filter { l, f in map.host.navigator.surface.frame(of: l).map { $0.minY == f.minY && $0.size == f.size } ?? false }.count
                         expect(!moved.isEmpty && kept == moved.count, "the card still there keeps its row and size when the pair changes (\(kept) of \(moved.count))")
-                        end()
+                        pauseResume(store: store)
                     }
                 }
             }
