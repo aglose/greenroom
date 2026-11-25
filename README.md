@@ -37,7 +37,9 @@ version of it and adds the workbench.
   else Greenroom walks both builds on hidden devices. It shows, in tabs, **Summary** (screens new, changed
   and gone, crashes on either side, what the walk did not finish), **Screens** (added, changed and removed screens in groups; base, head and a difference map side
   by side or under a wipe slider, how the screen is reached, why it was walked again and the texts and controls that changed, and "Go there" to open the screen on the session's simulator), **Map** (the head's
-  screen map with new screens green, changed amber and gone red), **Video** (a recorded tour: both builds taken to
+  screen map with new screens green, changed amber and gone red: first only the changes and what is next to them,
+  then, in the whole app, with everything else dimmed, the view on the place where screens changed and a stepper
+  between such places), **Video** (a recorded tour: both builds taken to
   each screen that differs, played together with a chapter per screen) and **Live** (both builds side by side with
   mirrored input). "Copy summary" puts a Markdown summary on the clipboard and "Open report" opens the crawler's own
   report. The base is never built for you: with no build of it stored or on CI the sheet says so and offers to check

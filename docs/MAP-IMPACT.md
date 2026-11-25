@@ -77,10 +77,22 @@ held and nothing is walked; with one (10 screens, 203 s), a branch that changes 
 file is on and the comparison names them, the reason and the text that changed. That walk took 348 s: the engine
 failed at the end of its first attempt (the error above) and it was made again.
 
+**In the whole app.** The comparison's map (the Changes sheet's Map tab, the Screen Map's timeline) opens folded to
+the changed screens and what is one step from them. "N unchanged · show in the whole app" unfolds it: the base
+branch's whole graph in its usual layout, where the screens that did not change step back (`MapSurface.spotlight`:
+dimmed cards, dim tiles far away) and the view opens on the first place where screens changed instead of on the whole
+map (`MapSurface.show(region:)`, never past 1x). Changed screens that stand within about three columns of each other
+are one place (`MapSurface.regions`); with several, "Changes in N places · 1 of N ›" (R, Shift-R) goes round them,
+and with one it brings the view back. A selection lights its own routes as before.
+
+**Removed screens.** A walk compared with its seed says which carried screens the new build no longer leads to
+(`compare` entries with status `gone`, apksim 0.63.0). `importWalk` leaves them and the transitions out of them out of
+the snapshot, so the comparison with the base branch shows them as removed. Ones the engine calls `unknown` stay. A
+walk made again without `--diff-seed` (the retry above) has no such list, and carries them.
+
 Limits: a build with uncommitted changes has no place in the history, so it is compared as before (both builds
 walked). A walk cut at a depth leaves its last screens with no record of what they depend on, and those are walked
-again every time: the default is the whole app. A screen a branch deletes is still carried from the base branch's map
-until the engine can say it is gone (aglose/apksim#629).
+again every time: the default is the whole app.
 
 ## Decisions the brief left open
 

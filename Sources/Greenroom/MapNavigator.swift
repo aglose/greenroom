@@ -489,6 +489,14 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
     private let nextButton = GlassButton(symbol: "chevron.down", label: "Next changed screen (N)", target: nil, action: nil)
     private let previousButton = GlassButton(symbol: "chevron.up", label: "Previous changed screen (P)", target: nil, action: nil)
     private let foldButton = GlassButton(symbol: nil, title: "", label: "Show the screens the comparison left unchanged", style: .well, target: nil, action: nil)
+    /// With the whole map shown under a comparison: where the changes are, one region at a time.
+    private let regionButton = GlassButton(symbol: nil, title: "", label: "Go to the next place in the map where screens changed", style: .well, target: nil, action: nil)
+    /// The parts of the canvas where changed screens stand together, in reading order, and the one in view.
+    private(set) var regions: [CGRect] = []
+    private(set) var regionIndex = 0
+    var regionTitle: String { regionButton.isHidden ? "" : regionButton.title }
+    /// How far apart two changed screens may stand and still be one place: about three columns.
+    static let regionReach: CGFloat = 330
     private let minimap = MapMinimap(frame: NSRect(origin: .zero, size: MapMinimap.box))
     private let resultsScroll = NSScrollView()
     private let table = NSTableView()
@@ -525,6 +533,7 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         nextButton.onPress = { [weak self] in self?.step(1) }
         previousButton.onPress = { [weak self] in self?.step(-1) }
         foldButton.onPress = { [weak self] in self?.toggleFold() }
+        regionButton.onPress = { [weak self] in self?.stepRegion(1) }
         let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let bar = NSStackView(views: [segments, spacer, previousButton, nextButton, field, count, fitButton])
         bar.spacing = 8
@@ -540,6 +549,8 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         minimap.translatesAutoresizingMaskIntoConstraints = false
         foldButton.translatesAutoresizingMaskIntoConstraints = false
         foldButton.isHidden = true
+        regionButton.translatesAutoresizingMaskIntoConstraints = false
+        regionButton.isHidden = true
         minimap.isHidden = true
         minimap.onMove = { [weak self] p in self?.centre(on: p) }
 
@@ -570,6 +581,7 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         addSubview(bar)
         addSubview(minimap)
         addSubview(foldButton)
+        addSubview(regionButton)
         addSubview(resultsScroll)
         NSLayoutConstraint.activate([
             bar.topAnchor.constraint(equalTo: topAnchor), bar.leadingAnchor.constraint(equalTo: leadingAnchor), bar.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -578,6 +590,7 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
             minimap.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16), minimap.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
             minimap.widthAnchor.constraint(equalToConstant: MapMinimap.box.width), minimap.heightAnchor.constraint(equalToConstant: MapMinimap.box.height),
             foldButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16), foldButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            regionButton.leadingAnchor.constraint(equalTo: foldButton.trailingAnchor, constant: 8), regionButton.centerYAnchor.constraint(equalTo: foldButton.centerYAnchor),
             resultsScroll.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: -2), resultsScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             resultsScroll.widthAnchor.constraint(equalToConstant: 420), resultsScroll.heightAnchor.constraint(equalToConstant: 8 * 38 + 4),
         ])
@@ -664,7 +677,16 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         let (m, o) = (scroll.magnification, clip.bounds.origin)
         let keep = selectedKey
         surface.show(p.input)
-        if fit && p.shown.count <= 80 {
+        // The whole map under a comparison: what did not change steps back, and the view opens on the first place
+        // where screens changed instead of on the whole map.
+        // A map small enough that the fold hides nothing is the whole map already.
+        let whole = model?.hasDiff == true && filter == .all && (!folded || p.folded == 0)
+        surface.spotlight = whole
+        regions = whole ? MapSurface.regions(of: surface.changedFrames, reach: Self.regionReach) : []
+        regionIndex = 0
+        if fit, let first = regions.first {
+            surface.show(region: first, animated: false)
+        } else if fit && p.shown.count <= 80 {
             // A few screens stacked in a long strip would fit as a thread: show them as cards, from the top.
             scroll.magnification = 1
             clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: .zero, size: clip.bounds.size)).origin)
@@ -716,8 +738,11 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         let canFold = m.hasDiff && filter == .all && (m.counts[.changed] ?? 0) > 0
         let n = plan?.folded ?? 0
         foldButton.isHidden = !(canFold && (folded ? n > 0 : true))
-        foldButton.title = folded ? "\(n) unchanged  ·  show" : "Changes only"
+        foldButton.title = folded ? "\(n) unchanged  ·  show in the whole app" : "Changes only"
         foldButton.toolTip = folded ? "Show the screens the comparison left unchanged" : "Fold the unchanged screens away again"
+        regionButton.isHidden = regions.isEmpty
+        regionButton.title = regions.count > 1 ? "Changes in \(regions.count) places  ·  \(regionIndex + 1) of \(regions.count)  \u{203A}" : "Show the changes"
+        regionButton.toolTip = regions.count > 1 ? "Go to the next place in the map where screens changed (R)" : "Bring the changed screens back into view (R)"
         let any = !(plan?.changedOrder.isEmpty ?? true)
         nextButton.isEnabled = any
         previousButton.isEnabled = any
@@ -766,6 +791,14 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         return false
     }
 
+    /// The next (1) or previous (-1) place where screens changed, round the map; with one place, back to it.
+    func stepRegion(_ by: Int) {
+        guard !regions.isEmpty else { return }
+        if regions.count > 1 { regionIndex = ((regionIndex + by) % regions.count + regions.count) % regions.count }
+        surface.show(region: regions[regionIndex])
+        refreshControls()
+    }
+
     /// The next (1) or previous (-1) changed screen from the selected one, round the map in reading order.
     func step(_ by: Int) {
         guard let order = plan?.changedOrder, !order.isEmpty else { return }
@@ -798,6 +831,7 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         case "f": surface.fitAll()
         case "n": step(1)
         case "p": step(-1)
+        case "r": if regions.isEmpty { super.keyDown(with: event) } else { stepRegion(event.modifierFlags.contains(.shift) ? -1 : 1) }
         default: super.keyDown(with: event)
         }
     }

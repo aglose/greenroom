@@ -897,7 +897,7 @@ final class MapSurface: NSView {
             case .notCompared?: 4
             default: 0
             }
-            let lit = focus == nil || i == focus || related.contains(i)
+            let lit = isLit(i, focus)
             paths[bucket][lit ? 1 : 0].addRoundedRect(in: captureFrames[i], cornerWidth: 12, cornerHeight: 12)
         }
         for (b, pair) in dotLayers.enumerated() { for k in 0..<2 { pair[k].path = paths[b][k] } }
@@ -928,7 +928,7 @@ final class MapSurface: NSView {
             case .notCompared?: Design.mute
             default: nil
             }
-            items.append(MapMosaic.Item(frame: captureFrames[i], blob: blob, border: color?.cgColor, lit: focus == nil || i == focus || related.contains(i)))
+            items.append(MapMosaic.Item(frame: captureFrames[i], blob: blob, border: color?.cgColor, lit: isLit(i, focus)))
         }
         let key = MosaicKey(region: region, scale: scale, focus: focus, combo: combo, version: mosaicVersion)
         askedMosaic = key
@@ -1065,6 +1065,74 @@ final class MapSurface: NSView {
         return pill
     }
 
+    // MARK: The changes in the whole map
+
+    /// With a comparison shown in the whole map: the screens it left unchanged step back (dimmed cards, dim tiles far
+    /// away) while nothing is selected, so what changed stands out where it is. A selection lights its own routes as ever.
+    var spotlight = false {
+        didSet {
+            guard spotlight != oldValue else { return }
+            dotsFocus = .none
+            mosaicVersion += 1
+            restyle()
+        }
+    }
+
+    private func isChanged(_ i: Int) -> Bool {
+        switch status[i] { case .added?, .removed?, .modified?: return true; default: return screens[i].tile.map { $0.added + $0.removed + $0.modified > 0 } ?? false }
+    }
+    private func isLit(_ i: Int, _ focus: Int?) -> Bool {
+        if let focus { return i == focus || related.contains(i) }
+        return !spotlight || isChanged(i)
+    }
+
+    /// The cards of the screens the comparison changed (added, removed, modified), in the canvas.
+    var changedFrames: [CGRect] { screens.indices.filter { isChanged($0) }.map { cardFrames[$0] } }
+
+    /// Frames that stand near each other (closer than `reach` in both directions) as one region each: where in a
+    /// large map the changes are. In reading order, columns first (the map's depth runs left to right).
+    static func regions(of frames: [CGRect], reach: CGFloat) -> [CGRect] {
+        var groups: [CGRect] = []
+        for f in frames.sorted(by: { ($0.minX, $0.minY) < ($1.minX, $1.minY) }) {
+            var r = f
+            // Joining may bring two earlier regions within reach of each other: repeat until nothing joins.
+            var joined = true
+            while joined {
+                joined = false
+                for (k, g) in groups.enumerated().reversed() where g.insetBy(dx: -reach, dy: -reach).intersects(r) {
+                    r = r.union(g)
+                    groups.remove(at: k)
+                    joined = true
+                }
+            }
+            groups.append(r)
+        }
+        return groups.sorted { ($0.minX, $0.minY) < ($1.minX, $1.minY) }
+    }
+
+    /// Brings a part of the canvas into view with room around it, magnified to fill the view (never past 1x, never
+    /// below the whole map).
+    func show(region rect: CGRect, animated: Bool = true) {
+        guard let scroll = enclosingScrollView, rect.width > 0, rect.height > 0 else { return }
+        fitLimits()
+        let clip = scroll.contentView
+        let view = clip.frame.size
+        let padded = rect.insetBy(dx: -max(60, rect.width * 0.12), dy: -max(50, rect.height * 0.12))
+        let m = max(scroll.minMagnification, min(1, min(view.width / padded.width, view.height / padded.height)))
+        let size = CGSize(width: view.width / m, height: view.height / m)
+        let origin = clip.constrainBoundsRect(NSRect(x: padded.midX - size.width / 2, y: padded.midY - size.height / 2, width: size.width, height: size.height)).origin
+        let move = {
+            scroll.magnification = m
+            clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
+            scroll.reflectScrolledClipView(clip)
+        }
+        // At the same magnification the view glides there (as a selection does); a change of magnification is made at once.
+        if animated, window != nil, abs(scroll.magnification - m) < 0.001 {
+            let to = clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin
+            Design.animate(Design.move, { clip.animator().setBoundsOrigin(to) }, done: { [weak self] in scroll.reflectScrolledClipView(clip); self?.update() })
+        } else { move(); update() }
+    }
+
     // MARK: Selection and hover
 
     func select(_ lineage: String?, reveal: Bool = true) {
@@ -1092,7 +1160,7 @@ final class MapSurface: NSView {
     private func style(_ c: Card, _ i: Int) {
         let focus = focusIndex
         let on = selected.flatMap { indexOf[$0] } == i
-        c.root.opacity = focus == nil || i == focus || related.contains(i) ? 1 : 0.38
+        c.root.opacity = isLit(i, focus) ? 1 : (focus == nil ? 0.34 : 0.38)
         c.badge.opacity = c.root.opacity
         c.root.transform = i == hovered && !on && detail >= .middle ? CATransform3DMakeScale(1.035, 1.035, 1) : CATransform3DIdentity
     }

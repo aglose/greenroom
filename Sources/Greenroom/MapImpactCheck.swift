@@ -358,6 +358,24 @@ enum MapImpactCheck {
         let tenth = sync { await History.plan(build: build(c2), profile: profile, candidates: [ws], stateRoot: stateRoot, engine: "e1", support: support, forceFull: false, folder: work) }
         expect(!tenth.isFull && tenth.diffControls == "all", "the tenth walk of main is seeded like the others, with every control of its screens tried: \(tenth.reason ?? "seeded")")
 
+        // A walk compared with its seed says a carried screen is gone (apksim 0.63.0's `compare`): it is left out of
+        // the snapshot, so the comparison with the seed shows it as removed. One the engine calls "unknown" stays.
+        if let seedSnap = store.snapshot(profile: profile.id, commit: c1) {
+            let goneWalk = walks.appendingPathComponent("gone-c2")
+            writeWalk(goneWalk, models: models, carried: Set(ids).subtracting([ids[2], ids[3]]))
+            let file = goneWalk.appendingPathComponent("crawl.json")
+            if var json = (try? Data(contentsOf: file)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) {
+                json["compare"] = [["id": NSNull(), "base": ids[7], "status": "gone", "why": "no screen of the new build reaches it"],
+                                   ["id": NSNull(), "base": ids[8], "status": "unknown", "why": "it may still be there"],
+                                   ["id": ids[2], "base": ids[2], "status": "same"]]
+                try? JSONSerialization.data(withJSONObject: json).write(to: file)
+            }
+            let without = store.importWalk(goneWalk, commit: c2, tree: "t", profile: profile, engine: "e1", walked: Date(), seed: seedSnap)
+            let removed = without.map { MapPairing.diff(head: MapPairing.pair(head: $0, base: seedSnap).0, base: seedSnap).screens.filter { $0.status == .removed }.compactMap(\.base) } ?? []
+            expect(without?.screens.count == 14 && without?.screen(ids[7]) == nil && without?.screen(ids[8]) != nil && without?.edges.contains { $0.from == ids[7] } == false && removed == [ids[7]],
+                   "a carried screen the engine calls gone is left out and shows as removed; one it calls unknown stays (removed: \(removed.joined(separator: ", ")))")
+        } else { expect(false, "c1 has its snapshot for the gone-screen step") }
+
         // 6. "Verify carried screens": a quick walk of c2 (its 2 screens walked, 13 carried), then the verification's walk,
         // which reaches the 13 again (here written by hand, with one of them changed).
         store.updateLedger { $0 = MapImpact.Ledger() }
