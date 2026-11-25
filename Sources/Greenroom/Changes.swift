@@ -32,7 +32,7 @@ enum ChangeStatus: String {
     var word: String { self == .unreached ? "not reached" : rawValue }
 }
 
-/// What a comparison found for one screen of the map: its edge colour and badge (MapCanvas).
+/// What a comparison found for one screen of the map: its edge colour and badge on the map.
 struct MapMark {
     let label: String
     let color: NSColor
@@ -99,6 +99,14 @@ struct ChangeSet {
     let unreached: Int
     /// Head and base are one build: nothing was walked, there is nothing to differ.
     var identical = false
+    /// The stored difference this comparison was made from (history), with each lineage's title: what `reasons(of:)` says, and the
+    /// crashes as new, fixed or still there. Nil for a comparison a walk made.
+    var diff: MapDiff?
+    var lineageTitles: [String: String] = [:]
+    /// Where the baseline came from, in a line: "walked both builds", "main at 53ffe80, 6 commits behind the merge base".
+    var baseline: String?
+    /// The history store's folder: a comparison from history shows the store's own pictures.
+    var storeFolder: URL?
     /// Every pair, in the crawler's order: the head's screens, then those only the base has.
     let screens: [ChangeScreen]
     let headMap: ScreenMapData
@@ -110,6 +118,8 @@ struct ChangeSet {
     /// What the walks did not finish, in words.
     let unfinished: [String]
     let reportURL: URL?
+    /// The two snapshots the map shows, when the comparison came from the history; else made from the folder on demand.
+    var mapSource: MapSource? = nil
 
     var differing: [ChangeScreen] { screens.filter { $0.status == .new || $0.status == .changed || $0.status == .gone } }
     var isUnchanged: Bool { summary.differing == 0 }
@@ -157,6 +167,119 @@ struct ChangeSet {
                 why: why))
         }
 
+        // The head's findings only: the base build's crashes are marked on the base-only screens by their edges, not as the head's.
+        var headFindings: [MapFinding] = []
+        for f in (raw["findings"] as? [[String: Any]]) ?? [] where (f["build"] as? String) != "base" {
+            headFindings.append(MapFinding(kind: (f["kind"] as? String) ?? "", detail: (f["detail"] as? String) ?? "",
+                                           steps: ((f["path"] as? [String: Any])?["steps"] as? [String]) ?? []))
+        }
+        var crashes: [ChangeFinding] = []
+        for f in (raw["findings"] as? [[String: Any]]) ?? [] {
+            let kind = (f["kind"] as? String) ?? ""
+            guard kind == "crash" || kind == "compare" else { continue }
+            crashes.append(ChangeFinding(side: (f["build"] as? String) == "base" ? .base : .head, kind: kind, detail: (f["detail"] as? String) ?? ""))
+        }
+        let unfinished = ((raw["incomplete"] as? [String]) ?? []).map(unfinishedLine)
+        var set = assemble(folder: folder, screens: screens, baseToMerged: baseToMerged, headMap: headMap, baseMap: baseMap, headFindings: headFindings,
+                           crashes: crashes, unfinished: unfinished)
+        set.baseline = "walked both builds"
+        return set
+    }
+
+    /// A comparison of two stored snapshots (`History.changeSet`) that remembers its difference, so its lines can say why a screen
+    /// differs. `baseline` says where the base came from.
+    static func fromHistory(head: MapSnapshot, base: MapSnapshot, store: MapStore, folder: URL, baseline: String) -> ChangeSet {
+        var set = History.changeSet(head: head, base: base, store: store, folder: folder)
+        set.diff = MapPairing.diff(head: head, base: base)
+        var titles: [String: String] = [:]
+        for snap in [base, head] { for s in snap.screens { titles[s.lineage] = s.title.isEmpty ? s.activity : s.title } }
+        for s in MapPairing.pair(head: head, base: base).0.screens { titles[s.lineage] = s.title.isEmpty ? s.activity : s.title }
+        set.lineageTitles = titles
+        set.baseline = baseline
+        set.storeFolder = store.folder
+        return set
+    }
+
+    /// The stored change a screen of this comparison stands for.
+    func change(of c: ChangeScreen) -> MapDiff.ScreenChange? { diff?.screens.first { $0.head == c.headID && $0.base == c.baseID } }
+
+    private func routeWord(_ status: MapDiff.EdgeChange.Status, _ n: Int) -> String {
+        "\(n) route\(n == 1 ? "" : "s") \(status == .retargeted ? "redirected" : status.rawValue)"
+    }
+
+    /// Why a modified screen differs, in words: "visual 0.35%, 1 route added, 2 texts changed". `tool` keeps the walk's own wording
+    /// for the pixels ("4,812 px differ (0.35%)"). Nil when this comparison has no stored difference (a walk's) or the screen is not modified.
+    func reasons(of c: ChangeScreen, tool: Bool = false) -> String? {
+        guard let diff, let ch = change(of: c), ch.status == .modified else { return nil }
+        var parts: [String] = []
+        for r in [MapDiff.Reason.visual, .structure, .routes, .text] where ch.reasons.contains(r) {
+            switch r {
+            case .visual:
+                if tool, c.pixels != nil || c.sizeChanged { parts.append(c.detail) }
+                else if c.sizeChanged { parts.append("visual (size changed)") }
+                else if let pc = c.percent { parts.append(pc < 0.01 ? "visual <0.01%" : String(format: "visual %.2f%%", pc)) }
+                else { parts.append("visual") }
+            case .structure: parts.append("structure")
+            case .routes:
+                for st in [MapDiff.EdgeChange.Status.added, .removed, .retargeted] {
+                    let n = diff.edges.filter { $0.from == ch.lineage && $0.status == st }.count
+                    if n > 0 { parts.append(routeWord(st, n)) }
+                }
+            case .text:
+                let n = ch.textAdded.count + ch.textRemoved.count
+                parts.append("\(n) text\(n == 1 ? "" : "s") changed")
+            }
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func title(ofLineage l: String?) -> String {
+        guard let l else { return "nothing" }
+        switch l {
+        case "EXIT": return "the app closing"
+        case "CRASH": return "a crash"
+        case "SKIPPED", "FAILED": return "nothing (\(l.lowercased()))"
+        case "UNFOLLOWED": return "an unfollowed control"
+        default: return lineageTitles[l] ?? l
+        }
+    }
+
+    /// The controls of a screen that were added, removed or sent elsewhere, one line each: `+ "Open Home"`, `- "Share"`,
+    /// `> "Open Home" now leads to Inbox`.
+    func controlLines(of c: ChangeScreen) -> [String] {
+        guard let diff, let ch = change(of: c) else { return [] }
+        return diff.edges.filter { $0.from == ch.lineage }.sorted { ($0.status.rawValue, $0.cmd) < ($1.status.rawValue, $1.cmd) }.map { e in
+            switch e.status {
+            case .added: return "+ \"\(Self.plain(e.action))\""
+            case .removed: return "- \"\(Self.plain(e.action))\""
+            case .retargeted: return "> \"\(Self.plain(e.action))\" now leads to \(Self.plain(title(ofLineage: e.headTo)))"
+            }
+        }
+    }
+
+    /// A stored crash finding of the comparison: new, fixed, or still there.
+    func crashStatus() -> [(status: String, detail: String)] {
+        (diff?.findings ?? []).filter { $0.kind == "crash" || $0.kind == "compare" }.map {
+            ($0.status == .new ? "new" : $0.status == .fixed ? "fixed" : "still there", $0.detail.split(separator: "\n").first.map(String.init) ?? $0.detail)
+        }
+    }
+
+    /// "The walk of the head stopped at the time limit": one line of crawl.json's `incomplete`, in words.
+    static func unfinishedLine(_ line: String) -> String {
+        let isBase = line.hasPrefix("base: ")
+        let text = isBase ? String(line.dropFirst(6)) : line
+        let what: String
+        if text.hasPrefix("--max-seconds") { what = "stopped at the time limit" }
+        else if text.hasPrefix("--max-depth") { what = "did not open the deepest level" }
+        else if text.hasPrefix("--max-screens") { what = "stopped at the screen limit" }
+        else { what = text }
+        return "The walk of the \(isBase ? "base" : "head") \(what)"
+    }
+
+    /// The merged map, the marks and the counts, from the screens a comparison found (a walk's `compare` list or a history diff).
+    /// `baseToMerged` names each base id by the id its pair has in the merged map.
+    static func assemble(folder: URL, screens: [ChangeScreen], baseToMerged: [String: String], headMap: ScreenMapData, baseMap: ScreenMapData?,
+                         headFindings: [MapFinding], crashes: [ChangeFinding], unfinished: [String]) -> ChangeSet {
         // The merged map: the head's screens, plus the base's that no screen of the head reaches, with the edges that
         // lead into or out of them (base ids named by the head's where the two are paired).
         var mergedScreens = headMap.screens
@@ -178,14 +301,8 @@ struct ChangeSet {
                 mergedEdges.append(MapEdge(from: from, action: e.action, cmd: e.cmd, to: to, note: e.note))
             }
         }
-        // The head's findings only: the base build's crashes are marked on the base-only screens by their edges, not as the head's.
-        var headFindings: [MapFinding] = []
-        for f in (raw["findings"] as? [[String: Any]]) ?? [] where (f["build"] as? String) != "base" {
-            headFindings.append(MapFinding(kind: (f["kind"] as? String) ?? "", detail: (f["detail"] as? String) ?? "",
-                                           steps: ((f["path"] as? [String: Any])?["steps"] as? [String]) ?? []))
-        }
         let merged = ScreenMapData(folder: folder, apkName: headMap.apkName, screens: mergedScreens, edges: mergedEdges, findings: headFindings,
-                                   combos: combos, incomplete: headMap.incomplete, seconds: headMap.seconds, apk: headMap.apk)
+                                   combos: headMap.combos, incomplete: headMap.incomplete, seconds: headMap.seconds, apk: headMap.apk)
         var marks: [String: MapMark] = [:]
         for s in screens {
             switch s.status {
@@ -197,23 +314,6 @@ struct ChangeSet {
             }
         }
 
-        var crashes: [ChangeFinding] = []
-        for f in (raw["findings"] as? [[String: Any]]) ?? [] {
-            let kind = (f["kind"] as? String) ?? ""
-            guard kind == "crash" || kind == "compare" else { continue }
-            crashes.append(ChangeFinding(side: (f["build"] as? String) == "base" ? .base : .head, kind: kind, detail: (f["detail"] as? String) ?? ""))
-        }
-        var unfinished: [String] = []
-        for line in (raw["incomplete"] as? [String]) ?? [] {
-            let isBase = line.hasPrefix("base: ")
-            let text = isBase ? String(line.dropFirst(6)) : line
-            let what: String
-            if text.hasPrefix("--max-seconds") { what = "stopped at the time limit" }
-            else if text.hasPrefix("--max-depth") { what = "did not open the deepest level" }
-            else if text.hasPrefix("--max-screens") { what = "stopped at the screen limit" }
-            else { what = text }
-            unfinished.append("The walk of the \(isBase ? "base" : "head") \(what)")
-        }
         let report = folder.appendingPathComponent("report.html")
         var counts = Evidence.ChangesSummary()
         for c in screens { switch c.status { case .new: counts.new += 1; case .changed: counts.changed += 1; case .gone: counts.gone += 1; case .same: counts.same += 1; case .unreached: break } }
@@ -246,18 +346,26 @@ struct ChangeSet {
         var out = ["## Changes: \(Self.plain(head)) against \(Self.plain(base))", ""]
         let s = summary
         out.append("\(s.new) new, \(s.changed) changed, \(s.gone) gone, \(s.same) the same" + (unreached > 0 ? ", \(unreached) not reached (a walk did not finish)." : "."))
+        if let baseline { out.append(""); out.append("Baseline: \(Self.plain(baseline)).") }
         if !differing.isEmpty { out.append("") }
         for c in differing {
             switch c.status {
             case .new: out.append("+ \(Self.plain(c.title)) (new)")
-            case .changed: out.append("~ \(Self.plain(c.title)): \(Self.plain(c.detail))")
+            case .changed:
+                out.append("~ \(Self.plain(c.title)): \(Self.plain(reasons(of: c) ?? c.detail))")
+                let controls = controlLines(of: c)
+                for l in controls.prefix(3) { out.append("  " + l) }
+                if controls.count > 3 { out.append("  +\(controls.count - 3) more") }
             case .gone: out.append("- \(Self.plain(c.title)) (gone)")
             case .same, .unreached: break
             }
         }
         if identical { out.append(""); out.append("Head and base are the same build.") }
         else if isUnchanged { out.append(""); out.append(unreached > 0 ? "No screen differs among those both walks reached." : "No screen differs.") }
-        if !crashes.isEmpty {
+        if diff != nil {
+            let found = crashStatus()
+            if !found.isEmpty { out.append(""); for c in found { out.append("Crash, \(c.status): \(Self.plain(c.detail))") } }
+        } else if !crashes.isEmpty {
             out.append("")
             for c in crashes { out.append("Crash in the \(c.side == .base ? "base" : "head"): \(Self.plain(c.detail.split(separator: "\n").first.map(String.init) ?? c.detail))") }
         }
@@ -343,23 +451,83 @@ final class ChangesRun {
                     return
                 }
                 self.state = .walking(depth: nil, known: 0, since: Date())
+                // From history: both builds' maps are stored, so nothing is walked. A stored base and a head with none is
+                // walked alone (the evidence walk files it), then compared from history. Anything else is a pair walk, as before.
+                if baseOption.isEmpty, await self.fromHistory(head: head, base: base, workspace: ws, start: start, gen: gen) { return }
+                guard gen == self.generation else { return }
                 self.token = self.controller.evidence.changes(head: head, base: base, start: start, baseOption: baseOption, progress: { [weak self] e in
                     guard let self, gen == self.generation, case .walking(var depth, var known, let since) = self.state else { return }
                     switch e {
                     case .level(let d, _, let k): depth = d; known = k
                     case .capturing(let n, _): depth = -1; known = n
-                    case .line: return
+                    case .line, .screen: return
                     }
                     self.state = .walking(depth: depth, known: known, since: since)
                 }, completion: { [weak self] result in
                     guard let self, gen == self.generation else { return }
                     switch result {
                     case .success(let r):
-                        if let set = ChangeSet.read(r.folder) { self.state = .done(set) } else { self.state = .failed("The comparison finished but its result could not be read.") }
+                        if let set = ChangeSet.read(r.folder) {
+                            self.state = .done(set)
+                            // The pair's walk gave both builds' maps: filed, so the next comparison with this base walks only its head.
+                            if baseOption.isEmpty { self.fileFromPair(folder: r.folder, head: head, base: base, workspace: ws, start: start) }
+                        } else { self.state = .failed("The comparison finished but its result could not be read.") }
                     case .failure(let f): self.state = f.message == "cancelled" ? .cancelled : .failed(f.message)
                     }
                 })
             }
+        }
+    }
+
+    /// Answers from stored snapshots when it can. True when the comparison ended here (done or failed); false to walk the pair.
+    @MainActor
+    private func fromHistory(head: Build, base: Build, workspace ws: Workspace, start: String?, gen: Int) async -> Bool {
+        let evidence = controller.evidence
+        let profile = evidence.changesProfile(start: start)
+        let root = evidence.store.root
+        let folder = evidence.changesFolder(head: head.key, base: base.key)
+        func attempt() async -> ChangeSet? {
+            await Task.detached { await History.changeSet(head: head, base: base, workspace: ws.root, profile: profile, stateRoot: root, folder: folder) }.value
+        }
+        if let set = await attempt() {
+            guard gen == generation else { return true }
+            state = .done(set)
+            return true
+        }
+        // Only the head lacks a map: one walk of it (it is filed when it ends), no walk of the base.
+        guard start == nil, History.fileable(head), await History.hasSnapshot(of: base, workspace: ws.root, profile: profile, stateRoot: root) else { return false }
+        let result: Result<Evidence.ChangesResult, Evidence.Failure> = await withCheckedContinuation { c in
+            self.token = evidence.walkHead(head, progress: { [weak self] e in
+                guard let self, gen == self.generation, case .walking(var depth, var known, let since) = self.state else { return }
+                switch e {
+                case .level(let d, _, let k): depth = d; known = k
+                case .capturing(let n, _): depth = -1; known = n
+                case .line, .screen: return
+                }
+                self.state = .walking(depth: depth, known: known, since: since)
+            }, completion: { c.resume(returning: $0) })
+        }
+        guard gen == generation else { return true }
+        switch result {
+        case .failure(let f):
+            state = f.message == "cancelled" ? .cancelled : .failed(f.message)
+            return true
+        case .success:
+            await evidence.awaitFiling(head)
+            guard gen == generation else { return true }
+            if let set = await attempt() { state = .done(set); return true }
+            return false
+        }
+    }
+
+    /// Files the heads and bases of a finished pair walk (each that has a commit and is not dirty).
+    private func fileFromPair(folder: URL, head: Build, base: Build, workspace ws: Workspace, start: String?) {
+        let evidence = controller.evidence
+        let profile = evidence.changesProfile(start: start), root = evidence.store.root, engine = Engine.shared.version
+        Task.detached {
+            // The base first: the head's baseline is then the base when it is the merge base.
+            await History.fileFromPair(folder: folder, build: base, side: .base, workspace: ws, profile: profile, stateRoot: root, engine: engine)
+            await History.fileFromPair(folder: folder, build: head, side: .head, workspace: ws, profile: profile, stateRoot: root, engine: engine)
         }
     }
 

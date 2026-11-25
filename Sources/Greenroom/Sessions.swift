@@ -21,6 +21,9 @@ struct Workspace: Codable, Equatable {
     var remote = RemoteSettings()
     /// Evidence walks use a copy of each session's signed-in data (off by default: a walk is fresh).
     var walkWithData = false
+    /// Evidence walks stop two taps deep after two minutes instead of covering the whole app (off by default: a map
+    /// that is the app's history has to be all of it).
+    var quickWalk = false
     /// While an agent drives a session's simulator, its screen is recorded under the build's evidence (AgentRecording.swift).
     var recordAgent = true
     /// The worktrees (paths) the person put in the sidebar, the newest first. Only these show, with any that has a
@@ -30,11 +33,22 @@ struct Workspace: Codable, Equatable {
     var hidden: [String] = []
     /// Worktrees put away because their pull request merged: not suggested again, listed apart in the + menu.
     var archived: [String] = []
+    /// "Share screen maps through git" (off by default): each walk's map is kept as refs under refs/greenroom/maps in
+    /// this repository and pushed to origin, and teammates' maps are fetched from it (History, `Workspace.shareExplanation`).
+    var shareMaps = false
+    /// "Also share maps walked on signed-in data" (off): without it such a map is written locally but never pushed.
+    var shareSignedInMaps = false
+    /// "Keep main built" (on): the repository's base branch is fetched and its newest commit built by itself, a
+    /// row at the top that runs it (MainBuild.swift).
+    var keepMain = true
+
+    static let shareExplanation = "Stores each walk's map in this repository under refs/greenroom/maps and pushes it to origin, so teammates see a pull request's map without walking it. Captures of the app's screens are uploaded to your git remote."
+    static let shareSignedInExplanation = "Maps walked on your signed-in data can show your account; they are pushed only with this on."
 
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, recordAgent, shown, hidden, archived }
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -47,10 +61,14 @@ struct Workspace: Codable, Equatable {
         ci = (try? c.decodeIfPresent(CISettings.self, forKey: .ci)) ?? ci
         remote = (try? c.decodeIfPresent(RemoteSettings.self, forKey: .remote)) ?? remote
         walkWithData = (try? c.decodeIfPresent(Bool.self, forKey: .walkWithData)) ?? walkWithData
+        quickWalk = (try? c.decodeIfPresent(Bool.self, forKey: .quickWalk)) ?? quickWalk
         recordAgent = (try? c.decodeIfPresent(Bool.self, forKey: .recordAgent)) ?? recordAgent
         shown = (try? c.decodeIfPresent([String].self, forKey: .shown)) ?? shown
         hidden = (try? c.decodeIfPresent([String].self, forKey: .hidden)) ?? hidden
         archived = (try? c.decodeIfPresent([String].self, forKey: .archived)) ?? archived
+        shareMaps = (try? c.decodeIfPresent(Bool.self, forKey: .shareMaps)) ?? shareMaps
+        shareSignedInMaps = (try? c.decodeIfPresent(Bool.self, forKey: .shareSignedInMaps)) ?? shareSignedInMaps
+        keepMain = (try? c.decodeIfPresent(Bool.self, forKey: .keepMain)) ?? keepMain
     }
 }
 

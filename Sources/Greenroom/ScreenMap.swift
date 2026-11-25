@@ -2,18 +2,43 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// The screen map: a full-stage sheet that walks the app (the engine's crawler) and shows every screen it reached as
-/// a graph, with the route to each. A screen's card opens to its capture, the controls on it and where each leads;
-/// "Go there" replays the route on the selected device.
+/// a graph, with the route to each. A finished walk becomes a snapshot (MapSnapshot) of the build's commit, filed in the
+/// history when the build has one, and the map (MapHost: the navigator and the detail column) shows it, against the
+/// baseline of that commit when the history has one. A strip of the stored snapshots (MapTimeline) re-compares any two.
+/// "Go there" replays a screen's route on the selected device.
+/// Where a walk of the selected build is kept and what it is compared with: the history store of its repository, the
+/// build's commit and tree, and the baseline of that commit for a profile (nil: none). Nil context: the build has no
+/// clean commit, so the walk is shown and not filed.
+struct MapContext {
+    var store: MapStore
+    var commit: String
+    var tree: String
+    var engine: String
+    var baseline: (MapProfile) async -> (snapshot: MapSnapshot, behind: Int)?
+}
+
 final class ScreenMap: NSView {
     private(set) var isOpen = false
     var onSay: ((String, Bool) -> Void)?
     var onToggle: (() -> Void)?
+    /// How far the running walk has got, each second while it runs; nil when it ends. Shown outside the sheet too.
+    var onProgress: ((WalkProgress?) -> Void)?
     /// The selected simulator's APK, the default for a walk.
     var defaultAPK: () -> URL? = { nil }
     /// Replays a screen's route on the selected device.
     var onGo: ((MapScreen, ScreenMapData) -> Void)?
     /// The selected simulator's session worktree, whose `.greenroom/scripts` are offered for signing in too.
     var worktree: () -> URL? = { nil }
+    /// The key of the app's kept sign-in (SignIns): the selected session's repository; nil keys it by the APK's name.
+    var signInKey: () -> String? = { nil }
+    /// "Sign In Once…": opens the app on a visible device (apk, key, the app's name; true when a sign-in was kept).
+    var signInOnce: ((URL, String, String, @escaping (Bool) -> Void) -> Void)?
+    private func keptKey(_ apk: URL) -> String { signInKey() ?? SignIns.key(apk: apk) }
+    private var kept: SignIns.Record? { effectiveAPK.flatMap { SignIns.shared.record(keptKey($0)) } }
+    /// The menu's choice is the kept sign-in.
+    var usesKeptSignIn: Bool { signInPopup.selectedItem?.representedObject as? String == "kept" }
+    /// The history a walked APK belongs to (see MapContext); nil: not in one.
+    var context: (URL) async -> MapContext? = { _ in nil }
 
     /// The script that signs in before a walk (MapSignIn), while it runs; the slot it left, while the walk runs.
     private var signIn: MapSignIn?
@@ -28,6 +53,17 @@ final class ScreenMap: NSView {
     private var pythonURL: URL? = SnapshotRun.python()
     private var ticker: Timer?
     private var reached = (depth: 0, known: 0)
+    /// Screens the running walk has finished with (the crawler's `--events`), and the devices it runs on.
+    private var explored = 0
+    private var devices = 1
+    /// Between Walk and the crawler's start (its options are being asked).
+    private var starting = false
+    private var startedAt = Date()
+    private var shownCombos: [String] = []
+    private var lastSignedIn = false
+    /// Whether closing the sheet during this walk has said that it goes on.
+    private var toldBackground = false
+    private(set) var progress: WalkProgress?
 
     private let dim = NSView()
     private let panel = GlassView(radius: 18)
@@ -38,25 +74,27 @@ final class ScreenMap: NSView {
     private let offline = NSButton(checkboxWithTitle: "Offline", target: nil, action: nil)
     private let startField = NSTextField()
     private let signInPopup = NSPopUpButton()
+    private let exportButton = GlassButton(symbol: "square.and.arrow.up", title: "Export…", label: "Export the map as a folder with an index.html anyone can open in a browser", style: .well, target: nil, action: nil)
     private let walkButton = GlassButton(symbol: "point.3.connected.trianglepath.dotted", title: "Walk the app", label: "Walk every screen the app has", style: .accent, target: nil, action: nil)
     private let summary = NSTextField(labelWithString: "")
     private let crashChip = GlassButton(symbol: "exclamationmark.triangle.fill", title: "", label: "Show where it crashed", style: .record, target: nil, action: nil)
     private let comboControl = NSSegmentedControl(labels: [], trackingMode: .selectOne, target: nil, action: nil)
     private let spinner = NSProgressIndicator()
-    let canvas = MapCanvas(frame: .zero)
-    private let scroll = NSScrollView()
-    private let emptyNote = NSTextField(wrappingLabelWithString: "")
+    let host = MapHost()
+    /// Before the first walk: what a walk does and what decides it (MapOnboarding).
+    let onboarding = MapOnboarding()
+    /// `[head] compared with [base]`.
+    private let compareLabel = NSTextField(labelWithString: "")
+    private let timeline = MapTimeline()
+    private var timelineRow: NSView!
 
-    // Detail.
-    private let detail = NSStackView()
-    private let picture = SnapshotPicture()
-    private let detailTitle = NSTextField(labelWithString: "")
-    private let detailSub = NSTextField(labelWithString: "")
-    private let routeStack = NSStackView()
-    private let controlStack = NSStackView()
-    private let goButton = GlassButton(symbol: "arrow.forward.circle.fill", title: "Go there", label: "Replay the route on the selected device", style: .accent, target: nil, action: nil)
-    private let copyButton = GlassButton(symbol: "doc.on.doc", title: "Copy route", label: "Copy the route as control commands", style: .well, target: nil, action: nil)
-    private var pictureHeight: NSLayoutConstraint!
+    /// What the map shows now: the walk as a snapshot, the store its pictures are in, the stored snapshots of its profile
+    /// (oldest first) and the pair the strip compares.
+    private(set) var snapshot: MapSnapshot?
+    private var mapStore: MapStore?
+    private var stored: [MapSnapshot] = []
+    private var shownCompare: (head: String, base: String?)?
+    private var generation = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -108,11 +146,13 @@ final class ScreenMap: NSView {
         let close = GlassButton(symbol: "xmark", label: "Close (Esc)", target: self, action: #selector(closePressed))
         walkButton.target = self; walkButton.action = #selector(walkPressed)
         let hs = NSView(); hs.setContentHuggingPriority(.init(1), for: .horizontal)
-        let header = NSStackView(views: [title, appLabel, choose, hs, walkButton, close])
+        exportButton.target = self; exportButton.action = #selector(exportPressed)
+        exportButton.isEnabled = false
+        let header = NSStackView(views: [title, appLabel, choose, hs, exportButton, walkButton, close])
         header.spacing = 10
 
-        popup(depthPopup, ["1 tap deep", "2 taps deep", "3 taps deep", "4 taps deep", "6 taps deep"], key: "mapDepth", default: 2)
-        popup(timePopup, ["1 minute", "3 minutes", "5 minutes", "10 minutes"], key: "mapTime", default: 1)
+        popup(depthPopup, ["1 tap deep", "2 taps deep", "3 taps deep", "4 taps deep", "6 taps deep", "Whole app"], key: "mapWalkDepth", default: 5)
+        popup(timePopup, ["1 minute", "3 minutes", "5 minutes", "10 minutes", "30 minutes", "No time limit"], key: "mapWalkTime", default: 5)
         popup(capturePopup, ["Light captures", "Light and dark", "No captures"], key: "mapCaptures", default: 0)
         offline.controlSize = .small
         offline.font = .systemFont(ofSize: 12)
@@ -155,20 +195,7 @@ final class ScreenMap: NSView {
         let status = NSStackView(views: [spinner, summary, crashChip, ss, comboControl, zoomOut, zoomFit, zoomIn])
         status.spacing = 8
 
-        // The map.
-        scroll.documentView = canvas
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.allowsMagnification = true
-        scroll.minMagnification = 0.3
-        scroll.maxMagnification = 2
-        scroll.borderType = .noBorder
-        scroll.contentView.postsBoundsChangedNotifications = false
-        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
-        canvas.onSelect = { [weak self] id in self?.showDetail(id) }
-        canvas.onOpen = { [weak self] id in self?.go(id) }
+        // The map and its detail column.
         let mapWell = NSView()
         mapWell.wantsLayer = true
         mapWell.layer?.backgroundColor = NSColor(white: 0, alpha: 0.22).cgColor
@@ -176,95 +203,42 @@ final class ScreenMap: NSView {
         mapWell.layer?.cornerCurve = .continuous
         mapWell.layer?.masksToBounds = true
         let grid = StageBackground(frame: .zero)
-        emptyNote.font = .systemFont(ofSize: 13)
-        emptyNote.textColor = Design.mute
-        emptyNote.alignment = .center
-        for v in [grid, scroll, emptyNote] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; mapWell.addSubview(v) }
+        onboarding.onChoose = { [weak self] in self?.chooseAPK() }
+        onboarding.onSignIn = { [weak self] in self?.beginSignInOnce() }
+        onboarding.onWalk = { [weak self] in self?.walk() }
+        for v in [grid, host, onboarding] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; mapWell.addSubview(v) }
         NSLayoutConstraint.activate([
             grid.topAnchor.constraint(equalTo: mapWell.topAnchor), grid.bottomAnchor.constraint(equalTo: mapWell.bottomAnchor),
             grid.leadingAnchor.constraint(equalTo: mapWell.leadingAnchor), grid.trailingAnchor.constraint(equalTo: mapWell.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: mapWell.topAnchor), scroll.bottomAnchor.constraint(equalTo: mapWell.bottomAnchor),
-            scroll.leadingAnchor.constraint(equalTo: mapWell.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: mapWell.trailingAnchor),
-            emptyNote.centerXAnchor.constraint(equalTo: mapWell.centerXAnchor), emptyNote.centerYAnchor.constraint(equalTo: mapWell.centerYAnchor),
-            emptyNote.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+            host.topAnchor.constraint(equalTo: mapWell.topAnchor), host.bottomAnchor.constraint(equalTo: mapWell.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: mapWell.leadingAnchor), host.trailingAnchor.constraint(equalTo: mapWell.trailingAnchor),
+            onboarding.centerXAnchor.constraint(equalTo: mapWell.centerXAnchor), onboarding.centerYAnchor.constraint(equalTo: mapWell.centerYAnchor),
         ])
+        host.isHidden = true
+        host.onGo = { [weak self] lineage in self?.go(lineage) }
+        host.onCopyRoute = { [weak self] text in self?.onSay?("Route copied: \(text.split(separator: "\n").count) control commands", false) }
+        host.onPickCommit = { [weak self] commit in self?.pickBase(commit) }
 
-        // The selected screen.
-        detailTitle.font = .systemFont(ofSize: 15, weight: .semibold)
-        detailTitle.textColor = Design.ink
-        detailTitle.lineBreakMode = .byTruncatingTail
-        detailTitle.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        detailSub.font = .systemFont(ofSize: 11.5)
-        detailSub.textColor = Design.mute
-        detailSub.lineBreakMode = .byTruncatingTail
-        detailSub.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        picture.translatesAutoresizingMaskIntoConstraints = false
-        pictureHeight = picture.heightAnchor.constraint(equalToConstant: 300)
-        pictureHeight.isActive = true
-        goButton.target = self; goButton.action = #selector(goPressed)
-        copyButton.target = self; copyButton.action = #selector(copyRoute)
-        let buttons = NSStackView(views: [goButton, copyButton])
-        buttons.spacing = 8
-        for s in [routeStack, controlStack] {
-            s.orientation = .vertical
-            s.alignment = .leading
-            s.spacing = 3
-        }
-        let controlsScroll = NSScrollView()
-        let flip = MapFlippedView()
-        controlStack.translatesAutoresizingMaskIntoConstraints = false
-        flip.addSubview(controlStack)
-        flip.translatesAutoresizingMaskIntoConstraints = false
-        controlsScroll.documentView = flip
-        controlsScroll.drawsBackground = false
-        controlsScroll.hasVerticalScroller = true
-        controlsScroll.autohidesScrollers = true
-        NSLayoutConstraint.activate([
-            controlStack.topAnchor.constraint(equalTo: flip.topAnchor), controlStack.leadingAnchor.constraint(equalTo: flip.leadingAnchor),
-            controlStack.trailingAnchor.constraint(equalTo: flip.trailingAnchor), controlStack.bottomAnchor.constraint(equalTo: flip.bottomAnchor),
-            flip.widthAnchor.constraint(equalTo: controlsScroll.contentView.widthAnchor),
-        ])
-        let routeHead = label("ROUTE", size: 10, weight: .semibold)
-        let controlsHead = label("CONTROLS", size: 10, weight: .semibold)
-        for v in [picture, detailTitle, detailSub, buttons, routeHead, routeStack, controlsHead, controlsScroll] as [NSView] { detail.addArrangedSubview(v) }
-        detail.orientation = .vertical
-        detail.alignment = .leading
-        detail.spacing = 6
-        detail.setCustomSpacing(12, after: picture)
-        detail.setCustomSpacing(12, after: detailSub)
-        detail.setCustomSpacing(14, after: buttons)
-        detail.setCustomSpacing(14, after: routeStack)
-        for v in [picture, controlsScroll, routeStack] as [NSView] { v.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true }
-        controlsScroll.setContentHuggingPriority(.init(1), for: .vertical)
-        controlsScroll.setContentCompressionResistancePriority(.init(1), for: .vertical)
-        let detailWell = NSView()
-        detailWell.wantsLayer = true
-        detailWell.layer?.backgroundColor = Design.well.cgColor
-        detailWell.layer?.cornerRadius = 12
-        detailWell.layer?.cornerCurve = .continuous
-        detail.translatesAutoresizingMaskIntoConstraints = false
-        detailWell.addSubview(detail)
-        NSLayoutConstraint.activate([detail.topAnchor.constraint(equalTo: detailWell.topAnchor, constant: 14), detail.bottomAnchor.constraint(equalTo: detailWell.bottomAnchor, constant: -12),
-                                     detail.leadingAnchor.constraint(equalTo: detailWell.leadingAnchor, constant: 14), detail.trailingAnchor.constraint(equalTo: detailWell.trailingAnchor, constant: -14),
-                                     detailWell.widthAnchor.constraint(equalToConstant: 330)])
-        detail.isHidden = true
+        compareLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        compareLabel.textColor = Design.ink
+        compareLabel.lineBreakMode = .byTruncatingTail
+        compareLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        compareLabel.isHidden = true
+        timeline.translatesAutoresizingMaskIntoConstraints = false
+        timeline.onChange = { [weak self] base, head in self?.compare(base: base, head: head) }
+        timeline.isHidden = true
+        timelineRow = timeline
 
-        let body = NSStackView(views: [mapWell, detailWell])
-        body.spacing = 14
-        body.distribution = .fill
-        body.alignment = .top
-        mapWell.heightAnchor.constraint(equalTo: body.heightAnchor).isActive = true
-        detailWell.heightAnchor.constraint(equalTo: body.heightAnchor).isActive = true
-
+        let body = mapWell
         let rule = NSView(); rule.wantsLayer = true; rule.layer?.backgroundColor = Design.stroke.cgColor
         rule.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        let column = NSStackView(views: [header, settings, rule, status, body])
+        let column = NSStackView(views: [header, settings, rule, status, compareLabel, timeline, body])
         column.orientation = .vertical
         column.spacing = 10
         column.alignment = .leading
         column.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(column)
-        for v in [header, settings, rule, status, body] as [NSView] { v.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
+        for v in [header, settings, rule, status, compareLabel, timeline, body] as [NSView] { v.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
         body.setContentHuggingPriority(.init(1), for: .vertical)
         NSLayoutConstraint.activate([column.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), column.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -16),
                                      column.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18), column.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -18)])
@@ -277,16 +251,16 @@ final class ScreenMap: NSView {
         isOpen = true
         if pythonURL == nil { pythonURL = SnapshotRun.python() }
         reloadScripts()
-        if data == nil, !isWalking, let f = lastFolder, let last = ScreenMapData.read(f) { present(last, animated: false) }
+        if data == nil, !isWalking, let f = lastFolder, let last = ScreenMapData.read(f) { present(last, animated: false, live: false) }
         refresh()
         isHidden = false
         alphaValue = 0
         panel.layer?.setAffineTransform(CGAffineTransform(translationX: 0, y: 8))
-        window?.makeFirstResponder(canvas)
+        window?.makeFirstResponder(host.navigator.surface)
         Design.animate(Design.arrive, {
             self.animator().alphaValue = 1
             self.panel.layer?.setAffineTransform(.identity)
-        }, done: { if self.data != nil, self.scroll.magnification == 1 { self.fit(animated: false) } })
+        }, done: { if self.data != nil { self.host.settle() } })
         onToggle?()
     }
 
@@ -295,7 +269,7 @@ final class ScreenMap: NSView {
     @discardableResult
     func show(folder: URL) -> Bool {
         guard !isWalking, let d = ScreenMapData.read(folder) else { return false }
-        present(d, animated: false)
+        present(d, animated: false, live: false)
         return true
     }
 
@@ -303,6 +277,10 @@ final class ScreenMap: NSView {
     func close() {
         guard isOpen else { return }
         isOpen = false
+        if isWalking, !toldBackground {
+            toldBackground = true
+            onSay?("The walk goes on in the background. The top bar shows how far it has got.", false)
+        }
         Design.animate(Design.snap, { self.animator().alphaValue = 0 }, done: { if !self.isOpen { self.isHidden = true } })
         onToggle?()
     }
@@ -319,8 +297,8 @@ final class ScreenMap: NSView {
 
     var settings: CrawlRun.Settings {
         var s = CrawlRun.Settings()
-        s.depth = [1, 2, 3, 4, 6][max(0, depthPopup.indexOfSelectedItem)]
-        s.seconds = [60, 180, 300, 600][max(0, timePopup.indexOfSelectedItem)]
+        s.depth = [1, 2, 3, 4, 6, 0][max(0, depthPopup.indexOfSelectedItem)]   // 0: the whole app
+        s.seconds = [60, 180, 300, 600, 1800, 0][max(0, timePopup.indexOfSelectedItem)]   // 0: no limit
         s.appearances = [["light"], ["light", "dark"], []][max(0, capturePopup.indexOfSelectedItem)]
         s.offline = offline.state == .on
         let start = startField.stringValue.trimmingCharacters(in: .whitespaces)
@@ -337,13 +315,19 @@ final class ScreenMap: NSView {
 
     /// The status line, for checks.
     var statusText: String { summary.stringValue }
+    /// Whether Export… is enabled, for checks.
+    var canExportNow: Bool { exportButton.isEnabled }
+    /// The `[head] compared with [base]` line and the strip, for checks.
+    var compareText: String { compareLabel.stringValue }
+    var timelineControl: MapTimeline { timeline }
 
     @objc private func settingChanged() {
         let d = UserDefaults.standard
-        d.set(depthPopup.indexOfSelectedItem, forKey: "mapDepth")
-        d.set(timePopup.indexOfSelectedItem, forKey: "mapTime")
+        d.set(depthPopup.indexOfSelectedItem, forKey: "mapWalkDepth")
+        d.set(timePopup.indexOfSelectedItem, forKey: "mapWalkTime")
         d.set(capturePopup.indexOfSelectedItem, forKey: "mapCaptures")
         d.set(offline.state == .on, forKey: "mapOffline")
+        refresh()
     }
 
     // MARK: Signing in
@@ -357,9 +341,20 @@ final class ScreenMap: NSView {
         signInPopup.addItem(withTitle: "No sign-in")
         for s in scripts { signInPopup.addItem(withTitle: "Sign in with " + s.name + (s.fromWorktree ? " (session)" : "")) }
         signInPopup.menu?.addItem(.separator())
+        // The kept sign-in ("Sign In Once"), when the app has one: the choice unless a script was chosen.
+        var keptAt: Int?
+        if let k = kept {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .none
+            signInPopup.addItem(withTitle: "Signed in (kept \(f.string(from: k.date)))")
+            signInPopup.lastItem?.representedObject = "kept"
+            keptAt = signInPopup.numberOfItems - 1
+        }
+        signInPopup.addItem(withTitle: kept == nil ? "Sign In Once…" : "Sign In Again…")
+        signInPopup.lastItem?.representedObject = "once"
+        signInPopup.lastItem?.toolTip = "Opens the app on a device you can see. Sign in as you would on a phone and press Use This Sign-In: walks then start signed in, on a copy of that device's data."
         signInPopup.addItem(withTitle: "New Sign-in Script…")
         signInPopup.lastItem?.representedObject = "new"
-        let i = scripts.firstIndex { $0.name == wanted }.map { $0 + 1 } ?? 0
+        let i = scripts.firstIndex { $0.name == wanted }.map { $0 + 1 } ?? (wanted == nil ? keptAt : nil) ?? 0
         signInPopup.selectItem(at: i)
     }
 
@@ -376,16 +371,45 @@ final class ScreenMap: NSView {
         signInPopup.selectItem(at: i)
     }
 
+    /// For checks: the kept sign-in, when the app has one. False when it has none.
+    @discardableResult
+    func chooseKeptSignIn() -> Bool {
+        reloadScripts()
+        let i = signInPopup.indexOfItem(withRepresentedObject: "kept")
+        if i >= 0 { signInPopup.selectItem(at: i) }
+        return i >= 0
+    }
+
     @objc private func signInChanged() {
         if signInPopup.selectedItem?.representedObject as? String == "new" {
             do { NSWorkspace.shared.open(try Scripts.newScript()) } catch { onSay?("Could not write a new script", true) }
             reloadScripts()
             return
         }
+        if signInPopup.selectedItem?.representedObject as? String == "once" {
+            reloadScripts()
+            beginSignInOnce()
+            return
+        }
         UserDefaults.standard.set(signInScript?.name, forKey: "mapSignIn")
+        refresh()
     }
 
-    var isWalking: Bool { signIn != nil || run?.isRunning == true }
+    /// "Sign In Once…": the app on a device the person can see; when they keep the sign-in, walks start signed in.
+    private func beginSignInOnce() {
+        guard !isWalking, let apk = effectiveAPK, let begin = signInOnce else { return }
+        let name = (apk.deletingPathExtension().lastPathComponent)
+        begin(apk, keptKey(apk), signInKey().map { URL(fileURLWithPath: String($0.dropFirst(5))).lastPathComponent } ?? name) { [weak self] kept in
+            guard let self else { return }
+            if kept { UserDefaults.standard.removeObject(forKey: "mapSignIn") }
+            self.reloadScripts()
+            self.open()
+            if kept { self.setSummary("Sign-in kept. Walk the app to map it signed in.") }
+            self.refresh()
+        }
+    }
+
+    var isWalking: Bool { signIn != nil || starting || run?.isRunning == true }
 
     @objc private func chooseAPK() {
         let p = NSOpenPanel()
@@ -399,15 +423,33 @@ final class ScreenMap: NSView {
         if let apk = effectiveAPK { appLabel.stringValue = apk.lastPathComponent + (apkURL == nil ? "  ·  the selected device's" : "") }
         else { appLabel.stringValue = "No app: open one, or choose an APK" }
         let running = isWalking
-        walkButton.title = running ? "Stop" : (data == nil ? "Walk the app" : "Walk again")
+        walkButton.title = running ? "Stop walk" : (data == nil ? "Walk the app" : "Walk again")
         walkButton.style = running ? .record : .accent
         walkButton.isEnabled = running || (effectiveAPK != nil && pythonURL != nil)
+        exportButton.isEnabled = !running && host.canExport
         for c in [depthPopup, timePopup, capturePopup, signInPopup, offline, startField] as [NSControl] { c.isEnabled = !running }
         if pythonURL == nil, !running {
             setSummary("The map needs Python 3, and this Mac has none. Install the command line tools (xcode-select --install in Terminal), then reopen this.", problem: true)
         }
-        emptyNote.isHidden = data != nil || running
-        emptyNote.stringValue = "Greenroom taps through the app by itself, a level at a time, and draws every screen it reaches with the way there. It runs its own hidden devices, so yours are left alone."
+        onboarding.isHidden = data != nil || running
+        if !onboarding.isHidden { onboarding.show(onboardingState) }
+        walkButton.isHidden = !onboarding.isHidden   // the card has its own Walk: one place to start
+    }
+
+    private var onboardingState: MapOnboarding.State {
+        var s = MapOnboarding.State()
+        s.app = effectiveAPK?.lastPathComponent
+        s.appIsDevice = apkURL == nil
+        if let script = signInScript { s.signIn = .script(script.name) }
+        else if usesKeptSignIn, let k = kept {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .none
+            s.signIn = .kept(f.string(from: k.date))
+        }
+        var reach = [depthPopup, timePopup, capturePopup].compactMap { $0.titleOfSelectedItem }
+        if offline.state == .on { reach.append("offline") }
+        s.reach = reach.joined(separator: ", ")
+        s.noPython = pythonURL == nil
+        return s
     }
 
     private func setSummary(_ text: String, problem: Bool = false) {
@@ -418,9 +460,27 @@ final class ScreenMap: NSView {
     // MARK: Walking
 
     @objc private func walkPressed() {
+        if isWalking, Date().timeIntervalSince(run?.startedAt ?? startedAt) > 15, let w = window {
+            // A long walk is not thrown away by one press: what it found goes with it.
+            let a = NSAlert()
+            a.messageText = "Stop the walk?"
+            a.informativeText = (reached.known > 0 ? "It has found \(reached.known) screen\(reached.known == 1 ? "" : "s") so far. " : "")
+                + "A stopped walk makes no map, and the next one starts from the beginning. Closing the map instead lets it go on in the background."
+            a.addButton(withTitle: "Keep Walking")
+            a.addButton(withTitle: "Stop Walk")
+            a.buttons[1].hasDestructiveAction = true
+            a.beginSheetModal(for: w) { [weak self] r in if r == .alertSecondButtonReturn { self?.stop() } }
+            return
+        }
+        if isWalking { stop(); return }
+        walk()
+    }
+
+    /// Stops the walk (or the sign-in before it), with nothing kept.
+    func stop() {
         if let signIn { signIn.cancel(); return }
         if let run, run.isRunning { run.cancel(); return }
-        walk()
+        if starting { starting = false; generation += 1; finished(.cancelled); return }
     }
 
     /// Starts a walk with the settings shown. False when there is nothing to walk or no Python.
@@ -434,12 +494,18 @@ final class ScreenMap: NSView {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let out = base.appendingPathComponent("run-" + stamp)
         let walkSettings = settings
+        lastSignedIn = signInScript != nil
+        toldBackground = false
         data = nil
         reached = (0, 0)
-        canvas.clear()
-        canvas.frame = NSRect(origin: .zero, size: scroll.contentSize)
-        scroll.magnification = 1
-        showDetail(nil)
+        explored = 0
+        generation += 1
+        snapshot = nil
+        host.clear()
+        host.isHidden = false
+        onboarding.isHidden = true
+        compareLabel.isHidden = true
+        timeline.isHidden = true
         crashChip.isHidden = true
         comboControl.isHidden = true
         spinner.startAnimation(nil)
@@ -458,7 +524,6 @@ final class ScreenMap: NSView {
                 case .ready(let slot):
                     var ws = walkSettings
                     ws.keepData = true
-                    ws.jobs = 1   // the crawler walks a kept slot with one device
                     ws.engineOptions = ["--data-slots", slot]
                     self.signedInSlot = slot
                     self.startCrawl(python: python, apk: apk, out: out, settings: ws)
@@ -466,6 +531,14 @@ final class ScreenMap: NSView {
                 case .cancelled: self.finished(.cancelled)
                 }
             }
+        } else if usesKeptSignIn, let k = kept, case .cloned(let slot) = SlotClone.make(slot: k.slot, in: SignIns.dataRoot) {
+            // The kept sign-in: the walk runs on a copy of its data, which goes when the walk ends.
+            var ws = walkSettings
+            ws.keepData = true
+            ws.engineOptions = ["--data-slots", slot]
+            signedInSlot = slot
+            lastSignedIn = true
+            startCrawl(python: python, apk: apk, out: out, settings: ws)
         } else {
             startCrawl(python: python, apk: apk, out: out, settings: walkSettings)
         }
@@ -475,34 +548,85 @@ final class ScreenMap: NSView {
     }
 
     private func startCrawl(python: URL, apk: URL, out: URL, settings: CrawlRun.Settings) {
-        let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
-        run = r
-        r.onEvent = { [weak self] e in self?.event(e) }
-        r.onFinish = { [weak self] o in self?.finished(o) }
-        r.start()
+        var settings = settings
+        devices = max(1, settings.jobs)
+        let gen = generation
+        starting = true
+        startedAt = Date()
+        // What this crawler offers is asked off the main thread (its --help, once); the walk starts when that is known.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let events = CrawlRun.support(python: python).events
+            DispatchQueue.main.async {
+                guard let self, gen == self.generation, self.starting, self.run == nil else { return }
+                self.starting = false
+                settings.events = events
+                let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
+                self.run = r
+                r.onEvent = { [weak self] e in self?.event(e) }
+                r.onFinish = { [weak self] o in self?.finished(o) }
+                r.start()
+                self.tick()
+                self.refresh()
+            }
+        }
         tick()
         refresh()
     }
 
     private func tick() {
-        if signIn != nil { setSummary(signInStatus); return }
-        guard let run, run.isRunning else { return }
-        let s = Int(Date().timeIntervalSince(run.startedAt))
-        let t = String(format: "%d:%02d", s / 60, s % 60)
+        if signIn != nil {
+            setSummary(signInStatus)
+            report(WalkProgress(text: "Signing in to walk…", fraction: nil, detail: signInStatus))
+            return
+        }
+        guard starting || run?.isRunning == true else { return }
+        let s = Int(Date().timeIntervalSince(run?.startedAt ?? startedAt))
+        let t = s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
         let signedIn = signedInSlot != nil ? ", signed in" : ""
-        if reached.known == 0 { setSummary(signedInSlot != nil ? "Starting the signed-in device…  \(t)" : "Starting three hidden devices…  \(t)") }
-        else if reached.depth < 0 { setSummary("Capturing \(reached.known) screens…  \(t)") }
-        else { setSummary("Walking\(signedIn): \(reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"), \(reached.known) screen\(reached.known == 1 ? "" : "s") found  ·  \(t)") }
+        let on = devices == 1 ? "1 hidden device" : "\(devices) hidden devices"
+        let whole = settings.depth == 0
+        let screens = "\(reached.known) screen\(reached.known == 1 ? "" : "s")"
+        // The share of the screens found so far that are opened: it can go back as more are found, and is honest about that.
+        let fraction = explored > 0 && reached.known > 0 ? min(1, Double(explored) / Double(reached.known)) : nil
+        let detail: String, short: String
+        if reached.known == 0 {
+            detail = signedInSlot != nil ? "Starting the signed-in device…  \(t)" : "Starting \(on)…  \(t)"
+            short = "Starting the walk…  \(t)"
+        } else if reached.depth < 0 {
+            detail = "Capturing \(screens)…  \(t)"
+            short = "Capturing \(screens)  ·  \(t)"
+        } else if whole {
+            // The whole app: how much is found and how much of that is still to open (a count; how long it takes is not known before the end).
+            let toOpen = explored > 0 && explored < reached.known ? reached.known - explored : 0
+            detail = "Mapping the whole app\(signedIn): \(screens) found" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(on)  ·  \(t)"
+            short = "Mapping: \(screens)" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(t)"
+        } else {
+            let deep = reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"
+            detail = "Walking\(signedIn): \(deep), \(screens) found  ·  \(t)"
+            short = "Walking: \(screens)  ·  \(t)"
+        }
+        setSummary(detail)
+        report(WalkProgress(text: short, fraction: fraction, detail: detail))
+    }
+
+    private func report(_ p: WalkProgress?) {
+        guard p != progress else { return }
+        progress = p
+        onProgress?(p)
     }
 
     private func event(_ e: CrawlRun.Event) {
         switch e {
         case .level(let depth, let exploring, let known):
             reached = (depth, known)
-            canvas.walkReached(depth: depth, exploring: exploring)
+            host.walkReached(depth: depth, exploring: exploring)
         case .capturing(let screens, _):
             if settings.appearances.isEmpty { return }
             reached = (-1, screens)
+        case .screen(_, let title, let depth, let wasExplored):
+            guard wasExplored else { return }
+            explored += 1
+            host.walkExplored(depth: depth, title: title)
         case .line: return
         }
         tick()
@@ -511,6 +635,7 @@ final class ScreenMap: NSView {
     private func finished(_ outcome: CrawlRun.Outcome) {
         ticker?.invalidate()
         ticker = nil
+        report(nil)
         spinner.stopAnimation(nil)
         if let slot = signedInSlot {
             signedInSlot = nil
@@ -523,141 +648,216 @@ final class ScreenMap: NSView {
             let crashes = map.crashes.count
             onSay?("Screen map: \(map.screens.count) screens" + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : ""), crashes > 0)
         case .failed(let why):
-            canvas.clear()
+            host.clear()
             setSummary("The walk failed: " + why, problem: true)
             onSay?("The walk failed", true)
         case .cancelled:
-            canvas.clear()
+            host.clear()
             setSummary("Walk stopped.")
         }
         run = nil
         refresh()
     }
 
-    private func present(_ map: ScreenMapData, animated: Bool) {
+    /// Shows a finished walk: the summary line and its chips at once, then the map once the walk is a snapshot (and,
+    /// when the build has a commit, compared with its baseline).
+    private func present(_ map: ScreenMapData, animated: Bool, live: Bool = true) {
         data = map
-        canvas.comboIndex = 0
-        canvas.show(map, animated: animated)
         let transitions = map.edges.filter { if case .screen = $0.to { return true } else { return false } }.count
         var parts = ["\(map.screens.count) screens", "\(transitions) transitions"]
         let unexplored = map.incomplete.first { $0.hasPrefix("--max-depth") }.map { _ in "deepest level not opened" }
         let outOfTime = map.incomplete.contains { $0.hasPrefix("--max-seconds") } ? "stopped at the time limit" : nil
         parts += [unexplored, outOfTime].compactMap { $0 }
         parts.append(String(format: "%.0f s", map.seconds))
-        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  "))
+        // A sign-in the walk met: said after the counts, with what to do about it.
+        let wall = live ? SignInWall.find(map).note(kept: lastSignedIn) : nil
+        setSummary(map.apkName + "  ·  " + parts.joined(separator: "  ·  ") + (wall.map { "\n" + $0.replacingOccurrences(of: "\"Sign In Once…\"", with: "\"Sign In Once…\" in the sign-in menu").replacingOccurrences(of: "\"Sign In Again…\"", with: "\"Sign In Again…\" in the sign-in menu") } ?? ""), problem: wall != nil)
         let crashes = map.crashes.count
         crashChip.isHidden = crashes == 0
         crashChip.title = crashes == 1 ? "1 crash" : "\(crashes) crashes"
         let combos = map.combos.filter { c in map.screens.contains { $0.captures.contains { $0.combo == c } } }
+        shownCombos = combos
         comboControl.segmentCount = combos.count
         for (i, c) in combos.enumerated() { comboControl.setLabel(c.contains("dark") ? "Dark" : (c.contains("light") ? "Light" : c), forSegment: i) }
         comboControl.selectedSegment = 0
         comboControl.isHidden = combos.count < 2
-        emptyNote.isHidden = true
-        if isOpen { DispatchQueue.main.async { self.fit(animated: animated) } }
-        canvas.select(map.screens.first?.id, reveal: false)
+        onboarding.isHidden = true
+        host.isHidden = false
+        generation += 1
+        let mine = generation
+        let apk = live ? (map.apk ?? effectiveAPK) : nil
+        let settings = self.settings, signedIn = lastSignedIn
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ctx = apk != nil ? await self.context(apk!) : nil
+            let profile = Evidence.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start, signedIn: signedIn, offline: settings.offline)
+            let engine = Engine.shared.version
+            let made = await Task.detached { await ScreenMap.makeSource(map, context: ctx, profile: profile, engine: engine) }.value
+            guard self.generation == mine, let made else {
+                if self.generation == mine { self.setSummary("The map could not be read back after the walk.", problem: true) }
+                return
+            }
+            self.show(made, animated: animated)
+        }
+    }
+
+    /// What a finished walk becomes: its snapshot (filed in the context's store when the build has a commit, else kept
+    /// apart and unsaved), its baseline when there is one, and the stored snapshots of the profile.
+    struct Made {
+        var source: MapSource
+        var store: MapStore
+        var stored: [MapSnapshot]
+        var filed: Bool
+        var baselineBehind: Int?
+        var baselineCommit: String?
+    }
+
+    nonisolated static func makeSource(_ map: ScreenMapData, context ctx: MapContext?, profile: MapProfile, engine: String) async -> Made? {
+        let folder = map.folder
+        let walked = Date()
+        if let ctx {
+            guard let imported = ctx.store.importWalk(folder, commit: ctx.commit, tree: ctx.tree, profile: profile, engine: engine, walked: walked) else { return nil }
+            let found = await ctx.baseline(profile)
+            // A baseline that is this commit's own snapshot says nothing: the map opens plain.
+            let base = found.flatMap { $0.snapshot.commit == ctx.commit ? nil : $0 }
+            let (paired, _) = MapPairing.pair(head: imported, base: base?.snapshot)
+            var filed = true
+            if ctx.store.snapshot(profile: profile.id, commit: ctx.commit) == nil { filed = ctx.store.save(paired) }
+            let stored = loadStored(ctx.store, profile: profile.id)
+            let src = MapSource.make(head: paired, base: base?.snapshot, history: stored.isEmpty ? [paired] : stored, blobURL: { ctx.store.blobURL($0) })
+            return Made(source: src, store: ctx.store, stored: stored, filed: filed, baselineBehind: base?.behind, baselineCommit: base?.snapshot.commit)
+        }
+        // No commit: an import into a store of its own, never filed.
+        let root = Engine.shared.state.appendingPathComponent("maps-unsaved", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+        let store = MapStore(root: root, repo: "walk")
+        let commit = "walk" + String(Int(walked.timeIntervalSince1970))
+        guard let imported = store.importWalk(folder, commit: commit, tree: "", profile: profile, engine: engine, walked: walked) else { return nil }
+        let src = MapSource.make(head: imported, base: nil, history: [], blobURL: { store.blobURL($0) })
+        return Made(source: src, store: store, stored: [], filed: false, baselineBehind: nil, baselineCommit: nil)
+    }
+
+    /// The stored snapshots of a profile, oldest first, the newest fifty.
+    nonisolated static func loadStored(_ store: MapStore, profile: String) -> [MapSnapshot] {
+        let all = store.commits(profile: profile).compactMap { store.snapshot(profile: profile, commit: $0) }.sorted { ($0.walked, $0.commit) < ($1.walked, $1.commit) }
+        return Array(all.suffix(50))
+    }
+
+    private func show(_ made: Made, animated: Bool) {
+        snapshot = made.source.head
+        mapStore = made.store
+        stored = made.stored
+        host.setCombo(shownCombos.first ?? "light")
+        comboControl.selectedSegment = 0
+        host.show(made.source)
+        shownCompare = (made.source.head.commit, made.source.base?.commit)
+        compareLabel.isHidden = false
+        compareLabel.stringValue = headerText(made)
+        // The strip, over the stored snapshots when there are two or more.
+        if made.stored.count >= 2, made.filed {
+            let entries = ScreenMap.timelineEntries(made.stored)
+            timeline.show(entries, base: made.baselineCommit ?? made.source.base?.commit, head: made.source.head.commit)
+            timeline.isHidden = false
+        } else { timeline.isHidden = true }
+        if isOpen { DispatchQueue.main.async { self.host.settle() } }
+        host.select(made.source.head.screens.first?.lineage, reveal: false)
+        refresh()
+    }
+
+    // MARK: Export
+
+    /// The two names the export's page shows: the walk (or its commit), and the baseline's commit.
+    private var exportNames: (base: String, head: String) {
+        guard let s = host.source else { return ("", "") }
+        return (s.base.map { String($0.commit.prefix(7)) } ?? "", s.head.commit.hasPrefix("walk") ? "this walk" : String(s.head.commit.prefix(7)))
+    }
+
+    @objc private func exportPressed() {
+        guard !isWalking else { return }
+        let title = (data?.apkName.isEmpty == false ? data!.apkName : effectiveAPK?.lastPathComponent) ?? "App"
+        host.exportWithPanel(title: "Screen map of " + title, names: exportNames, suggested: "map-export") { [weak self] r in self?.exported(r) }
+    }
+
+    /// For checks: exports to `folder` with no panel.
+    func exportNow(to folder: URL, done: @escaping (Result<URL, Error>) -> Void) {
+        let title = (data?.apkName.isEmpty == false ? data!.apkName : effectiveAPK?.lastPathComponent) ?? "App"
+        host.export(to: folder, title: "Screen map of " + title, names: exportNames) { [weak self] r in self?.exported(r, reveal: false); done(r) }
+    }
+
+    private func exported(_ r: Result<URL, Error>, reveal: Bool = true) {
+        switch r {
+        case .success(let index):
+            setSummary("Exported to \(index.deletingLastPathComponent().path)")
+            onSay?("Map exported", false)
+            if reveal { NSWorkspace.shared.activateFileViewerSelecting([index]) }
+        case .failure(let e):
+            setSummary("The export failed: \(e.localizedDescription)", problem: true)
+            onSay?("The export failed", true)
+        }
+    }
+
+    /// `[head] compared with [base]`, and how far behind the baseline is.
+    private func headerText(_ m: Made) -> String {
+        let head = m.filed ? "\(String(m.source.head.commit.prefix(7)))" : "this walk"
+        guard let base = m.source.base else {
+            return m.filed ? "\(head)  ·  saved to the history  ·  the first map of this app: later walks are compared with it"
+                           : "\(head)  ·  not saved to the history: the build has no commit, or was made with uncommitted changes"
+        }
+        let behind = m.baselineBehind.map { $0 > 0 ? "  ·  the baseline is \($0) commit\($0 == 1 ? "" : "s") behind" : "" } ?? ""
+        let c = m.source.diff?.counts
+        let changes = c.map { $0.differing == 0 ? "  ·  nothing changed" : "  ·  \($0.added) new, \($0.modified) changed, \($0.removed) gone" } ?? ""
+        return "\(head) compared with \(String(base.commit.prefix(7)))" + behind + changes
+    }
+
+    nonisolated static func timelineEntries(_ list: [MapSnapshot]) -> [MapTimelineEntry] {
+        let fmt = ISO8601DateFormatter()
+        return list.enumerated().map { i, s in
+            let c = i == 0 ? MapDiff.Counts() : MapPairing.diff(head: s, base: list[i - 1]).counts
+            return MapTimelineEntry(commit: s.commit, label: String(s.commit.prefix(7)), date: fmt.date(from: s.walked), tag: nil, added: c.added, removed: c.removed, modified: c.modified)
+        }
+    }
+
+    /// The strip moved: the pair's two snapshots are compared again and the map redrawn in place.
+    private func compare(base: String, head: String) {
+        guard let store = mapStore, let list = Optional(stored), let h = list.first(where: { $0.commit == head }), let b = list.first(where: { $0.commit == base }) else { return }
+        generation += 1
+        let mine = generation
+        Task { @MainActor [weak self] in
+            let src = await Task.detached { MapSource.make(head: h, base: b, history: list, blobURL: { store.blobURL($0) }) }.value
+            guard let self, self.generation == mine else { return }
+            self.host.show(src, keepingPlace: true)
+            self.snapshot = src.head
+            self.shownCompare = (head, base)
+            let m = Made(source: src, store: store, stored: list, filed: true, baselineBehind: nil, baselineCommit: base)
+            self.compareLabel.stringValue = self.headerText(m)
+        }
+    }
+
+    /// A filmstrip frame was pressed: that commit becomes the base.
+    private func pickBase(_ commit: String) {
+        guard let head = timeline.head, !timeline.isHidden, let b = timeline.entries.firstIndex(where: { $0.commit.hasPrefix(commit) || commit.hasPrefix($0.commit) }) else { return }
+        _ = head
+        timeline.set(base: b)
     }
 
     @objc private func showCrash() {
-        guard let map = data, let crash = map.crashes.first else { return }
+        guard let map = data, let crash = map.crashes.first, let src = host.source else { return }
         // The screen the crashing control was on: the longest route the crash's own route begins with.
         let at = map.screens.filter { crash.steps.starts(with: $0.steps) }.max { $0.steps.count < $1.steps.count }
-        if let at { canvas.select(at.id) }
+        if let at, let lineage = src.lineage(ofHeadScreen: at.id) { host.select(lineage) }
         onSay?(crash.detail.split(separator: "\n").first.map(String.init) ?? "Crash", true)
     }
 
     @objc private func comboChanged() {
-        canvas.comboIndex = comboControl.selectedSegment
-        showDetail(canvas.selected)
+        let i = comboControl.selectedSegment
+        if shownCombos.indices.contains(i) { host.setCombo(shownCombos[i]) }
     }
 
     // MARK: Zoom
 
-    @objc private func zoomIn() { zoom(by: 1.25) }
-    @objc private func zoomOut() { zoom(by: 0.8) }
-    @objc private func zoomToFit() { fit(animated: true) }
-
-    private func zoom(by f: CGFloat) {
-        let m = min(scroll.maxMagnification, max(scroll.minMagnification, scroll.magnification * f))
-        let c = NSPoint(x: scroll.contentView.bounds.midX, y: scroll.contentView.bounds.midY)
-        Design.animate(Design.move, { scroll.animator().setMagnification(m, centeredAt: c) })
-    }
-
-    /// The whole map in view, never larger than life.
-    func fit(animated: Bool) {
-        let size = canvas.bounds.size, view = scroll.bounds.size
-        guard size.width > 0, size.height > 0, view.width > 0 else { return }
-        let m = max(scroll.minMagnification, min(1, view.width / size.width, view.height / size.height))
-        let c = NSPoint(x: size.width / 2, y: size.height / 2)
-        if animated { Design.animate(Design.move, { scroll.animator().setMagnification(m, centeredAt: c) }) }
-        else { scroll.setMagnification(m, centeredAt: c) }
-    }
-
-    // MARK: Detail
-
-    private func showDetail(_ id: String?) {
-        guard let map = data, let id, let s = map.screen(id) else { detail.isHidden = true; return }
-        detail.isHidden = false
-        detailTitle.stringValue = s.label
-        let routes = map.edges.filter { $0.from == id }
-        let reachable = Set(routes.compactMap { e -> String? in if case .screen(let t) = e.to, t != id { return t } else { return nil } })
-        detailSub.stringValue = "\(s.activity)  ·  \(s.steps.count == 0 ? "start" : "\(s.steps.count) step\(s.steps.count == 1 ? "" : "s") in")  ·  leads to \(reachable.count) screen\(reachable.count == 1 ? "" : "s")" + (s.settled ? "" : "  ·  never settles")
-
-        // The capture, at the run's aspect ratio.
-        let combo = min(canvas.comboIndex, max(0, s.captures.count - 1))
-        let width: CGFloat = 302
-        if let file = s.captures.indices.contains(combo) ? s.captures[combo].file : nil {
-            SnapshotImages.load(file, maxPixel: 900) { [weak self] img in
-                guard let self, self.canvas.selected == id else { return }
-                // At most about two fifths of the column, so the controls below keep room.
-                let room = max(180, self.detail.bounds.height * 0.42)
-                if let img { self.pictureHeight.constant = min(room, width * CGFloat(img.height) / CGFloat(max(1, img.width))) }
-                self.picture.show(img, empty: "No capture")
-            }
-        } else {
-            pictureHeight.constant = 90
-            picture.show(nil, empty: "Walked without captures")
-        }
-
-        // The route: the start, then each step.
-        routeStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let startText = s.start.map { "Open \($0)" } ?? "Launch the app"
-        for (i, step) in ([startText] + s.steps.map(ScreenMap.describe)).enumerated() {
-            let n = label(i == 0 ? "●" : "\(i)", size: 10.5, weight: .semibold, color: i == 0 ? Design.accent : Design.mute)
-            n.alignment = .right
-            n.widthAnchor.constraint(equalToConstant: 16).isActive = true
-            let t = label(step, size: 12, color: Design.ink)
-            t.lineBreakMode = .byTruncatingTail
-            t.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-            let row = NSStackView(views: [n, t])
-            row.spacing = 8
-            routeStack.addArrangedSubview(row)
-        }
-        goButton.isEnabled = true
-
-        // The controls on the screen, and where each leads.
-        controlStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for e in routes {
-            let (where_, color, target): (String, NSColor, String?) = {
-                switch e.to {
-                case .screen(let t) where t == id: return ("stays here", Design.mute, nil)
-                case .screen(let t): return (map.screen(t)?.label ?? t, Design.ink, t)
-                case .exit: return ("closes the app", Design.warning, nil)
-                case .crash: return ("crashes", Design.record, nil)
-                case .skipped: return ("not tapped: " + (e.note ?? "on the safety list"), Design.mute, nil)
-                case .failed: return ("did not replay", Design.warning, nil)
-                case .unfollowed: return ("not followed", Design.mute, nil)
-                }
-            }()
-            let row = MapControlRow(control: e.action.isEmpty ? e.cmd : e.action, outcome: where_, color: color, enabled: target != nil)
-            if let target { row.onPress = { [weak self] in self?.canvas.select(target) } }
-            controlStack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: controlStack.widthAnchor).isActive = true
-        }
-        if routes.isEmpty {
-            controlStack.addArrangedSubview(label(s.depth >= settings.depth ? "Not opened: the walk stopped at this depth." : "No controls with a label.", size: 12))
-        }
-    }
+    @objc private func zoomIn() { host.zoom(by: 1.25) }
+    @objc private func zoomOut() { host.zoom(by: 0.8) }
+    @objc private func zoomToFit() { host.fit() }
 
     /// A control command as a person would say it.
     static func describe(_ cmd: String) -> String {
@@ -668,63 +868,12 @@ final class ScreenMap: NSView {
         return cmd
     }
 
-    private func go(_ id: String) {
-        guard let map = data, let s = map.screen(id) else { return }
+    /// "Go there" for the screen with this lineage: only the walk's own screens have a route to replay.
+    private func go(_ lineage: String) {
+        guard let map = data, let src = host.source, let id = src.head.screens.first(where: { $0.lineage == lineage })?.id, let s = map.screen(id) else {
+            onSay?("That screen is not in this walk, so there is no route to replay", true)
+            return
+        }
         onGo?(s, map)
     }
-
-    @objc private func goPressed() { if let id = canvas.selected { go(id) } }
-
-    @objc private func copyRoute() {
-        guard let map = data, let id = canvas.selected, let s = map.screen(id) else { return }
-        let lines = [s.start.map { "restart \($0)" } ?? "restart"] + s.steps.flatMap { [$0, "settle 1500 100"] }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
-        onSay?("Route copied: \(lines.count) control commands", false)
-    }
 }
-
-/// One control in the detail: its name, and where it leads (a press goes there on the map).
-private final class MapControlRow: NSView {
-    var onPress: (() -> Void)?
-    private var hovering = false { didSet { layer?.backgroundColor = (hovering && enabled ? Design.wellOn : .clear).cgColor } }
-    private let enabled: Bool
-
-    init(control: String, outcome: String, color: NSColor, enabled: Bool) {
-        self.enabled = enabled
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 7
-        layer?.cornerCurve = .continuous
-        let name = NSTextField(labelWithString: control)
-        name.font = .systemFont(ofSize: 12, weight: .medium)
-        name.textColor = Design.ink
-        name.lineBreakMode = .byTruncatingTail
-        name.setContentCompressionResistancePriority(.init(2), for: .horizontal)
-        let arrow = NSImageView(image: NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold)) ?? NSImage())
-        arrow.contentTintColor = Design.mute
-        let to = NSTextField(labelWithString: outcome)
-        to.font = .systemFont(ofSize: 12)
-        to.textColor = color
-        to.lineBreakMode = .byTruncatingTail
-        to.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        to.alignment = .right
-        let row = NSStackView(views: [name, arrow, to])
-        row.spacing = 6
-        row.edgeInsets = NSEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-        NSLayoutConstraint.activate([row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
-                                     row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor)])
-        toolTip = enabled ? "Show it on the map" : outcome
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
-    }
-    required init?(coder: NSCoder) { fatalError("not used") }
-    override func mouseEntered(with event: NSEvent) { hovering = true; if enabled { NSCursor.pointingHand.set() } }
-    override func mouseExited(with event: NSEvent) { hovering = false; NSCursor.arrow.set() }
-    override func mouseUp(with event: NSEvent) { if enabled, bounds.contains(convert(event.locationInWindow, from: nil)) { onPress?() } }
-    override func mouseDown(with event: NSEvent) {}
-}
-
-private final class MapFlippedView: NSView { override var isFlipped: Bool { true } }

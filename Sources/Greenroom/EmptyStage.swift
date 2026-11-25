@@ -1,11 +1,15 @@
 import AppKit
 
-/// What the stage shows with nothing running: where to drop an APK, the promise that it stays on this Mac, and the
-/// apps opened lately.
+/// What the stage shows with nothing running: where to drop an APK, the promise that it stays on this Mac, a way in
+/// for someone with source and no APK (a project folder, or a GitHub repository cloned here), and the apps opened lately.
 final class EmptyStage: NSView {
     var onChoose: (() -> Void)?
     var onOpen: ((URL) -> Void)?
     var onAddRepo: (() -> Void)?
+    /// "Open a project folder…": build an Android project on this Mac and run it.
+    var onFolder: (() -> Void)?
+    /// "Clone from GitHub…": clone a repository, then build and run it.
+    var onClone: (() -> Void)?
     private let recents = NSStackView()
     private let card = NSView()
     private let recentTitle = NSTextField(labelWithString: "RECENT APPS")
@@ -60,11 +64,30 @@ final class EmptyStage: NSView {
         for b in [choose, connectRepo] { b.heightAnchor.constraint(equalToConstant: 34).isActive = true }
         let buttons = NSStackView(views: [choose, connectRepo])
         buttons.spacing = 10
-        let column = NSStackView(views: [iconWell, title, promise, buttons])
+        // No APK: build one from source.
+        let rule = NSBox()
+        rule.boxType = .separator
+        rule.translatesAutoresizingMaskIntoConstraints = false
+        let noAPK = NSTextField(labelWithString: "No APK? Build one from source")
+        noAPK.font = .systemFont(ofSize: 12, weight: .medium)
+        noAPK.textColor = Design.mute
+        let folder = GlassButton(symbol: "folder", title: "Open a project folder…", label: "Build and run an Android project folder on this Mac", style: .well, target: nil, action: nil)
+        folder.onPress = { [weak self] in self?.onFolder?() }
+        let clone = GlassButton(symbol: "arrow.down.circle", title: "Clone from GitHub…", label: "Clone a GitHub repository, then build and run it", style: .well, target: nil, action: nil)
+        clone.onPress = { [weak self] in self?.onClone?() }
+        for b in [folder, clone] { b.heightAnchor.constraint(equalToConstant: 30).isActive = true }
+        let sources = NSStackView(views: [folder, clone])
+        sources.spacing = 10
+
+        let column = NSStackView(views: [iconWell, title, promise, buttons, rule, noAPK, sources])
         column.orientation = .vertical
         column.spacing = 12
         column.setCustomSpacing(14, after: iconWell)
         column.setCustomSpacing(18, after: promise)
+        column.setCustomSpacing(26, after: buttons)
+        column.setCustomSpacing(22, after: rule)
+        column.setCustomSpacing(10, after: noAPK)
+        rule.widthAnchor.constraint(equalToConstant: 360).isActive = true
         column.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(column)
 

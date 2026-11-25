@@ -20,7 +20,7 @@ final class SessionsController {
     private var generation = 0
     /// Slots whose simulator is to start as soon as the one that held the slot has exited.
     private var starting = Set<String>()
-    private static let noGit = "Sessions needs git: install the Command Line Tools (xcode-select --install)"
+    static let noGit = "Sessions needs git: install the Command Line Tools (xcode-select --install)"
     /// The modified time of the file each session's simulator was last started from. An event for a file that is
     /// no newer (the system touching a file it has just read or cloned) is not a build.
     private var launched: [String: Date] = [:]
@@ -29,6 +29,15 @@ final class SessionsController {
     private(set) lazy var buildQueue = Builds(sessions: self)
     /// Pull requests without a worktree, the Review section (PullRequests.swift).
     private(set) lazy var pulls = PullRows(sessions: self)
+    /// Each repository's main, kept built by itself (MainBuild.swift).
+    private(set) lazy var mainBuilds = MainBuilds(sessions: self)
+    /// Sessions clicked with no build: they are being built, and open when the build lands.
+    var openWhenBuilt = Set<String>()
+    /// A worktree to build and open once a refresh lists it (a project folder or a clone added from the empty stage).
+    var runWhenListed: String?
+    /// The session that was open when Greenroom last quit, to open again once a refresh lists it, if it has a build
+    /// (a launch does not start a build by itself). Given up after the first complete refresh.
+    var reopenWhenListed: String?
     /// The walk and capture queue (Evidence.swift): every new build of a session is walked in the background.
     let evidence = Evidence()
 
@@ -142,9 +151,12 @@ final class SessionsController {
         }
     }
 
-    func removeWorkspace(containing session: Session) {
-        for s in sessions where s.workspace.path == session.workspace.path { evidence.forget(worktree: s.worktree.path) }
-        workspaces.removeAll { $0.root.path == session.workspace.path }
+    func removeWorkspace(containing session: Session) { removeWorkspace(at: session.workspace) }
+
+    func removeWorkspace(at root: URL) {
+        for s in sessions where s.workspace.path == root.path { evidence.forget(worktree: s.worktree.path) }
+        if let ws = workspaces.first(where: { $0.root.path == root.path }) { mainBuilds.close(ws) }
+        workspaces.removeAll { $0.root.path == root.path }
         store.saveWorkspaces(workspaces)
         ClaudeSessions.shared.workspacesChanged()
         refresh()
@@ -162,7 +174,8 @@ final class SessionsController {
     /// Worth suggesting: not shown, not put away, and a Claude session is at work in it or it has an open pull request.
     func isSuggested(_ s: Session) -> Bool {
         guard !isShown(s), let ws = workspace(of: s), !ws.hidden.contains(s.worktree.path), !ws.archived.contains(s.worktree.path) else { return false }
-        return s.claudeActive || s.hasOpenPR
+        // A worktree with nothing to run is not worth a row until the person adds it (the + menu has it).
+        return (s.claudeActive || s.hasOpenPR) && newestAPK(for: s) != nil
     }
 
     /// The suggestions, active ones first.
@@ -246,6 +259,7 @@ final class SessionsController {
             else if let n = s.pullRequests.first?.number { bits.append("#\(n)") }
             if s.claude?.status == .working && s.claude?.running == true { bits.append("Claude working") }
             else if s.claude?.status == .waiting { bits.append("waiting for you") }
+            if self.newestAPK(for: s) == nil { bits.append("no build: click it to build") }
             let i = ClosureMenuItem(s.title + (bits.isEmpty ? "" : "  ·  " + bits.joined(separator: " · "))) { [weak self] in self?.show(s) }
             i.toolTip = (s.worktree.path as NSString).abbreviatingWithTildeInPath
             return i
@@ -265,6 +279,12 @@ final class SessionsController {
         if menu.items.isEmpty { menu.addItem(withTitle: "Every worktree is in the sidebar", action: nil, keyEquivalent: "").isEnabled = false }
         menu.addItem(.separator())
         if rest.count > 1 { menu.addItem(ClosureMenuItem("Show All \(rest.count)") { [weak self] in self?.showAll(in: workspace) }) }
+        if let ws = self.workspace(at: workspace), AndroidProject.isApp(ws.root) {
+            let keep = ClosureMenuItem("Keep \(MainBuilds.shortName(ws.baseRef)) Built") { [weak self] in self?.setKeepMain(!ws.keepMain, for: workspace) }
+            keep.state = ws.keepMain ? .on : .off
+            keep.toolTip = "A row at the top runs the newest \(MainBuilds.shortName(ws.baseRef)): Greenroom fetches it and builds each new commit by itself"
+            menu.addItem(keep)
+        }
         menu.addItem(ClosureMenuItem("Add Repository…") { [weak self] in self?.chooseRepository() })
         return menu
     }
@@ -284,6 +304,9 @@ final class SessionsController {
         generation += 1
         let mine = generation
         let spaces = workspaces
+        // Teammates' maps, for the workspaces that share them (at most every ten minutes each; nothing when off).
+        let sharing = spaces.filter(\.shareMaps)
+        if !sharing.isEmpty { let root = store.root; Task.detached(priority: .utility) { for ws in sharing { _ = await History.fetchIfDue(ws, stateRoot: root) } } }
         let known = builds
         let before = sessions
         Task { @MainActor in
@@ -293,7 +316,7 @@ final class SessionsController {
             for ws in spaces {
                 let list = await Git.worktrees(of: ws.root)
                 if list.isEmpty { complete = false }   // git failed, or the repository moved: do not judge by it
-                for wt in list {
+                for wt in list where !self.mainBuilds.isTrunk(wt.path) {   // main's own worktree is its row, not a session
                     live.insert(wt.path.path)
                     let path = wt.path
                     let outputs = await Task.detached(priority: .utility) { SessionStore.newestAPK(in: path) }.value
@@ -313,9 +336,19 @@ final class SessionsController {
             if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
             self.sessions = ClaudeSessions.shared.attach(all)
             self.watch(all)
+            if let want = self.runWhenListed, let s = self.sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == want }) {
+                self.runWhenListed = nil
+                self.activate(s)
+            }
+            if let want = self.reopenWhenListed, complete || self.sessions.contains(where: { $0.worktree.path == want }) {
+                self.reopenWhenListed = nil
+                if let s = self.sessions.first(where: { $0.worktree.path == want }), self.newestAPK(for: s) != nil { self.activate(s) }
+            }
             if complete { self.autoArchive() }
             self.onChange?()
+            self.mainBuilds.ensureAll()   // at most every ten minutes each, unless asked
             if complete {
+                live.formUnion(self.mainBuilds.livePaths)   // main's builds are kept like a session's
                 let store = self.store
                 DispatchQueue.global(qos: .utility).async { store.prune(live: live) }
                 self.evidence.pruneToCap()
@@ -367,9 +400,20 @@ final class SessionsController {
             return true
         }
         guard let apk = newestAPK(for: session) else {
-            wb.toast.show("\(session.title) has no build yet. Build it, and it appears here.", problem: true)
-            refresh()
-            return false
+            // Nothing to run yet: build it, and it opens when the build lands.
+            let path = session.worktree.path
+            show(session)
+            if buildQueue.isBuilding(path) {
+                openWhenBuilt.insert(path)
+                wb.toast.show("\(session.title) is building: it opens when it is ready")
+                return true
+            }
+            guard let ws = workspace(of: session) else { return false }
+            openWhenBuilt.insert(path)
+            build(session)
+            if buildQueue.isBuilding(path) { wb.toast.show("Building \(session.title) with \(ws.defaultRecipeName): it opens when it is ready") }
+            else { openWhenBuilt.remove(path) }
+            return true
         }
         for stale in Engine.shared.simulators where !stale.isAlive && Self.slot(of: stale) == session.slot { Engine.shared.close(stale) }
         noteUsed(session.worktree.path)
@@ -518,6 +562,11 @@ final class SessionsController {
         // A recipe is building this session: when it finishes, `adopt` reloads the simulator once, on the filed build.
         if buildQueue.isBuilding(session.worktree.path) { return }
         record(apk: file, for: session)
+        if openWhenBuilt.remove(session.worktree.path) != nil, simulator(for: session) == nil {
+            var s = session
+            s.outputs = Session.Outputs(apk: file, date: Self.modified(file))
+            activate(s)
+        }
         if let old = simulator(for: session), old.apk.resolvingSymlinksInPath().path == file.path,
            Self.modified(file) > launched[session.slot] ?? .distantPast {
             reload(old, of: session, to: file)
@@ -540,8 +589,12 @@ final class SessionsController {
     /// selected or not) reloads on it with its data kept. A build the simulator already runs reloads nothing.
     func adopt(_ build: Build, forWorktree path: String) {
         builds[path] = build
+        if mainBuilds.adopted(build, worktree: path) { onChange?(); return }
+        let waiting = openWhenBuilt.remove(path) != nil   // clicked with no build: it opens now
         buildArrivedForEvidence(path, build)
-        if let session = sessions.first(where: { $0.worktree.path == path }), let old = simulator(for: session),
+        if waiting, let session = sessions.first(where: { $0.worktree.path == path }), simulator(for: session) == nil {
+            activate(session)
+        } else if let session = sessions.first(where: { $0.worktree.path == path }), let old = simulator(for: session),
            old.apk.resolvingSymlinksInPath().path != build.apk.resolvingSymlinksInPath().path {
             reload(old, of: session, to: build.apk)
         }
@@ -574,6 +627,30 @@ final class SessionsController {
         onChange?()
     }
 
+    /// "Quick Walks Only", saved with the workspace.
+    func walksQuick(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.quickWalk ?? false }
+    func walksQuick(worktree: String) -> Bool { sessions.first { $0.worktree.path == worktree }.map { walksQuick($0) } ?? false }
+
+    func setQuickWalk(_ on: Bool, for s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        workspaces[i].quickWalk = on
+        store.saveWorkspaces(workspaces)
+        onChange?()
+    }
+
+    func sharesMaps(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.shareMaps ?? false }
+    func sharesSignedInMaps(_ s: Session) -> Bool { workspaces.first { $0.root.path == s.workspace.path }?.shareSignedInMaps ?? false }
+
+    /// "Share screen maps through git" and "Also share maps walked on signed-in data", saved with the workspace.
+    func setShareMaps(_ on: Bool, signedIn: Bool? = nil, for s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        workspaces[i].shareMaps = on
+        if let signedIn { workspaces[i].shareSignedInMaps = signedIn }
+        store.saveWorkspaces(workspaces)
+        onChange?()
+        refresh()
+    }
+
     func auto(of s: Session) -> Auto { workspaces.first { $0.root.path == s.workspace.path }?.auto ?? .onBuild }
     func hasBuild(_ s: Session) -> Bool { (builds[s.worktree.path] ?? s.build) != nil }
 
@@ -595,6 +672,8 @@ final class SessionsController {
     func openMap(folder: URL) {
         guard let wb = workbench else { return }
         wb.showMap()
+        // A walk running in the map is never replaced: its map shows when it ends.
+        if wb.screenMap.isWalking { wb.toast.show("A walk is running in the screen map. Its map shows here when it ends."); return }
         if !wb.screenMap.show(folder: folder) { wb.toast.show("That map is not there any more. \"Walk again\" makes it.", problem: true) }
     }
 
@@ -609,6 +688,12 @@ final class SessionsController {
             out.append(PaletteItem(id: "session." + s.worktree.path, title: "Go to session \(s.title) (\(kind))", group: "Sessions",
                                    symbol: "arrow.triangle.branch", shortcut: i < min(9, rows.count) ? "⌘\(i + 1)" : "",
                                    keywords: "worktree branch change \(s.shortHead) \(s.worktree.lastPathComponent)") { [weak self] in self?.activate(s) })
+        }
+        for ws in workspaces {
+            guard let row = mainBuilds.row(for: ws) else { continue }
+            let repo = workspaces.count > 1 ? " of \(ws.root.lastPathComponent)" : ""
+            out.append(PaletteItem(id: "main.open." + ws.root.path, title: "Run the newest \(row.name)\(repo)", group: "Sessions", symbol: "play.circle",
+                                   keywords: "main master trunk latest debug apk launch") { [weak self] in self?.openMain(ws.root) })
         }
         out.append(PaletteItem(id: "session.add", title: "Add a repository to Sessions…", group: "Sessions", symbol: "plus.rectangle.on.folder",
                                keywords: "git worktree folder") { [weak self] in self?.chooseRepository() })

@@ -544,8 +544,8 @@ final class ClaudeSessions {
         refreshOffers(generation)
     }
 
-    /// Repositories with live-ish Claude sessions (not archived, active in the last 30 days or running) that are not
-    /// among `workspaces`' main checkouts. The main checkout of a folder is asked of git once.
+    /// Android repositories (`AndroidProject.isApp`) with live-ish Claude sessions (not archived, active in the last 30
+    /// days or running) that are not among `workspaces`' main checkouts. The main checkout of a folder is asked of git once.
     private func refreshOffers(_ mine: Int) {
         let added = Set(workspaceRoots().map { $0.resolvingSymlinksInPath().path })
         let cutoff = Date().addingTimeInterval(-30 * 86_400)
@@ -567,6 +567,8 @@ final class ClaudeSessions {
                 guard let repo else { continue }
                 _ = done.insert(key)
                 if added.contains(repo.path) { continue }
+                // Only a repository with an app to run is worth offering (an added one shows whatever it is).
+                if found[repo.path] == nil, !(await Task.detached(priority: .utility) { AndroidProject.isApp(repo) }.value) { continue }
                 found[repo.path] = (repo, (found[repo.path]?.1 ?? 0) + (perFolder[key] ?? 0))
             }
             guard mine == self.generation else { return }

@@ -3,13 +3,16 @@
 #   scripts/bundle.sh [--identity NAME|-] [--engine DIR --testapp APK] [--version X.Y.Z] [--variant release|debug] [--check]
 # --variant    debug: build/Greenroom Debug.app, a copy to install beside the release: its own name, bundle id, orange
 #              icon and window line, its own state folder (Application Support/Greenroom Debug), and no updates
-# --identity   a codesign identity; "-" (default) signs ad hoc, for running on this Mac only
+# --identity   a codesign identity, or "-" to sign ad hoc. By default, this Mac's Apple Development identity if it has
+#              one, else ad hoc. A team identity keeps the same designated requirement from build to build, so the
+#              Keychain goes on trusting each new build with the variables it keeps; an ad hoc one is pinned to the
+#              build's hash, so every new build asks for every variable again.
 # --engine     an unpacked apksim release to bundle instead of the one engine.lock names (with --testapp)
 # GREENROOM_BUILD  the build number (CFBundleVersion, which Sparkle compares); the commit count by default
 # --check      afterwards, run the bundled training app headless through the app and verify the signatures
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-IDENTITY=-; ENGINE=; TESTAPP=; VERSION=0.1.0; CHECK=; VARIANT=release
+IDENTITY=; ENGINE=; TESTAPP=; VERSION=0.1.0; CHECK=; VARIANT=release
 while [[ $# -gt 0 ]]; do case "$1" in
   --identity) IDENTITY=$2; shift 2 ;;
   --engine) ENGINE=$2; shift 2 ;;
@@ -20,6 +23,10 @@ while [[ $# -gt 0 ]]; do case "$1" in
   *) echo "unknown option $1" >&2; exit 2 ;;
 esac; done
 [[ "$VARIANT" == release || "$VARIANT" == debug ]] || { echo "error: --variant is release or debug" >&2; exit 2; }
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development: /{print $2; exit}')
+  [[ -n "$IDENTITY" ]] || IDENTITY=-
+fi
 
 if [[ -z "$ENGINE" ]]; then
   CACHE=$("$ROOT/scripts/fetch-engine.sh"); ENGINE="$CACHE/tree"; TESTAPP="$CACHE/testapp.apk"
@@ -82,7 +89,9 @@ xattr -cr "$APP"
 # there library validation has to be off.
 SIGN=(codesign --force --sign "$IDENTITY" --options runtime)
 JAVA_ENT=Resources/engine-java.entitlements
-if [[ "$IDENTITY" == - ]]; then JAVA_ENT=Resources/engine-java.dev.entitlements; else SIGN+=(--timestamp); fi
+# A secure timestamp only for distribution (it asks Apple's server); a local development build needs none.
+if [[ "$IDENTITY" == - ]]; then JAVA_ENT=Resources/engine-java.dev.entitlements
+elif ! security find-identity -v -p codesigning | grep -F "$IDENTITY" | grep -q '"Apple Development: '; then SIGN+=(--timestamp); fi
 n=0
 for jar in "$C"/Resources/engine/work/lib/*.jar "$C"/Resources/engine/work/*.jar; do
   for entry in $(unzip -Z1 "$jar" 2>/dev/null | grep -E '\.(dylib|jnilib)$' || true); do

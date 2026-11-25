@@ -43,7 +43,14 @@ extension SessionsController {
     func installBuilds() {
         LoginEnvironment.warmUp()
         var lastRefresh = Date.distantPast
-        buildQueue.onChange = { [weak self] in BuildLogPopover.current?.refresh(); self?.onChange?() }
+        buildQueue.onChange = { [weak self] in
+            BuildLogPopover.current?.refresh()
+            guard let self else { return }
+            // A click waiting on a build that failed or was cancelled does not open on some later build.
+            self.openWhenBuilt = self.openWhenBuilt.filter { self.buildQueue.jobs[$0]?.isActive ?? false }
+            self.mainBuilds.jobsChanged()
+            self.onChange?()
+        }
         buildQueue.onLine = { [weak self] job, line in
             BuildLogPopover.current?.append(line, of: job)
             // The row shows the log's last line: redrawn at most twice a second.

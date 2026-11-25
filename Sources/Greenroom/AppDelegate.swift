@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workbench.window.makeKeyAndOrderFront(nil)
         let early = openedEarly; openedEarly = []
         if !early.isEmpty { application(NSApp, open: early) }
+        else if LastOpened.shouldReopen(openedFiles: false) { workbench.reopenLast() }
         if !CommandLine.arguments.contains("--background") { NSApp.activate() }
         startAgentServer()
         // `kill` (and a script that started the app) quits it as the menu would: simulators stopped, nothing left behind.
@@ -40,16 +41,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionsCheckIfAsked()
         scriptsCheckIfAsked()
         buildsCheckIfAsked()
+        mainCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
         recipesCheckIfAsked()
         evidenceCheckIfAsked()
         changesCheckIfAsked()
+        historyLiveIfAsked()
         replayCheckIfAsked()
         SnapshotCheck.runIfAsked(workbench)
         mapCheckIfAsked()
         mapSignInCheckIfAsked()
         arrangeCheckIfAsked()
+        resizeCheckIfAsked()
         PrivacyCheck.runIfAsked(self)   // scripts/network-check.sh
         matrixCheckIfAsked()
         PerfCheck.runIfAsked(self)   // `--snapshots-check`, SnapshotCheck.swift
@@ -510,6 +514,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         BuildsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
     }
 
+    /// `Greenroom --main-check DIR APK`: see MainCheck.
+    private func mainCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--main-check"), i + 2 < args.count else { return }
+        MainCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
+    }
+
     /// `Greenroom --claude-check DIR`: see ClaudeCheck.
     private func claudeCheckIfAsked() {
         let args = CommandLine.arguments
@@ -552,7 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ctx.setFillColor(Design.stage.cgColor)
             ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
             ctx.scaleBy(x: scale, y: scale)
-            root.render(in: ctx)
+            view.effectiveAppearance.performAsCurrentDrawingAppearance { root.render(in: ctx) }   // the window's own (dark) appearance, not the system's
             if let image = ctx.makeImage() { try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file) }
             print("[greenroom] the screen is locked: \(file.lastPathComponent) is Core Animation's drawing, without the video or blur")
         }
@@ -618,6 +629,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func clearRecents(_ sender: Any?) {
         Recents.clear()
+        LastOpened.forget()
         NSDocumentController.shared.clearRecentDocuments(nil)
         Engine.shared.onChange?()
     }

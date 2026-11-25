@@ -155,8 +155,8 @@ something records, or the Recorder encodes from the surfaces itself.
   a newer build of the same session arrives; one walk runs at a time.
 - **Sign-ins**: by default a walk is fresh: no session's data is used, so nothing taps through the person's real
   session on every build. A workspace can opt in ("Walk with my signed-in data", off by default): the walk then runs
-  on a clone of the session's data slot (`--keep-data` on the clone, which the crawler walks with one simulator and
-  never with a base), so it starts where the person is signed in and changes nothing of theirs; the row's detail
+  on a clone of the session's data slot (`--keep-data` on the clone, which the crawler walks on several simulators, each
+  on its own clone, and never with a base), so it starts where the person is signed in and changes nothing of theirs; the row's detail
   says which it was. The crawler's skip list (delete, pay, send, sign out...) applies as always. The captures of
   screens (which may show signed-in content) stay under `evidence/` until the store prunes them with their build.
 - **Limits said in the UI**: a walk reaches what tapping reaches within its budget; a screen behind typed input

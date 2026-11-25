@@ -72,7 +72,8 @@ The answers are built to be cheap to read:
 | `screen`, `check`, `wait_for`, `screenshot`, `logs` | reading and verifying |
 | `session` | this worktree's session: branch and commit, clean or not, its build (age, source, current or stale), the default recipe, the base, whether its simulator runs, the Claude session's title when known |
 | `build` | run a recipe for the session and wait (`recipe`, `timeout_s`: 10 to 200 s, default 200): answers the build's key and age, or the log's last error lines |
-| `changes` | the session's newest build against a base (`base`, `timeout_s`: 10 to 200 s, default 200): `+ Settings > Privacy (new) [s4]`, `~ Trips: 4,812 px differ [s3]`, `- Legacy import (gone) [s9]`, then counts, crashes and what the walk did not finish; `screenshot` takes `screen` (an id in brackets) and `side` `head`, `base` or `diff` for the stored pictures |
+| `changes` | the session's newest build against a base (`base`, `timeout_s`: 10 to 200 s, default 200): `+ Settings > Privacy (new) [s4]`, `~ Trips: 4,812 px differ (0.35%), 1 route added, 2 texts changed [s3]` (the reasons follow the colon: pixels, structure, routes, texts), `> Trips: "Open Home" now leads to Inbox` for a control that was redirected, `- Legacy import (gone) [s9]`, then counts, crashes (new, fixed or still there, when answered from history) and what the walk did not finish. When both builds have a stored map the first line says `changes from history, no walk started:` and a `baseline:` line says where the base came from; `base: snapshot:COMMIT` compares with the stored map of that commit, no build needed. `screenshot` takes `screen` (an id in brackets) and `side` `head`, `base` or `diff` for the pictures, which a comparison from history reads from the store |
+| `history` | the maps stored for the session's repository and profile, newest first: commit, date, screens, and what changed against the one before. With `screen` (a title or id): that screen's lineage, a line per commit that changed it (`visual`, `structure`, routes, texts). `screenshot` with `screen` and `commit` answers the stored picture. It only reads |
 | `compare` | how two simulators' screens differ: `-` only on the base, `+` only on the other, `>` moved, and the share of pixels that differ; `map` adds a picture of where |
 
 With several simulators running, each tool takes `sim` (`s1`, `s2`...). A second `launch` puts its simulator
@@ -122,8 +123,9 @@ From a worktree of a repository added to Greenroom, with the agent started in th
 1. `session`: the branch, whether the build is `current` or `stale`, and the base.
 2. `build`: runs the workspace's recipe and waits. It answers `built <key> ...`, or the last error lines of the log
    to fix. The session's simulator reloads on the new build with its data kept.
-3. `changes`: what differs from the base, screen by screen. A `~` line with a pixel count is a screen that looks
-   different; `screenshot` with its `screen` id and `side: diff` shows where. `+` and `-` are screens the change
+3. `changes`: what differs from the base, screen by screen. A `~` line says why: a pixel count is a screen that looks
+   different, and routes and texts say what a control or a string did (`> Screen: "Open Home" now leads to Inbox` is a
+   redirected control). `history` lists the maps stored for earlier commits and one screen's lineage over time; `screenshot` with its `screen` id and `side: diff` shows where. `+` and `-` are screens the change
    added or removed.
 4. `launch` (with no `apk`), then `tap`, `type`, `check` and `screenshot` on the screens the change touched.
    `check` answers `PASS` or says what is missing.
@@ -136,8 +138,9 @@ From a worktree of a repository added to Greenroom, with the agent started in th
   so, and can never give the yes itself. `ci` fetches what CI already built for the commit and never starts a
   workflow from an agent's call (the answer says so when there is no run); only the person's Build button may.
   `build` counts as an action: it is refused while the agent is paused.
-- `changes` starts a walk of the two builds (hidden simulators, a minute or two for a large app) when that pair has
-  not been compared, and answers from the stored one otherwise. It never starts a build of the base: a base nothing
+- `changes` answers from stored maps (history) when both builds' commits have one: no walk, no simulator, and its first line says so.
+  Otherwise it starts a walk of the two builds (hidden simulators, a minute or two for a large app) when that pair has
+  not been compared, and answers from the stored one otherwise. `history` never walks. It never starts a build of the base: a base nothing
   built (a branch, a commit or a pull request with no stored build, no CI build and no worktree with a fresh APK)
   is answered as text saying what would build it, and nothing runs. The base is the repository's base branch unless
   `base` says `session:BRANCH`, `pr:NUMBER`, a branch, tag or commit, or the full path of an `.apk` (anything else with a path is refused). It is also an action,

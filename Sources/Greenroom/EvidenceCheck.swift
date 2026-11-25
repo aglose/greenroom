@@ -16,7 +16,7 @@ extension AppDelegate {
 /// one; only one walk runs at a time; `auto` off walks nothing; a marker written into the session's data before a
 /// walk is unchanged after it (the walk worked on a copy, which is gone afterwards); `changes(head:base:)` of a
 /// build against itself finds no differing screen; pruning a build removes its evidence; the size cap removes the
-/// oldest first. Budgets for the check: depth 1, 60 s. One `[greenroom] evidence: ok|FAIL ...` line per step, then
+/// oldest first. Budgets for the check: depth 1, 180 s. One `[greenroom] evidence: ok|FAIL ...` line per step, then
 /// `evidence check: PASS|FAIL`. Everything is made in a fresh subfolder of DIR (`evidence-check`); DIR itself is
 /// never deleted, and the engine's data folders of the check's slots are removed at the end.
 enum EvidenceCheck {
@@ -113,7 +113,10 @@ enum EvidenceCheck {
 
             let store = SessionStore(root: base.appendingPathComponent("state", isDirectory: true))   // beside the engine's own
             sessions.use(store: store)
-            ev.budget = Evidence.Budget(depth: 1, seconds: 60, jobs: 2)
+            // The app's own default budget: the check's engine state is new each run, so every walk starts the engine
+            // cold (framework ready after 18 to 106 s measured on a busy Mac, 2 s warm), and a 60 s budget spent most
+            // of itself before the first screen. Depth 1 still ends a warm walk in about 20 s.
+            ev.budget = Evidence.Budget(depth: 1, seconds: 180, jobs: 2)
             let data = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
             func slotFolders(_ slot: String) -> [URL] {
                 ((try? fm.contentsOfDirectory(at: data, includingPropertiesForKeys: nil)) ?? []).flatMap { pkg in
@@ -171,7 +174,7 @@ enum EvidenceCheck {
             expect(sessions.auto(of: a) == .onBuild, "a workspace walks on build by default")
             expect(ev.entry(of: a.worktree.path) == nil && ev.started == 0, "nothing is walked before a session is used")
 
-            // 1. First activations: nobody asks for a walk. a's starts, b's waits behind it.
+            // 1. First activations: nobody asks for a walk. One starts, the other waits behind it.
             expect(sessions.activate(a), "first activation of a")
             expect(sessions.activate(b), "first activation of b")
             let began = await wait("a's walk to start", 60) { ev.started >= 1 && ev.entry(of: a.worktree.path) != nil }
@@ -179,14 +182,18 @@ enum EvidenceCheck {
             _ = await wait("b's row", 30) { ev.entry(of: b.worktree.path) != nil }
             let bStatus = ev.entry(of: b.worktree.path)?.status
             let aStatus = ev.entry(of: a.worktree.path)?.status
-            expect(bStatus == .queued && ev.runningOwner == a.worktree.path, "b's walk waits while a's runs (a \(String(describing: aStatus)), b \(String(describing: bStatus)))")
-            let aDone = await wait("a's walk", 240) { isDone(a.worktree.path, keyA) }
+            // Builds are filed on a concurrent queue, so either session's build can land first: one walks, the other waits.
+            let running = ev.runningOwner
+            let waiting = running == a.worktree.path ? bStatus : aStatus
+            expect((running == a.worktree.path || running == b.worktree.path) && waiting == .queued,
+                   "one walk runs while the other waits (running \(running == a.worktree.path ? "a" : running == b.worktree.path ? "b" : "none"), a \(String(describing: aStatus)), b \(String(describing: bStatus)))")
+            let aDone = await wait("a's walk", 840) { isDone(a.worktree.path, keyA) }   // b's may come first
             expect(aDone && hasMap(keyA), "a's walk ends with evidence/<key>/map/crawl.json")
             let nCaptures = captures(keyA)
             expect(nCaptures > 0, "the walk's captures are there (\(nCaptures) screens captured)")
             if case .done(let n, _, _)? = ev.entry(of: a.worktree.path)?.status { expect(n >= 3, "the row says N screens (\(n))") }
             expect(!fm.fileExists(atPath: mapDir(keyA).deletingLastPathComponent().appendingPathComponent("map.part").path), "no half-made map is left")
-            let bDone = await wait("b's walk", 240) { isDone(b.worktree.path, keyB) }
+            let bDone = await wait("b's walk", 420) { isDone(b.worktree.path, keyB) }
             expect(bDone && hasMap(keyB), "b's walk follows and ends with its own map")
             expect(ev.started == 2, "two builds, two walks (\(ev.started))")
             expect(await wait("the data copies to be removed", 20) { clones().isEmpty }, "no clone of a data slot is left behind")
@@ -209,17 +216,24 @@ enum EvidenceCheck {
             expect(!before.isEmpty, "a has a data folder to protect (\(before.joined(separator: ",")))")
             sessions.walkAgain(a)
             var sawCopy = false
-            let again = await wait("the repeated walk", 240) {
+            var instanceCopies = Set<String>()   // apksim 0.60 clones the walk's copy once per simulator: k<token><i>-0
+            let again = await wait("the repeated walk", 420) {
                 if clones().contains(where: { fm.fileExists(atPath: $0.appendingPathComponent(marker).path) }) { sawCopy = true }
+                for pkg in (try? fm.contentsOfDirectory(at: data, includingPropertiesForKeys: nil)) ?? [] {
+                    for f in (try? fm.contentsOfDirectory(at: pkg, includingPropertiesForKeys: nil)) ?? []
+                    where f.lastPathComponent.hasPrefix("k") && !f.lastPathComponent.hasSuffix(".device")
+                        && fm.fileExists(atPath: f.appendingPathComponent(marker).path) { instanceCopies.insert(f.lastPathComponent) }
+                }
                 return ev.started == 3 && isDone(a.worktree.path, keyA)
             }
             expect(again, "\"Walk again\" walks a cached build once more")
             expect(sawCopy, "the walk ran on a copy of the data, which held the marker")
+            expect(instanceCopies.count >= 2, "the signed-in walk ran on more than one simulator, each on its own copy (\(instanceCopies.count) copies seen)")
             let after = slotFolders(a.slot).filter { fm.fileExists(atPath: $0.appendingPathComponent(marker).path) }
             expect(!after.isEmpty && after.allSatisfy { (try? String(contentsOf: $0.appendingPathComponent(marker), encoding: .utf8)) == "kept" },
                    "the marker in the session's data is unchanged after the walk")
             expect(slotFolders(a.slot).map { $0.lastPathComponent }.sorted() == before && clones().isEmpty, "no slot appeared or went, and the copy is deleted")
-            expect(ev.entry(of: a.worktree.path)?.note?.contains("copy of this session's data") == true, "the row's detail says it walked a copy")
+            expect(ev.entry(of: a.worktree.path)?.note?.contains("copies of this session's data") == true, "the row's detail says it walked copies")
 
             // 4. A new build cancels a running walk, and the newer one is walked.
             let cancelledBefore = ev.cancelledRuns
@@ -230,7 +244,7 @@ enum EvidenceCheck {
                 return false
             }
             expect(place("a", v4) == key4, "a newer build lands while that one is walked")
-            let newer = await wait("the walk of the newer build", 240) { isDone(a.worktree.path, key4) }
+            let newer = await wait("the walk of the newer build", 420) { isDone(a.worktree.path, key4) }
             expect(newer && hasMap(key4), "the newer build is walked\(newer ? "" : " (row: \(String(describing: ev.entry(of: a.worktree.path))), running \(ev.runningOwner ?? "none"), started \(ev.started), key3 \(key3) key4 \(key4))")")
             expect(ev.cancelledRuns > cancelledBefore && !hasMap(key3), "the older build's walk was cancelled and left no map (\(ev.cancelledRuns - cancelledBefore) cancelled)")
             expect(!fm.fileExists(atPath: mapDir(key3).deletingLastPathComponent().appendingPathComponent("map.part").path), "its half-made map is gone")
@@ -243,7 +257,7 @@ enum EvidenceCheck {
                let newer = store.record(apk: r2, source: .local, sha: nil, ref: nil, dirty: false, date: Date()) {
                 ev.buildArrived(worktree: a.worktree.path, build: newer, auto: .onBuild)
                 ev.buildArrived(worktree: a.worktree.path, build: older, auto: .onBuild)
-                let walkedNewer = await wait("the newer build's walk", 240) { isDone(a.worktree.path, newer.key) }
+                let walkedNewer = await wait("the newer build's walk", 420) { isDone(a.worktree.path, newer.key) }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 expect(walkedNewer && ev.entry(of: a.worktree.path)?.key == newer.key && !hasMap(older.key) && ev.started == startedReversed + 1,
                        "builds that arrive in reverse order: the newer is walked and the older ignored (\(ev.started - startedReversed) walk)")
@@ -266,7 +280,7 @@ enum EvidenceCheck {
             if let head = store.build(key4) {
                 var ended: Result<Evidence.ChangesResult, Evidence.Failure>?
                 ev.changes(head: head, base: head) { ended = $0 }
-                _ = await wait("the comparison", 300) { ended != nil }
+                _ = await wait("the comparison", 600) { ended != nil }
                 switch ended {
                 case .success(let r)?:
                     expect(r.summary.differing == 0 && r.summary.same > 0 && r.map.screens.count > 0,
@@ -299,7 +313,7 @@ enum EvidenceCheck {
                     ev.changes(head: head, base: other) { second = $0 }
                     t1.cancel()
                     if case .failure? = first { expect(true, "the caller that cancelled is told so at once") } else { expect(false, "the caller that cancelled is told so at once") }
-                    let finished = await wait("the other caller's comparison", 300) { second != nil }
+                    let finished = await wait("the other caller's comparison", 600) { second != nil }
                     if case .success? = second { expect(finished, "the other caller still gets the comparison") } else { expect(false, "the other caller still gets the comparison") }
                 }
             } else { expect(false, "a's build is in the store") }

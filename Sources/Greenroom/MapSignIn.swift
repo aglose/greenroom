@@ -3,7 +3,7 @@ import AppKit
 
 /// What a signed-in walk does first: a hidden simulator on a throwaway data slot runs one of the person's scripts
 /// (Scripts: their variables, `gr`), then quits, so the slot is left signed in. The crawler then walks that slot as
-/// it is (`--keep-data`, one simulator), and the slot goes when the walk has ended.
+/// it is (`--keep-data`; each simulator of the walk gets its own clone of it), and the slot goes when the walk has ended.
 ///
 /// - The person's own data (`gdphone`, a session's slot) is never touched: the slot is made for this walk.
 /// - The script runs online even when the walk is offline: a sign-in needs its server.
@@ -87,6 +87,9 @@ final class MapSignIn {
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let o = r.runSync(timeout: MapSignIn.timeout)
+            // A script can end well without having signed in (one that only checks the network when its variables are
+            // missing): what the app shows afterwards says. Read here, off the main thread, while the device still runs.
+            let leftAt = (o.code == 0 && !o.cancelled && !o.timedOut && o.failure == nil) ? ScreenNode.parse(s.sendSync("nodes")) : []
             DispatchQueue.main.async {
                 guard let self else { return }
                 if o.cancelled || self.cancelled { return self.end(.cancelled) }
@@ -96,10 +99,21 @@ final class MapSignIn {
                     let last = o.output.last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                     return self.end(.failed("\(name) failed (exit \(o.code ?? -1))" + (last.map { ": \($0)" } ?? "")))
                 }
+                if MapSignIn.stillAtSignIn(leftAt) {
+                    let last = o.output.last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                    return self.end(.failed("\(name) ended, but the app still shows a password field, so the walk would run signed out"
+                                            + (last.map { ". The script said: \($0)" } ?? ".")))
+                }
                 self.onStatus?("Signed in with \(name); starting the walk…")
                 self.end(.ready(slot: self.slot))
             }
         }
+    }
+
+    /// Whether the screen a sign-in script left the app on is still a sign-in: a password field is on it. A signed-in
+    /// app rarely shows one (a change-password screen is not where a sign-in script ends).
+    static func stillAtSignIn(_ nodes: [ScreenNode]) -> Bool {
+        nodes.contains { $0.password }
     }
 
     /// Stops the script and the device; the slot is removed. The completion gets `.cancelled`.
@@ -110,16 +124,27 @@ final class MapSignIn {
         if run == nil { end(.cancelled) }   // still starting: nothing else will end it
     }
 
+    /// How long the last sign-in's engine held its slot after the device's process had exited (for checks).
+    static var lastRelease: TimeInterval = 0
+
     /// Quits the device and waits for it to let go of the slot (the crawler needs it), then reports.
     private func end(_ outcome: Outcome) {
         guard let done else { return }
         self.done = nil
-        let s = sim, log = self.log, slot = self.slot, keep: Bool
-        if case .ready = outcome { keep = true } else { keep = false }
+        let s = sim, log = self.log, slot = self.slot
+        var outcome = outcome
         s?.quit()
         DispatchQueue.global(qos: .userInitiated).async {
             s?.waitUntilExit()
-            if !keep { MapSignIn.discard(slot) }
+            // The device's process is the engine's client; the JVM that held the slot can still be exiting. The crawler
+            // refuses a slot that is held, so the walk starts only once it is free.
+            let exited = Date()
+            if case .ready = outcome {
+                let free = SlotClone.waitUntilFree(slot, in: Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true))
+                MapSignIn.lastRelease = Date().timeIntervalSince(exited)
+                if !free { outcome = .failed("The device for \(self.script.name) did not let go of its data after it quit.") }
+            }
+            if case .ready = outcome {} else { MapSignIn.discard(slot) }
             if let log { try? FileManager.default.removeItem(at: log) }
             DispatchQueue.main.async {
                 MapSignIn.live[ObjectIdentifier(self)] = nil

@@ -1,5 +1,5 @@
 # The apksim release Greenroom bundles. scripts/fetch-engine.sh downloads these two files from
 # https://github.com/aglose/apksim/releases and refuses them unless the hashes match.
-VERSION=0.57.1
-ENGINE_SHA256=4f89b395a6d8d4927b051ad2170925455ee663484d0d728bdcca0f48aa1da3a9
-TESTAPP_SHA256=dafeec1a034740445ab9529411fb11beb57839c8fd644fd6f068e03f60b5b28e
+VERSION=0.62.0
+ENGINE_SHA256=d8c09beb6650797d1b69105ca4ae671010818987765d69dac072504d37ff760e
+TESTAPP_SHA256=25050805f82e7c681c168ab053612fb00a1a1f433729479ae7abf69987ed4564

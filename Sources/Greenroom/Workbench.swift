@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import UniformTypeIdentifiers
 
 /// The main window: running simulators and recent APKs in a sidebar, the selected simulator beside it,
@@ -123,6 +124,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     let snapshotReview = SnapshotReview(frame: .zero)
     // The screen map (ScreenMap.swift): a full-stage sheet too.
     let screenMap = ScreenMap(frame: .zero)
+    /// The running walk in the top bar, while the map is closed as well as open.
+    let walkChip = WalkProgressChip()
     // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
     let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
@@ -142,6 +145,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         /// "Add a session" under a repository that shows none.
         case addSession(URL, hidden: Int)
         case suggestion(Session)
+        /// The repository's main, kept built by itself (MainBuild.swift).
+        case main(MainRow)
         case session(Session)
         case pull(PullRow)
         case simulator(Simulator)
@@ -183,6 +188,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         emptyStage.onAddRepo = { [weak self] in self?.addRepository(nil) }
         DevHooks.shared.install(workbench: self, in: stack, over: grid)   // developer hooks (DevHooks.swift)
         emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
+        emptyStage.onFolder = { [weak self] in self?.sessions.chooseProjectToRun() }
+        emptyStage.onClone = { [weak self] in self?.sessions.askToClone() }
         bottomDock.isHidden = true
         bottomDockHeight = bottomDock.heightAnchor.constraint(equalToConstant: 0)
         gridTrailing = grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -68)
@@ -193,7 +200,6 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         overrideBar.isHidden = true
 
         buildAgentHud()
-
         NSLayoutConstraint.activate([
             grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
@@ -245,11 +251,17 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         reload()
         sessions.onChange = { [weak self] in self?.setNeedsSidebar() }   // the rows only: the stage did not change
         sessions.install(workbench: self)
+        let quick = QuickSignIn(workbench: self)
+        quickSignIn = quick
+        ScriptWindow.onOffersChanged = { [weak quick] in quick?.refresh() }
     }
 
     func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
         newFrame
     }
+
+    /// The "Sign in with…" button on a device whose screen a script signed in from before (SignInOffers).
+    private var quickSignIn: QuickSignIn?
 
     // MARK: Opening and selecting
 
@@ -298,8 +310,29 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         selected = sim
         window.subtitle = sim?.name ?? ""
         sessions.selected(sim)
+        noteLastOpened(sim)
         reload()
         if let sim, let v = grid.view(for: sim) { window.makeFirstResponder(v) }
+    }
+
+    /// Remembers what was chosen, for "Reopen what was open last" (LastOpened.swift): its session, else its APK.
+    private func noteLastOpened(_ sim: Simulator?) {
+        guard let sim else { return }
+        sessions.reopenWhenListed = nil   // something else was chosen first: it is not to be replaced
+        if let s = sessions.session(forSimulator: sim) { LastOpened.note(.session(worktree: s.worktree.path)) }
+        else { LastOpened.note(.apk(path: sim.apk.path)) }
+    }
+
+    /// At launch, with "Reopen what was open last" on: opens the APK again, or the session once Sessions lists it.
+    func reopenLast() {
+        switch LastOpened.stored {
+        case .apk(let path)?:
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: url.path) { open(url) }
+        case .session(let worktree)?:
+            sessions.reopenWhenListed = worktree
+        case nil: break
+        }
     }
 
     /// The simulators on screen: all of them side by side, or the chosen one.
@@ -312,6 +345,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 self.selected = sim
                 self.window.subtitle = sim.name
                 self.sessions.selected(sim)
+                self.noteLastOpened(sim)
                 self.reload()
             }
             view.onHover = { [weak self] v, inside in
@@ -380,7 +414,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         for group in groups {
             guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
             rows.append(.sessionsHeader(group.header, ws, hidden: group.hidden))
-            if group.sessions.isEmpty { rows.append(.addSession(ws, hidden: group.hidden)) }
+            let main = sessions.mainRow(for: ws)
+            if let main { rows.append(.main(main)) }
+            if group.sessions.isEmpty && main == nil { rows.append(.addSession(ws, hidden: group.hidden)) }
             rows += group.sessions.map { .session($0) }
         }
         let suggested = sessions.suggestions()
@@ -395,7 +431,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             rows.append(.header("Review"))
             rows += pullRows.map { .pull($0) }
         }
-        let loose = sims.filter { sessions.session(forSimulator: $0) == nil && !sessions.pulls.owns($0) }   // a session's or pull request's own is on its row
+        let loose = sims.filter { sessions.session(forSimulator: $0) == nil && !sessions.pulls.owns($0) && !sessions.mainBuilds.owns($0) }   // a session's, main's or pull request's own is on its row
         if !loose.isEmpty {
             rows.append(.header("Running"))
             rows += loose.map { .simulator($0) }
@@ -416,6 +452,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let selected = self.selected
         let want = selected.flatMap { s in rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }
+            if case .main(let x) = $0 { return x.simulator === s }
             if case .pull(let x) = $0 { return x.simulator === s }
             return false
         }) ?? rows.firstIndex(where: { if case .simulator(let x) = $0 { return x === s }; return false }) }
@@ -432,6 +469,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .sessionsHeader(let t, let ws, _): return "sh:" + t + ws.path
         case .addSession(let ws, _): return "add:" + ws.path
         case .suggestion(let s): return "sg:" + s.worktree.path
+        case .main(let m): return "m:" + m.workspace.path
         case .session(let s): return "s:" + s.worktree.path
         case .pull(let p): return "p:" + p.pull.id
         case .simulator(let sim): return "sim:" + String(UInt(bitPattern: ObjectIdentifier(sim).hashValue))
@@ -448,6 +486,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
         case .session(let s): return Self.identity(row) + "|" + sessions.rowKey(for: s)
         case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
+        case .main(let m): return Self.identity(row) + "|" + sessions.mainRowKey(m)
         case .pull(let p): return Self.identity(row) + "|\(p.state)|\(p.build?.key ?? "")|\(p.simulator?.state == .running)|\(p.simulator != nil)|\(p.pull.title)|\(p.repo)"
         case .simulator(let sim): return Self.identity(row) + "|\(sim.state)|\(sim.deviceSize)|\(sim.name)"
         case .claudeOffer(let o): return Self.identity(row) + "|\(o.count)"
@@ -515,6 +554,13 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         ])
     }
 
+    /// An edge of a full-stage sheet that gives way to the window: a sheet that needs more room than a narrow window
+    /// has is clipped, and never holds the window wider than a person drags it (hidden ones included).
+    private static func giving(_ c: NSLayoutConstraint) -> NSLayoutConstraint {
+        c.priority = .dragThatCannotResizeWindow
+        return c
+    }
+
     private func buildChrome(in host: NSView) {
         appChip = GlassButton(symbol: nil, title: "Open an APK", label: "Running apps", style: .well, target: self, action: #selector(showAppMenu(_:)))
         deviceButton = GlassButton(symbol: "iphone", title: "Phone", label: "Switch the device while the app runs", style: .plain, target: self, action: #selector(showDeviceMenu(_:)))
@@ -561,14 +607,21 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        walkChip.onOpen = { [weak self] in self?.showMap() }
         let deviceCluster = group([deviceButton, divider()] + deviceButtons)
         let captureCluster = group([shot, divider(), recordButton])
-        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, mirrorButton, group(layoutButtons), captureCluster, commands])
+        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, walkChip, mirrorButton, group(layoutButtons), captureCluster, commands])
         bar.spacing = 8
         bar.setHuggingPriority(.init(1), for: .horizontal)
         bar.setHuggingPriority(.init(1), for: .vertical)
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
         bar.translatesAutoresizingMaskIntoConstraints = false
+        // A narrow window drops the buttons it can do without (each is in the menus and ⌘K too), then clips, rather
+        // than the bar holding the window wide.
+        bar.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        for (v, p) in [(commands, 300), (mirrorButton, 310), (captureCluster, 320), (deviceCluster, 340)] as [(NSView, Float)] {
+            bar.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: p), for: v)
+        }
         header.addSubview(bar)
 
         // Three labeled micro-clusters: Inspect (right drawers), Verify (Changes/Map/Snapshots/Tests/Recordings), Dock (BottomDock & Agent).
@@ -875,7 +928,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         snapshotReview.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(snapshotReview, positioned: .below, relativeTo: scrim)
         NSLayoutConstraint.activate([snapshotReview.topAnchor.constraint(equalTo: host.topAnchor), snapshotReview.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-                                     snapshotReview.leadingAnchor.constraint(equalTo: host.leadingAnchor), snapshotReview.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+                                     snapshotReview.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(snapshotReview.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         snapshotReview.defaultAPK = { [weak self] in self?.selected?.apk }
         snapshotReview.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         snapshotReview.onToggle = { [weak self] in self?.updateChrome() }
@@ -897,12 +950,47 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         screenMap.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(screenMap, positioned: .below, relativeTo: scrim)
         NSLayoutConstraint.activate([screenMap.topAnchor.constraint(equalTo: host.topAnchor), screenMap.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-                                     screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+                                     screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         screenMap.defaultAPK = { [weak self] in self?.selected?.apk }
         screenMap.worktree = { [weak self] in self?.selected.flatMap { self?.worktree(of: $0) } }
+        screenMap.signInKey = { [weak self] in
+            guard let self, let w = self.selected.flatMap({ self.worktree(of: $0) }) else { return nil }
+            return self.sessions.sessions.first { $0.worktree.path == w.path }.map { SignIns.key(workspace: $0.workspace) }
+        }
+        screenMap.signInOnce = { [weak self] apk, key, app, done in
+            guard let self else { return }
+            self.screenMap.close()   // the stage, with the device to sign in on, is under the sheet
+            if !SignInOnce.begin(workbench: self, apk: apk, key: key, app: app, done: done) { done(false) }
+        }
         screenMap.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         screenMap.onToggle = { [weak self] in self?.updateChrome() }
+        screenMap.onProgress = { [weak self] p in self?.walkChip.show(p) }
         screenMap.onGo = { [weak self] screen, map in self?.goThere(screen, map) }
+        screenMap.context = { [weak self] apk in await self?.mapContext(for: apk) }
+    }
+
+    /// The history a walk of this APK is filed in: the session whose newest build it is (the same bytes), that build's clean
+    /// commit, and the baseline rule (History.baseline) against the workspace's base ref. Nil when no session built it
+    /// or the build has no clean commit.
+    func mapContext(for apk: URL) async -> MapContext? {
+        let key = await Task.detached { Workbench.fileKey(apk) }.value
+        guard let key, let session = sessions.sessions.first(where: { (sessions.builds[$0.worktree.path] ?? $0.build)?.key == key }),
+              let build = sessions.builds[session.worktree.path] ?? session.build, History.fileable(build), let sha = build.sha,
+              let workspace = sessions.workspaces.first(where: { $0.root.path == session.workspace.path }),
+              let (commit, tree) = await History.resolve(sha, in: workspace.root) else { return nil }
+        let store = History.store(stateRoot: sessions.evidence.store.root, workspace: workspace.root)
+        return MapContext(store: store, commit: commit, tree: tree, engine: Engine.shared.version) { profile in
+            await History.baseline(commit: commit, mainRef: workspace.baseRef, in: workspace.root, store: store, profile: profile.id)
+        }
+    }
+
+    /// The first 16 hex digits of a file's SHA-256: a build's key.
+    nonisolated static func fileKey(_ url: URL) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        var hasher = SHA256()
+        while let chunk = try? h.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        return String(hasher.finalize().map { String(format: "%02x", $0) }.joined().prefix(16))
     }
 
     @objc func toggleMap(_ sender: Any?) { if screenMap.isOpen { screenMap.close() } else { showMap() } }
@@ -921,7 +1009,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         changesSheet.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(changesSheet, positioned: .below, relativeTo: scrim)
         NSLayoutConstraint.activate([changesSheet.topAnchor.constraint(equalTo: host.topAnchor), changesSheet.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-                                     changesSheet.leadingAnchor.constraint(equalTo: host.leadingAnchor), changesSheet.trailingAnchor.constraint(equalTo: host.trailingAnchor)])
+                                     changesSheet.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(changesSheet.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         changesSheet.controller = sessions
         changesSheet.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         changesSheet.onToggle = { [weak self] in self?.updateChrome() }
@@ -1459,7 +1547,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession: return true
+        case .simulator, .session, .main, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession: return true
         default: return false
         }
     }
@@ -1482,6 +1570,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if case .suggestion = rows[row] { return 24 }
         if case .addSession = rows[row] { return 28 }
         if case .session(let s) = rows[row] { return sessions.rowHeight(for: s) }
+        if case .main = rows[row] { return 40 }
         if case .pull = rows[row] { return 42 }
         return 36
     }
@@ -1516,6 +1605,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             return sessions.suggestionCell(for: s)
         case .session(let session):
             return sessions.cell(for: session)
+        case .main(let m):
+            return sessions.mainCell(m)
         case .claudeOffer(let offer):
             return ClaudeUI.offerCell(offer)
         case .claudeTitles:
@@ -1569,6 +1660,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
+        if case .main(let m) = rows[row] { sessions.openMain(m.workspace) }
         if case .suggestion(let s) = rows[row] { sessions.show(s) }
         if case .addSession(let ws, _) = rows[row], let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) {
             sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 8, y: view.bounds.height), in: view)
@@ -1593,9 +1685,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if let open = menu.items.first(where: { $0.action == #selector(openInClaudeClicked) }) {
             if case .session(let s) = rows[row], s.claude?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
         }
+        // Main's row is not a worktree of the person's: no Claude session, nothing to remove but the repository.
+        var isMain = false
+        if case .main = rows[row] { isMain = true }
+        for item in menu.items where [#selector(openInClaudeClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
         else if case .pull(let pull) = rows[row] { items = sessions.pullMenuItems(for: pull) + [.separator()] }
+        else if case .main(let m) = rows[row] { items = sessions.mainMenuItems(m) + [.separator()] }
         else { return }
         for (i, item) in items.enumerated() { item.tag = 77; menu.insertItem(item, at: i) }
     }
@@ -1605,6 +1702,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         guard row >= 0, row < rows.count else { return }
         if case .simulator(let sim) = rows[row] { Engine.shared.close(sim) }
         if case .session(let session) = rows[row] { sessions.closeSimulator(of: session) }
+        if case .main(let m) = rows[row] { sessions.closeMain(m.workspace) }
         if case .pull(let pull) = rows[row] { sessions.closePullSimulator(pull) }
     }
 
@@ -1634,7 +1732,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     @objc private func removeRepositoryClicked() {
         let row = table.clickedRow
-        guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
+        guard row >= 0, row < rows.count else { return }
+        if case .main(let m) = rows[row] { sessions.removeWorkspace(at: m.workspace); return }
+        guard case .session(let session) = rows[row] else { return }
         sessions.removeWorkspace(containing: session)
     }
 
