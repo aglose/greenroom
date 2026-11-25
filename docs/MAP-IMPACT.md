@@ -94,6 +94,44 @@ Limits: a build with uncommitted changes has no place in the history, so it is c
 walked). A walk cut at a depth leaves its last screens with no record of what they depend on, and those are walked
 again every time: the default is the whole app.
 
+## Walks from the Screen Map sheet
+
+A walk started by hand in the Screen Map sheet is the same kind of map as an automatic one:
+
+- It passes `--record-deps` when the crawler offers it, so it can be what a later walk starts from. Before, it never
+  did, and a walk seeded from it was a full one ("the last walk did not record what its screens depend on").
+- A walk of the base branch's own build (the main row) has a place in the history too (`Workbench.mapContext` looked
+  only at sessions' builds, so such a walk was shown and never saved).
+- A commit's map is kept once, except that a walk with its dependencies recorded takes the place of one without, as a
+  full walk does of one that carried screens.
+- The sheet says what the walk is for: while it runs ("This walk becomes the map of main at 753faed: pull request diffs
+  start from it and are compared with it") and in the header after ("saved as the map of main: ..."). A walk with a
+  depth, a time limit or a start of its own is another profile, and says pull request diffs use the whole-app one.
+- The automatic walk does not make a map again that is already there: when the commit has a full map with its
+  dependencies under the walk's profile, `History.plan` hands it back (`WalkPlan.existing`) and Evidence writes it out
+  as the build's map ("Not walked: this commit's map was already there"). "Walk Again" still walks.
+
+Signed in or not is part of the profile. A map walked signed in (a script, or the kept sign-in) is compared only with
+walks made signed in; `ChangesRun.fromMain` looks first for the map its session's own walks will have.
+
+## What makes a walk slow
+
+Measured on one whole-app walk of an app with two Room databases (`--keep-data -j 6`, stopped after 58 minutes, 233
+screens found, 66 to open): 2,495 relaunches, 2,478 of them because `databases/<name>.db-wal` changed. The crawler takes
+any change of a file's size or date as the app having written to its data, and then replays from a new launch, so
+nearly every control tried cost a launch (aglose/apksim#644). That is the engine's to fix; nothing in Greenroom avoids it.
+
+What Greenroom does:
+
+- **The engine's startup cache.** The engine rebuilds `app.aot` only when it finds itself in another folder, and an
+  update of Greenroom puts the new engine in the same one, so the JVM refused the old cache at every launch
+  (aglose/apksim#645). `Engine.dropStaleStartupCache` removes a cache built for another engine (version, and the jar's
+  size and date, kept in `app.aot.engine`); the engine builds a new one in the background on its next launch. Measured
+  with 0.63.1 and its test app, headless: first frame 1.59 s without the cache, 1.03 s with it.
+- **No second walk of one commit** (above).
+
+Asked of the engine: standby JVMs for plain walks, not only `--diff-seed` (aglose/apksim#646).
+
 ## Decisions the brief left open
 
 - **Where the per-workspace state lives.** `Workspace` (Sessions.swift) is not this package's, so the full-walk

@@ -463,6 +463,21 @@ enum ChangesCheck {
                 expect(words.contains { $0.contains("NOT TRACED TO SCREENS") } && words.contains { $0.contains("build.gradle.kts") } && sheet.summaryText.contains("1 change not traced to screens"),
                        "the Summary lists it and the header counts it: \(sheet.summaryText)")
                 shot("11-not-traced.png")
+
+                // Another build of a commit that has its map: an automatic walk takes the stored map and walks nothing.
+                if let v6 = variant(), let b6 = store.record(apk: v6, source: .local, sha: sha4, ref: "feature", dirty: false, date: Date().addingTimeInterval(30)) {
+                    let t6 = Date()
+                    ev.buildArrived(worktree: s2.worktree.path, build: b6, auto: .onBuild, withData: false)
+                    var most = 0
+                    let taken = await wait("the stored map to be taken", 60) {
+                        most = max(most, crawlers())
+                        if let e = ev.entry(of: s2.worktree.path), e.key == b6.key, case .done = e.status { return true }
+                        return false
+                    }
+                    let e6 = ev.entry(of: s2.worktree.path)
+                    expect(taken && most == 0 && e6?.impact?.reason?.hasPrefix("this commit's map was already there") == true,
+                           "another build of a walked commit takes its stored map in \(String(format: "%.1f", Date().timeIntervalSince(t6))) s with no walk (\(e6?.impact?.reason ?? "no note"); crawlers seen: \(most))")
+                } else { expect(false, "another build of the commit is filed") }
             }
 
             let lastLogs = await wait("the last tour's logs to go", 20) { ((try? fm.contentsOfDirectory(atPath: Engine.shared.logs.path)) ?? []).allSatisfy { !$0.hasPrefix("tour-") } }

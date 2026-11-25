@@ -261,6 +261,9 @@ enum History {
         /// Why the walk is full, in words; nil for a full walk the engine gives no choice about (as before I1).
         var reason: String?
         var recordDeps = false
+        /// The stored map of this very commit, when it has one: a walk that was not asked for by hand is not made again.
+        var existing: MapSnapshot?
+        var existingStore: MapStore?
         /// Changes that could not be traced to screens, in words ("app start changed (App.kt)"): the screens they
         /// reach were not walked again, so the comparison may be missing them. Only for a branch's build.
         var unplaced: [String] = []
@@ -300,7 +303,14 @@ enum History {
         guard let base = shared.found else {
             plan.reason = "no earlier walk to start from"; return plan
         }
-        if base.snapshot.commit == p.commit { plan.reason = "this commit was walked before, so it is walked again in full"; return plan }
+        if base.snapshot.commit == p.commit {
+            // The commit has its map already (a walk from the Screen Map sheet, or of another build of it): a walk
+            // nobody asked for by hand takes that map instead of making it again.
+            plan.existing = base.snapshot
+            plan.existingStore = p.store
+            plan.reason = "this commit was walked before, so it is walked again in full"
+            return plan
+        }
         guard let diff = await MapImpact.changes(base: base.snapshot.commit, head: p.commit, in: p.workspace.root) else {
             plan.reason = "git could not list what changed since the last walk"; return plan
         }

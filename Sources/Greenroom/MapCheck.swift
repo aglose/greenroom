@@ -48,12 +48,12 @@ extension AppDelegate {
             try? fm.removeItem(at: root)
             let store = MapStore(root: root, repo: "map-check")
             map.context = { _ in
-                MapContext(store: store, commit: "2222222222222222222222222222222222222222", tree: "tree2", engine: "check") { profile in
+                MapContext(store: store, commit: "2222222222222222222222222222222222222222", tree: "tree2", engine: "check", baseline: { profile in
                     guard let b = store.importWalk(first.folder, commit: "1111111111111111111111111111111111111111", tree: "tree1", profile: profile, engine: "check", walked: Date().addingTimeInterval(-3600)) else { return nil }
                     let (paired, _) = MapPairing.pair(head: b, base: nil)
                     store.save(paired)
                     return (paired, 2)
-                }
+                }, baseBranch: "main")   // as a build of the base branch: its walk is the project's map
             }
             map.configure(depth: 1, time: 1, captures: 1, start: "apksim://slot")
             workbench.showMap()   // "Go there" closed the sheet
@@ -71,6 +71,12 @@ extension AppDelegate {
                 let c = src.diff?.counts
                 expect((c?.differing ?? 0) > 0, "the comparison found changes (new \(c?.added ?? 0), changed \(c?.modified ?? 0), gone \(c?.removed ?? 0))")
                 expect(map.compareText.contains("compared with 1111111") && map.compareText.contains("2 commits behind"), "the header says: \(map.compareText)")
+                // A walk of the base branch's build records what its screens depend on and says what it is for.
+                let saved = store.snapshot(profile: src.head.profile.id, commit: "2222222222222222222222222222222222222222")
+                let deps = CrawlRun.knownSupport(python: SnapshotRun.python() ?? URL(fileURLWithPath: "/usr/bin/python3"))?.recordDeps == true
+                expect(!deps || (saved?.startDeps != nil && saved?.screens.contains { $0.deps != nil } == true), "the walk recorded what its screens depend on (\(saved?.screens.filter { $0.deps != nil }.count ?? 0) screens)")
+                expect(map.compareText.contains("saved as a map of main with these limits") && map.feedsNote?.contains("main at 2222222") == true,
+                       "it says what the walk is for, while walking (\(map.feedsNote ?? "nothing")) and after")
                 expect(map.host.navigator.model?.hasDiff == true && map.host.navigator.filter == .all, "the map opens with the comparison, changes first")
                 // The strip over the two stored snapshots; moving a handle re-diffs and redraws in place.
                 let strip = map.timelineControl

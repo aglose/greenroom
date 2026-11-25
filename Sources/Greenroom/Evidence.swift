@@ -177,6 +177,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         /// the new engine reads differently starts a full walk.
         /// The walk compared with its seed (`--diff-seed`) failed in the engine: it is made once more without the comparison.
         var plainSeed = false
+        /// The commit's stored map was taken as this build's: no walk was made.
+        var adopted = false
         var engineCheck: String?
         var fullWhy: String?
         /// The session or repository went: the walk's folder goes with it.
@@ -754,6 +756,25 @@ final class Evidence: NSObject, NSMenuItemValidation {
                         else if plan.diffSeed, plan.seed != nil, !job.plainSeed { settings.diffControls = plan.diffControls }
                     }
                     if job.verifyOf != nil, plan == nil { self.finish(job, .finished); return }
+                    // The commit's map is in the history already (a walk from the Screen Map sheet, or of another
+                    // build of the commit): unless the person asked for this walk, the stored map is written out as
+                    // this build's and nothing is walked.
+                    if job.verifyOf == nil, !job.isChanges, !job.force, !job.forceFull, let snap = plan?.existing, snap.startDeps != nil, !snap.cutShort,
+                       let p = job.profile, let store = plan?.existingStore {
+                        let part = job.part
+                        job.adopted = true
+                        job.plan?.reason = "this commit's map was already there (walked \(snap.walked.prefix(10))), so it was not walked again"
+                        DispatchQueue.global(qos: .utility).async { [weak self] in
+                            let ok = store.writeSeed(snap, to: part)
+                            DispatchQueue.main.async {
+                                guard let self else { return }
+                                if job.cancelled { self.finish(job, .cancelled); return }
+                                if ok { NSLog("Greenroom: \(job.build.key) takes the stored map of \(snap.commit.prefix(7)) (\(p.id)); nothing is walked"); self.finish(job, .finished) }
+                                else { job.adopted = false; job.force = true; self.begin(job) }
+                            }
+                        }
+                        return
+                    }
                     let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
                     job.run = run
                     run.onEvent = { [weak self] e in self?.event(e, job) }
@@ -1063,7 +1084,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             let carried = i.total - i.walked
             lines.append("Walked \(i.walked) of \(i.total) screens (\(files)); the other \(carried) \(carried == 1 ? "was" : "were") carried from \(i.base.map { "the walk of " + $0 } ?? "the last walk").")
         } else if let r = i.reason {
-            lines.append("Full walk: \(r).")
+            lines.append(r.hasPrefix("this commit's map was already there") ? "Not walked: \(r)." : "Full walk: \(r).")
         }
         if let m = i.misses, m > 0 { lines.append(MapImpact.missWords(m).prefix(1).uppercased() + MapImpact.missWords(m).dropFirst() + "; its folder now always gets a full walk.") }
         else if i.misses == 0 { lines.append("Compared with the last quick walk: every screen it carried was as carried.") }

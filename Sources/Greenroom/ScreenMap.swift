@@ -15,6 +15,9 @@ struct MapContext {
     var tree: String
     var engine: String
     var baseline: (MapProfile) async -> (snapshot: MapSnapshot, behind: Int)?
+    /// The base branch's short name ("main") when the commit is on it: its map is what pull request diffs start from
+    /// and are compared with. Nil for a commit of another branch.
+    var baseBranch: String? = nil
 }
 
 final class ScreenMap: NSView {
@@ -673,19 +676,38 @@ final class ScreenMap: NSView {
         return true
     }
 
+    /// While a walk runs: what it will be once it ends ("It becomes the map of main at 753faed: pull request diffs
+    /// start from it"). Nil until the build's place in the history is known, and for a build with none.
+    private(set) var feedsNote: String?
+
     private func startCrawl(python: URL, apk: URL, out: URL, settings: CrawlRun.Settings) {
         var settings = settings
+        feedsNote = nil
+        let whole = settings.depth == 0 && settings.seconds == 0 && (settings.start ?? "").isEmpty
+        Task { @MainActor [weak self] in
+            guard let self, let ctx = await self.context(apk) else { return }
+            let sha = String(ctx.commit.prefix(7))
+            if let name = ctx.baseBranch {
+                self.feedsNote = whole ? "This walk becomes the map of \(name) at \(sha): pull request diffs start from it and are compared with it."
+                    : "This walk is saved as a map of \(name) at \(sha), but pull request diffs use the map of the whole app with no limit."
+            } else { self.feedsNote = "This walk is saved as the map of \(sha)." }
+            self.tick()
+        }
         devices = max(1, settings.jobs)
         let gen = generation
         starting = true
         startedAt = Date()
         // What this crawler offers is asked off the main thread (its --help, once); the walk starts when that is known.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let events = CrawlRun.support(python: python).events
+            let support = CrawlRun.support(python: python)
+            let events = support.events
             DispatchQueue.main.async {
                 guard let self, gen == self.generation, self.starting, self.run == nil else { return }
                 self.starting = false
                 settings.events = events
+                // What each screen depends on is recorded, so this walk can be the map a later walk starts from and a
+                // pull request is compared with (without it, the next walk of the app is a full one again).
+                settings.recordDeps = support.recordDeps
                 let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
                 self.run = r
                 r.onEvent = { [weak self] e in self?.event(e) }
@@ -712,6 +734,7 @@ final class ScreenMap: NSView {
         let on = devices == 1 ? "1 hidden device" : "\(devices) hidden devices"
         let whole = settings.depth == 0
         let screens = "\(reached.known) screen\(reached.known == 1 ? "" : "s")"
+        let feeds = feedsNote.map { "\n" + $0 } ?? ""
         // The share of the screens found so far that are opened: it can go back as more are found, and is honest about that.
         let fraction = explored > 0 && reached.known > 0 ? min(1, Double(explored) / Double(reached.known)) : nil
         let detail: String, short: String
@@ -724,7 +747,7 @@ final class ScreenMap: NSView {
         } else if whole {
             // The whole app: how much is found and how much of that is still to open (a count; how long it takes is not known before the end).
             let toOpen = explored > 0 && explored < reached.known ? reached.known - explored : 0
-            detail = "Mapping the whole app\(signedIn): \(screens) found" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(on)  ·  \(t)"
+            detail = "Mapping the whole app\(signedIn): \(screens) found" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(on)  ·  \(t)" + feeds
             short = "Mapping: \(screens)" + (toOpen > 0 ? ", \(toOpen) to open" : "") + "  ·  \(t)"
         } else {
             let deep = reached.depth == 0 ? "the first screen" : "\(reached.depth) tap\(reached.depth == 1 ? "" : "s") deep"
@@ -836,6 +859,9 @@ final class ScreenMap: NSView {
         var filed: Bool
         var baselineBehind: Int?
         var baselineCommit: String?
+        /// The base branch's name when this walk is its map; whether it recorded what its screens depend on.
+        var baseBranch: String? = nil
+        var hasDeps = false
     }
 
     nonisolated static func makeSource(_ map: ScreenMapData, context ctx: MapContext?, profile: MapProfile, engine: String) async -> Made? {
@@ -848,10 +874,17 @@ final class ScreenMap: NSView {
             let base = found.flatMap { $0.snapshot.commit == ctx.commit ? nil : $0 }
             let (paired, _) = MapPairing.pair(head: imported, base: base?.snapshot)
             var filed = true
-            if ctx.store.snapshot(profile: profile.id, commit: ctx.commit) == nil { filed = ctx.store.save(paired) }
+            // A commit's map is kept once, except that a walk that recorded what its screens depend on takes the place
+            // of one that did not (only such a map can be what later walks start from), as a full walk does of one
+            // that carried screens.
+            let was = ctx.store.snapshot(profile: profile.id, commit: ctx.commit)
+            let better = was.map { ($0.startDeps == nil && paired.startDeps != nil) || $0.screens.contains { $0.carriedFrom != nil } } ?? true
+            if better { filed = ctx.store.save(paired) }
+            let kept = better ? paired : (was ?? paired)
             let stored = loadStored(ctx.store, profile: profile.id)
             let src = MapSource.make(head: paired, base: base?.snapshot, history: stored.isEmpty ? [paired] : stored, blobURL: { ctx.store.blobURL($0) })
-            return Made(source: src, store: ctx.store, stored: stored, filed: filed, baselineBehind: base?.behind, baselineCommit: base?.snapshot.commit)
+            return Made(source: src, store: ctx.store, stored: stored, filed: filed, baselineBehind: base?.behind, baselineCommit: base?.snapshot.commit,
+                        baseBranch: ctx.baseBranch, hasDeps: kept.startDeps != nil)
         }
         // No commit: an import into a store of its own, never filed.
         let root = Engine.shared.state.appendingPathComponent("maps-unsaved", isDirectory: true)
@@ -925,14 +958,23 @@ final class ScreenMap: NSView {
     /// `[head] compared with [base]`, and how far behind the baseline is.
     private func headerText(_ m: Made) -> String {
         let head = m.filed ? "\(String(m.source.head.commit.prefix(7)))" : "this walk"
+        // What the saved walk is for: the base branch's map is what pull request diffs start from.
+        let whole = m.source.head.profile.depth == 0 && m.source.head.profile.seconds == 0 && m.source.head.profile.starts.isEmpty
+        var feeds = ""
+        if m.filed, let name = m.baseBranch {
+            if !m.hasDeps { feeds = "saved as the map of \(name), but with no record of what its screens depend on, so a pull request's walk cannot start from it" }
+            else if whole { feeds = "saved as the map of \(name): pull request diffs start from it and are compared with it" + (m.source.head.cutShort ? " (the walk was cut short, so screens may be missing)" : "") }
+            else { feeds = "saved as a map of \(name) with these limits; pull request diffs use the map of the whole app with no limit" }
+        }
         guard let base = m.source.base else {
+            if !feeds.isEmpty { return "\(head)  ·  \(feeds)" }
             return m.filed ? "\(head)  ·  saved to the history  ·  the first map of this app: later walks are compared with it"
                            : "\(head)  ·  not saved to the history: the build has no commit, or was made with uncommitted changes"
         }
         let behind = m.baselineBehind.map { $0 > 0 ? "  ·  the baseline is \($0) commit\($0 == 1 ? "" : "s") behind" : "" } ?? ""
         let c = m.source.diff?.counts
         let changes = c.map { $0.differing == 0 ? "  ·  nothing changed" : "  ·  \($0.added) new, \($0.modified) changed, \($0.removed) gone" } ?? ""
-        return "\(head) compared with \(String(base.commit.prefix(7)))" + behind + changes
+        return "\(head) compared with \(String(base.commit.prefix(7)))" + behind + changes + (feeds.isEmpty ? "" : "  ·  " + feeds)
     }
 
     nonisolated static func timelineEntries(_ list: [MapSnapshot]) -> [MapTimelineEntry] {
