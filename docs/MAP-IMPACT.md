@@ -42,6 +42,46 @@ verification passes them: the engine keeps its instances parked on the screens i
   seeded 13.6 s; the same with `--diff-seed --diff-controls all` 13.8 s; with `changed` 2.2 s. All three gave the
   full walk's map.
 
+## A branch against the base branch's map (the pull request diff)
+
+Changes (⌘D, the row's "N changed") with the base branch chosen no longer needs a build of the merge base and never
+walks the base: `ChangesRun.fromMain`.
+
+1. **The map of the base branch** is `History.baseline` of the head's commit: the snapshot of its merge base, else of
+   the nearest earlier commit of the base branch that has one (the header says how many commits before). It is looked
+   for under the profiles the session's own walks can have (`Evidence.walkProfiles`: signed in or not).
+2. **Held back until it is there.** With none, the sheet shows a card and compares nothing: "Walking main for the first
+   time" with the count so far while main's walk is queued or running (the comparison starts by itself when it is
+   filed), or what to do when it cannot start ("Keep main Built" off, walking off, the walk failed). Main's walk is the
+   project's one full walk (`MainBuilds.land`).
+3. **The head's map** is the session's own walk of that build, started if it has none: seeded from the base branch's
+   map, so only the screens the branch's files reach are walked.
+4. **The result** is `ChangeSet.fromHistory` of the two snapshots, with `walkedBecause` (the walk's reasons by screen)
+   and `unplaced`.
+
+A branch's build is not walked in full for a file that cannot be traced to screens (`MapImpact.decideLenient`): a
+build file, app start, a source no screen recorded, a values line that names no resource. What can be traced is walked;
+the rest is listed on the Summary tab under "Not traced to screens" and counted in the header, and "Walk Everything
+Again" is the person's choice. Main's builds keep the strict rules. A baseline with other settings or no record of
+dependencies is still a full walk.
+
+The Screens tab groups its tiles (Added, Changed, Removed), and a screen's detail says how it is reached, why it was
+walked again, and the texts and controls added or removed. A session row shows "N changed" against the base branch's
+map once its walk is filed; a click opens the comparison.
+
+A walk compared with its seed that fails in the engine is made once more without `--diff-seed` (aglose/apksim#639:
+`shutil.SameFileError` when one seed screen is the base of two pairs; seen on 0.62.0 and 0.63.0 with the test app).
+
+Checked end to end by `--changes-check DIR APK` (engine 0.63.0, its test app): with no map of main the comparison is
+held and nothing is walked; with one (10 screens, 203 s), a branch that changes one Kotlin file walks the 3 screens that
+file is on and the comparison names them, the reason and the text that changed. That walk took 348 s: the engine
+failed at the end of its first attempt (the error above) and it was made again.
+
+Limits: a build with uncommitted changes has no place in the history, so it is compared as before (both builds
+walked). A walk cut at a depth leaves its last screens with no record of what they depend on, and those are walked
+again every time: the default is the whole app. A screen a branch deletes is still carried from the base branch's map
+until the engine can say it is gone (aglose/apksim#629).
+
 ## Decisions the brief left open
 
 - **Where the per-workspace state lives.** `Workspace` (Sessions.swift) is not this package's, so the full-walk

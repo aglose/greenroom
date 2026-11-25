@@ -52,6 +52,11 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var wall = SignInWall.none
         /// The walk started from the app's kept sign-in.
         var signedIn = false
+        /// Screens that differ from the base branch's map (added, changed, removed), once the walk is filed and the
+        /// project has that map. Nil: not known (no map of the base branch yet, a build of the base branch itself).
+        var changed: Int? = nil
+        /// The same in words, for the tooltip: "2 added, 1 changed against main at 53ffe80".
+        var changedWords: String? = nil
     }
 
     /// A walk's plan and what came of it (packages I1, I2), kept beside its map as `greenroom-impact.json`. Absent for a
@@ -72,6 +77,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var verify: String?
         /// Why each walked screen was walked again ("SettingsFragment.kt changed"), by screen id. Nil for a full walk.
         var why: [String: [String]]?
+        /// Changes the walk could not trace to screens ("app start changed (App.kt)"): screens they reach were carried.
+        var unplaced: [String]?
     }
 
     /// What a comparison of two builds found, from the `compare` list of crawl.json.
@@ -168,6 +175,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var verifyOf: String?
         /// The verification follows an engine update (the engine the map was carried from): a screen whose structure
         /// the new engine reads differently starts a full walk.
+        /// The walk compared with its seed (`--diff-seed`) failed in the engine: it is made once more without the comparison.
+        var plainSeed = false
         var engineCheck: String?
         var fullWhy: String?
         /// The session or repository went: the walk's folder goes with it.
@@ -291,6 +300,11 @@ final class Evidence: NSObject, NSMenuItemValidation {
             drop(worktree)
             entries[worktree] = Entry(key: build.key, date: build.date, status: Self.done(data), note: nil, impact: Self.impactNote(map))
             onChange?()
+            // A map kept from an earlier run of the app: its count against the base branch is read again.
+            let all = controller?.workspaces ?? []
+            let own = controller?.sessions.first { $0.worktree.path == worktree }?.workspace.path
+            countChanges(owner: worktree, build: build, profiles: walkProfiles(worktree: worktree, withData: withData),
+                         candidates: own.map { p in all.filter { $0.root.path == p } } ?? all)
             return
         }
         guard walk else {
@@ -333,6 +347,17 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     /// The profile of the walks a comparison makes (and so of the snapshots it files): the queue's budget, light captures,
     /// no signed-in data.
+    /// The profiles a worktree's own walks can have, the likelier first: signed in (the kept sign-in, or the session's
+    /// data when the repository asks for it) and not. A walk is signed in only when its data was really copied, so
+    /// which of the two a stored map has is known only by looking.
+    func walkProfiles(worktree: String, withData: Bool) -> [MapProfile] {
+        let quick = controller?.walksQuick(worktree: worktree) == true
+        let signedInFirst = keptSignIn(worktree) != nil || withData
+        return (signedInFirst ? [true, false] : [false, true]).map {
+            Self.profile(depth: quick ? 2 : budget.depth, seconds: quick ? 120 : budget.seconds, appearances: ["light"], start: nil, signedIn: $0, offline: false)
+        }
+    }
+
     func changesProfile(start: String? = nil) -> MapProfile {
         Self.profile(depth: budget.depth, seconds: budget.seconds, appearances: ["light"], start: start, signedIn: false, offline: false)
     }
@@ -368,6 +393,33 @@ final class Evidence: NSObject, NSMenuItemValidation {
         return true
     }
 
+    /// What a build changes against the base branch's map, for its row: counted from the two stored maps (the build's
+    /// own, under the first of `profiles` that has one), off the main thread. Nothing for a build of the base branch.
+    private func countChanges(owner: String, build: Build, profiles: [MapProfile], candidates: [Workspace]) {
+        guard let c = controller, !c.mainBuilds.isTrunk(URL(fileURLWithPath: owner)), History.fileable(build) else { return }
+        let names = Dictionary(c.workspaces.map { ($0.root.path, MainBuilds.shortName($0.baseRef)) }, uniquingKeysWith: { a, _ in a })
+        let root = store.root, key = build.key
+        Task { @MainActor [weak self] in
+            let against = await Task.detached { () -> (Int, String)? in
+                for profile in profiles {
+                    for ws in candidates {
+                        guard let snap = await History.snapshot(of: build, workspace: ws.root, profile: profile, stateRoot: root) else { continue }
+                        guard let b = await History.baseline(of: build, profile: profile, candidates: [ws], stateRoot: root), b.snapshot.commit != snap.commit else { return nil }
+                        let n = MapPairing.diff(head: snap, base: b.snapshot).counts
+                        let parts = [(n.added, "added"), (n.modified, "changed"), (n.removed, "removed")].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
+                        return (n.differing, (parts.isEmpty ? "No screen differs" : parts.joined(separator: ", ")) + " against \(names[ws.root.path] ?? "the base branch") at \(b.snapshot.commit.prefix(7))")
+                    }
+                }
+                return nil
+            }.value
+            if let self, let against, var e = self.entries[owner], e.key == key, e.changed != against.0 || e.changedWords != against.1 {
+                e.changed = against.0; e.changedWords = against.1
+                self.entries[owner] = e
+                self.onChange?()
+            }
+        }
+    }
+
     private func file(build: Build, owner: String, profile: MapProfile, folder: URL, candidates: [Workspace], seed: MapSnapshot?, planProblem: String?) {
         guard History.fileable(build) else { return }
         let root = store.root, engine = Engine.shared.version
@@ -378,6 +430,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             }.value
             self?.filing[key] = nil
             if let self, filed != nil, var e = self.entries[owner], e.key == key { e.saved = true; self.entries[owner] = e; self.onChange?() }
+            if let self, filed != nil { self.countChanges(owner: owner, build: build, profiles: [profile], candidates: candidates) }
             // Sharing through git: said on the row, once, in words; it never stops a walk.
             if let self, let filed, filed.shared != nil || filed.shareProblem != nil || planProblem != nil, var e = self.entries[owner], e.key == key {
                 if let why = filed.shareProblem ?? planProblem { e.share = "The map was not shared through git: \(why)" + (filed.shared.map { " (\($0))" } ?? "") }
@@ -698,7 +751,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                         settings.seed = plan.seed
                         settings.onlyFile = plan.onlyFile
                         if job.verifyOf != nil { settings.maxActions = 0 }
-                        else if plan.diffSeed, plan.seed != nil { settings.diffControls = plan.diffControls }
+                        else if plan.diffSeed, plan.seed != nil, !job.plainSeed { settings.diffControls = plan.diffControls }
                     }
                     if job.verifyOf != nil, plan == nil { self.finish(job, .finished); return }
                     let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
@@ -707,7 +760,15 @@ final class Evidence: NSObject, NSMenuItemValidation {
                     run.onFinish = { [weak self] o in
                         switch o {
                         case .finished: self?.finish(job, .finished)
-                        case .failed(let why): self?.finish(job, .failed(why))
+                        case .failed(let why):
+                            // The engine's comparison with the seed is an extra Greenroom does not read: when the walk
+                            // fails with it (aglose/apksim#639), the same walk is made once more without it.
+                            if settings.diffControls != nil, !job.plainSeed, !job.cancelled, let self {
+                                NSLog("Greenroom: the walk of \(job.build.key) failed with --diff-seed (\(why.prefix(200))); walking it again without")
+                                job.plainSeed = true
+                                job.run = nil
+                                self.begin(job)
+                            } else { self?.finish(job, .failed(why)) }
                         case .cancelled: self?.finish(job, .cancelled)
                         }
                     }
@@ -831,7 +892,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["screens"] as? [[String: Any]]) ?? []
         let carried = list.filter { ($0["origin"] as? String) == "carried" }.count
         return ImpactNote(full: plan.isFull, reason: plan.reason, walked: list.count - carried, total: list.count, files: plan.files,
-                          base: plan.seedSnapshot.map { String($0.commit.prefix(7)) }, why: plan.reasons.isEmpty ? nil : plan.reasons)
+                          base: plan.seedSnapshot.map { String($0.commit.prefix(7)) }, why: plan.reasons.isEmpty ? nil : plan.reasons, unplaced: plan.unplaced.isEmpty ? nil : plan.unplaced)
     }
 
     /// Kills the walk's processes and removes its clone (app quit).
@@ -1014,7 +1075,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     /// What `badge(for:)` shows, for the sidebar to tell whether the row changed.
     func badgeKey(for session: Session) -> String {
         guard let e = entries[session.worktree.path] else { return "" }
-        return label(e) + "|" + detail(e)
+        return label(e) + "|" + detail(e) + "|" + (e.changedWords ?? "")
     }
 
     func badge(for session: Session) -> NSView? {
@@ -1028,7 +1089,26 @@ final class Evidence: NSObject, NSMenuItemValidation {
         b.setContentHuggingPriority(.required, for: .horizontal)
         b.setContentCompressionResistancePriority(.required, for: .horizontal)
         b.isEnabled = { if case .done = e.status { return true } else { return false } }()
-        return b
+        // What the build changes against the base branch: a click opens the comparison.
+        guard case .done = e.status, let n = e.changed else { return b }
+        let c = NSButton(title: n == 0 ? "no changes" : "\(n) changed", target: self, action: #selector(openChangesClicked(_:)))
+        c.isBordered = false
+        c.font = .systemFont(ofSize: 10, weight: .semibold)
+        c.contentTintColor = n == 0 ? .tertiaryLabelColor : Design.warning
+        c.identifier = NSUserInterfaceItemIdentifier(session.worktree.path)
+        c.toolTip = (e.changedWords ?? "") + ". Click to see the screens."
+        c.setContentHuggingPriority(.required, for: .horizontal)
+        c.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let both = NSStackView(views: [c, b])
+        both.spacing = 6
+        return both
+    }
+
+    @objc private func openChangesClicked(_ sender: NSButton) {
+        guard let path = sender.identifier?.rawValue, let s = controller?.sessions.first(where: { $0.worktree.path == path }) else { return }
+        guard let wb = controller?.workbench else { return }
+        if wb.changesSheet.isOpen, wb.changesSheet.session?.worktree.path == path { return }
+        wb.showChanges(of: s)
     }
 
     @objc private func openMapClicked(_ sender: NSButton) {

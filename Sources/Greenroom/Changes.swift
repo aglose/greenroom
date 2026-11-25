@@ -105,6 +105,11 @@ struct ChangeSet {
     var lineageTitles: [String: String] = [:]
     /// Where the baseline came from, in a line: "walked both builds", "main at 53ffe80, 6 commits behind the merge base".
     var baseline: String?
+    /// Why the walk looked at a screen again, by the head's screen id ("SettingsFragment.kt changed"): the changed
+    /// files that reach it. Empty when the whole app was walked.
+    var walkedBecause: [String: [String]] = [:]
+    /// Changes the head's walk could not trace to screens ("app start changed (App.kt)"): what they reach was not walked again.
+    var unplaced: [String] = []
     /// The history store's folder: a comparison from history shows the store's own pictures.
     var storeFolder: URL?
     /// Every pair, in the crawler's order: the head's screens, then those only the base has.
@@ -394,6 +399,10 @@ final class ChangesRun {
         case resolving
         case offer(BuildOffer)
         case walking(depth: Int?, known: Int, since: Date)
+        /// The comparison is with the base branch, and the project has no map of it yet: its one full walk is not
+        /// done. Nothing is compared until it is; `waiting` while that walk is on its way (the comparison then starts
+        /// by itself), false when something has to be done first.
+        case needsMain(title: String, text: String, waiting: Bool)
         case done(ChangeSet)
         case failed(String)
         case cancelled
@@ -410,7 +419,13 @@ final class ChangesRun {
 
     init(session: Session, controller: SessionsController) { self.session = session; self.controller = controller }
 
-    var isActive: Bool { switch state { case .resolving, .walking: return true; default: return false } }
+    var isActive: Bool {
+        switch state {
+        case .resolving, .walking: return true
+        case .needsMain(_, _, let waiting): return waiting
+        default: return false
+        }
+    }
 
     /// The session's newest build, filed in the store if only the worktree's Gradle output exists.
     private func headBuild() async -> Build? {
@@ -436,6 +451,10 @@ final class ChangesRun {
             guard gen == self.generation else { return }
             self.head = head
             guard let ws = self.controller.workspace(of: session) else { self.state = .failed("That repository is no longer in Sessions."); return }
+            // With the base branch: from the project's map of it, with only what this branch changed walked. Never a
+            // walk of the base for this comparison.
+            if case .baseBranch = ref, baseOption.isEmpty, start == nil, await self.fromMain(head: head, workspace: ws, gen: gen) { return }
+            guard gen == self.generation else { return }
             let resolved = await Bases.resolve(base: ref, in: ws, sessions: self.controller.sessions, store: self.controller.store, worktree: session.worktree)
             guard gen == self.generation else { return }
             switch resolved {
@@ -518,6 +537,113 @@ final class ChangesRun {
             if let set = await attempt() { state = .done(set); return true }
             return false
         }
+    }
+
+    // MARK: Against the project's map of the base branch
+
+    /// What the base branch's first walk is doing, for the card that holds a comparison back.
+    private func mainWords(_ ws: Workspace) -> (title: String, text: String, waiting: Bool) {
+        let name = MainBuilds.shortName(ws.baseRef)
+        let evidence = controller.evidence, main = controller.mainBuilds
+        let intro = "A pull request is compared with a map of \(name), made by walking \(name) once for this project. After that, only the screens a change touches are walked."
+        guard main.applies(to: ws) else {
+            return ("\(name) has not been walked yet", intro + " Turn on \u{201C}Keep \(name) Built\u{201D} in the repository's + menu and the walk starts by itself.", false)
+        }
+        if ws.auto == .off {
+            return ("\(name) has not been walked yet", intro + " Walking is off for this repository: turn it on in the repository's + menu.", false)
+        }
+        switch evidence.entry(of: main.trunk(of: ws.root).path) {
+        case nil:
+            return ("Waiting for a build of \(name)", intro + " Its walk starts when the build is there.", true)
+        case let e?:
+            switch e.status {
+            case .queued: return ("\(name)'s first walk is queued", intro, true)
+            case .walking(_, let known):
+                let n = max(known, e.explored)
+                return ("Walking \(name) for the first time", intro + (n > 0 ? " \(n) screen\(n == 1 ? "" : "s") found so far." : ""), true)
+            case .failed(let why): return ("\(name)'s walk failed", why + " Walk it again from \(name)'s row.", false)
+            case .stopped: return ("\(name)'s walk was stopped", intro + " Walk it again from \(name)'s row.", false)
+            case .done:
+                return e.saved ? ("\(name)'s map cannot be used here", "\(name) was walked with other settings than this session's walks (signed in or not, or how deep), so the two cannot be compared. Walk \(name) again from its row.", false)
+                    : ("Filing \(name)'s map", intro, true)
+            }
+        }
+    }
+
+    /// The comparison with the base branch, from the stored map of it. True when the comparison ended or is held here;
+    /// false to compare as before (an engine that cannot start from an earlier walk, a build with uncommitted changes).
+    @MainActor
+    private func fromMain(head: Build, workspace ws: Workspace, gen: Int) async -> Bool {
+        let evidence = controller.evidence, root = evidence.store.root, path = session.worktree.path
+        guard History.fileable(head), let python = SnapshotRun.python() else { return false }
+        let support = await Task.detached { CrawlRun.support(python: python) }.value
+        guard support.seed, support.recordDeps, gen == generation else { return false }
+        let withData = controller.walksWithData(session)
+        let profiles = evidence.walkProfiles(worktree: path, withData: withData)
+
+        // 1. The map of the base branch: held here until it is there.
+        func baseline() async -> (profile: MapProfile, snapshot: MapSnapshot, behind: Int)? {
+            for p in profiles {
+                if let b = await History.baseline(of: head, profile: p, candidates: [ws], stateRoot: root) { return (p, b.snapshot, b.behind) }
+            }
+            return nil
+        }
+        var found = await baseline()
+        if found == nil { controller.mainBuilds.ensure(ws) }
+        while found == nil {
+            guard gen == generation else { return true }
+            let w = mainWords(ws)
+            state = .needsMain(title: w.title, text: w.text, waiting: w.waiting)
+            guard w.waiting else { return true }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard gen == generation else { return true }
+            found = await baseline()
+        }
+        guard gen == generation, let base = found else { return true }
+
+        // 2. This build's own map: the session's walk of it (seeded from the base branch's, so only what changed).
+        func snapshot() async -> MapSnapshot? { await History.snapshot(of: head, workspace: ws.root, profile: base.profile, stateRoot: root) }
+        var mine = await snapshot()
+        if mine == nil {
+            let since = Date()
+            state = .walking(depth: nil, known: 0, since: since)
+            evidence.buildArrived(worktree: path, build: head, auto: .onBuild, withData: withData)
+            walking: while true {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                guard gen == generation else { return true }
+                guard let e = evidence.entry(of: path), e.key == head.key else { state = .failed("A newer build of \(session.title) arrived. Compare again."); return true }
+                switch e.status {
+                case .queued: break
+                case .walking(let depth, let known): state = .walking(depth: depth, known: max(known, e.explored), since: since)
+                case .failed(let why): state = .failed(why); return true
+                case .stopped: state = .cancelled; return true
+                case .done: break walking
+                }
+            }
+            await evidence.awaitFiling(head)
+            guard gen == generation else { return true }
+            mine = await snapshot()
+        }
+        // Walked, and not filed under the base's settings (signed in on one side only): compared as before.
+        guard let mine else { return false }
+
+        let folder = evidence.changesFolder(head: head.key, base: "map-" + String(base.snapshot.commit.prefix(12)))
+        let name = MainBuilds.shortName(ws.baseRef), short = String(base.snapshot.commit.prefix(7))
+        if mine.commit == base.snapshot.commit {
+            state = .done(ChangeSet.identical(folder: folder, map: ScreenMapData.read(evidence.mapFolder(for: head.key))))
+            return true
+        }
+        let words = base.behind == 0 ? "\(name) at \(short), where this branch left it"
+            : "\(name) at \(short), \(base.behind) commit\(base.behind == 1 ? "" : "s") before this branch left it"
+        let note = Evidence.impactNote(evidence.mapFolder(for: head.key))
+        let why = note?.why ?? [:]
+        let store = History.store(stateRoot: root, workspace: ws.root), baseSnap = base.snapshot
+        var set = await Task.detached { ChangeSet.fromHistory(head: mine, base: baseSnap, store: store, folder: folder, baseline: words) }.value
+        guard gen == generation else { return true }
+        set.walkedBecause = why
+        set.unplaced = note?.unplaced ?? []
+        state = .done(set)
+        return true
     }
 
     /// Files the heads and bases of a finished pair walk (each that has a commit and is not dirty).

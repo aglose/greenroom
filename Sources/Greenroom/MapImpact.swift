@@ -163,6 +163,20 @@ enum MapImpact {
 
     /// Full walk, or which screens to walk again. See the file's head and the plan for the rules.
     static func decide(_ input: Input) -> Decision {
+        var none: [String]? = nil
+        return decide(input, unplaced: &none)
+    }
+
+    /// `decide` for a branch's build, which is never walked in full by itself: a changed file that cannot be traced to
+    /// screens (a build file, app start, a source no screen recorded) is named in `unplaced` and the screens that can
+    /// be traced are walked. Still `.full` when the baseline itself cannot be started from (its settings, its record).
+    static func decideLenient(_ input: Input) -> (decision: Decision, unplaced: [String]) {
+        var list: [String]? = []
+        let d = decide(input, unplaced: &list)
+        return (d, list ?? [])
+    }
+
+    private static func decide(_ input: Input, unplaced: inout [String]?) -> Decision {
         let b = input.baseline
         // A new engine no longer starts a full walk: the map is kept and its carried screens are verified after the walk
         // (`History.WalkPlan.engineChanged`), with a full walk only when the new engine reads a screen differently.
@@ -184,8 +198,15 @@ enum MapImpact {
             }
             return n
         }
+        /// A change that cannot be traced to screens: the whole walk's reason, or (lenient) one more line.
+        var lenient = unplaced
+        func whole(_ why: String) -> Decision? {
+            if lenient == nil { return .full(why) }
+            if lenient?.contains(why) != true { lenient?.append(why) }
+            return nil
+        }
         func resource(_ r: String, _ path: String) -> Decision? {
-            if startResources.contains(norm(r)) { return .full("app start changed (\(r))") }
+            if startResources.contains(norm(r)) { return whole("app start changed (\(r))") }
             _ = select("\(r) changed") { $0.resources.contains { norm($0) == norm(r) } }
             return nil
         }
@@ -195,25 +216,30 @@ enum MapImpact {
             let kind = kind(of: path)
             if kind == .ignored { continue }
             if let p = input.fullWalkPatterns.first(where: { patternMatches($0, path) }) {
-                return .full("a file under \(p) changed, where a quick walk missed a change before")
+                if let d = whole("a file under \(p) changed, where a quick walk missed a change before") { return d }
             }
             switch kind {
             case .ignored: continue
-            case .full(let why): return .full(why)
+            case .full(let why): if let d = whole(lenient == nil ? why : "\(why) (\(path))") { return d }
             case .source:
-                if start.sources.contains(where: { sourceMatches(path, $0) }) { return .full("app start changed (\((path as NSString).lastPathComponent))") }
+                if start.sources.contains(where: { sourceMatches(path, $0) }) {
+                    if let d = whole("app start changed (\((path as NSString).lastPathComponent))") { return d }
+                }
                 let n = select("\((path as NSString).lastPathComponent) changed") { $0.sources.contains { sourceMatches(path, $0) } }
-                if n == 0 { return .full("a changed source file is on no screen the last walk recorded (\(path))") }
+                if n == 0, !start.sources.contains(where: { sourceMatches(path, $0) }) {
+                    if let d = whole("a changed source file is on no screen the last walk recorded (\(path))") { return d }
+                }
             case .resource(let r):
                 if let d = resource(r, path) { return d }
             case .values:
-                guard let changed = lines[path] else { return .full("the change to \(path) could not be read") }
+                guard let changed = lines[path] else { if let d = whole("the change to \(path) could not be read") { return d }; continue }
                 for l in changed {
-                    guard let names = valueResources(l) else { return .full("a changed line in \(path) names no resource") }
+                    guard let names = valueResources(l) else { if let d = whole("a changed line in \(path) names no resource") { return d }; continue }
                     for r in names { if let d = resource(r, path) { return d } }
                 }
             }
         }
+        unplaced = lenient
         // Screens the last walk has no record for are walked again: nothing says they are safe to carry.
         for s in b.screens where s.deps == nil { reasons[s.id, default: []].append("no record of what it depends on") }
         return .screens(b.screens.map(\.id).filter { reasons[$0] != nil }, reasons)
