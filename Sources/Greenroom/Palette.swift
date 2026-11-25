@@ -41,17 +41,37 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
 
         let icon = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 16, weight: .medium)) ?? NSImage())
-        icon.contentTintColor = Design.mute
+        icon.contentTintColor = Design.accent
         field.placeholderString = "Search commands, devices, apps and recordings"
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 17)
+        field.font = .systemFont(ofSize: 16)
         field.textColor = Design.ink
         field.delegate = self
         let line = NSView()
         line.wantsLayer = true
         line.layer?.backgroundColor = Design.stroke.cgColor
+
+        let footerLine = NSView()
+        footerLine.wantsLayer = true
+        footerLine.layer?.backgroundColor = Design.stroke.cgColor
+        let footer = NSTextField(labelWithString: "↑↓ Navigate   ·   ↵ Run   ·   Esc Close")
+        footer.font = .systemFont(ofSize: 11, weight: .medium)
+        footer.textColor = Design.mute
+        let footerWrap = NSView()
+        footerWrap.wantsLayer = true
+        footerWrap.layer?.backgroundColor = NSColor(white: 0, alpha: 0.18).cgColor
+        footerWrap.layer?.cornerRadius = 16
+        footerWrap.layer?.cornerCurve = .continuous
+        footerWrap.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        footerWrap.layer?.masksToBounds = true
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        footerWrap.addSubview(footer)
+        NSLayoutConstraint.activate([
+            footer.leadingAnchor.constraint(equalTo: footerWrap.leadingAnchor, constant: 16),
+            footer.centerYAnchor.constraint(equalTo: footerWrap.centerYAnchor),
+        ])
 
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item")))
         table.headerView = nil
@@ -74,7 +94,7 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
         // A darker tint over the glass, so a light app behind it does not wash the list out.
         let tint = NSView()
         tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor(srgbRed: 0.11, green: 0.115, blue: 0.13, alpha: 0.82).cgColor
+        tint.layer?.backgroundColor = NSColor(srgbRed: 0.11, green: 0.115, blue: 0.13, alpha: 0.85).cgColor
         tint.layer?.cornerRadius = 16
         tint.layer?.cornerCurve = .continuous
         tint.translatesAutoresizingMaskIntoConstraints = false
@@ -83,24 +103,29 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
                                      tint.leadingAnchor.constraint(equalTo: leadingAnchor), tint.trailingAnchor.constraint(equalTo: trailingAnchor)])
         glass.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glass, positioned: .below, relativeTo: tint)
-        for v in [icon, field, line, scroll, none] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
-        height = heightAnchor.constraint(equalToConstant: 420)
+        for v in [icon, field, line, scroll, none, footerLine, footerWrap] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        height = heightAnchor.constraint(equalToConstant: 440)
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
             widthAnchor.constraint(equalToConstant: 620), height,
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
             icon.centerYAnchor.constraint(equalTo: field.centerYAnchor),
-            field.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            field.topAnchor.constraint(equalTo: topAnchor, constant: 15),
             field.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
             field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
-            line.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 14),
+            line.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 13),
             line.leadingAnchor.constraint(equalTo: leadingAnchor), line.trailingAnchor.constraint(equalTo: trailingAnchor),
             line.heightAnchor.constraint(equalToConstant: 1),
             scroll.topAnchor.constraint(equalTo: line.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            scroll.bottomAnchor.constraint(equalTo: footerLine.topAnchor, constant: -6),
+            footerLine.leadingAnchor.constraint(equalTo: leadingAnchor), footerLine.trailingAnchor.constraint(equalTo: trailingAnchor),
+            footerLine.heightAnchor.constraint(equalToConstant: 1),
+            footerLine.bottomAnchor.constraint(equalTo: footerWrap.topAnchor),
+            footerWrap.leadingAnchor.constraint(equalTo: leadingAnchor), footerWrap.trailingAnchor.constraint(equalTo: trailingAnchor),
+            footerWrap.bottomAnchor.constraint(equalTo: bottomAnchor), footerWrap.heightAnchor.constraint(equalToConstant: 30),
             none.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
             none.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 18),
         ])
@@ -211,26 +236,74 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let item = shown[row]
         let icon = NSImageView(image: NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium)) ?? NSImage())
+            .withSymbolConfiguration(.init(pointSize: 13.5, weight: .medium)) ?? NSImage())
         icon.contentTintColor = Design.mute
         icon.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        let title = NSTextField(labelWithString: item.title)
-        title.font = .systemFont(ofSize: 14)
-        title.textColor = Design.ink
+
+        let title = NSTextField(labelWithString: "")
+        title.attributedStringValue = highlightedTitle(item.title, query: field.stringValue)
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         let group = NSTextField(labelWithString: item.group)
-        group.font = .systemFont(ofSize: 12)
-        group.textColor = Design.mute
-        let keys = NSTextField(labelWithString: item.shortcut)
-        keys.font = .systemFont(ofSize: 12, weight: .medium)
-        keys.textColor = Design.mute
+        group.font = .systemFont(ofSize: 11, weight: .medium)
+        group.textColor = Design.mute.withAlphaComponent(0.75)
+
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let r = NSStackView(views: [icon, title, spacer, group, keys])
-        r.spacing = 10
+
+        var views: [NSView] = [icon, title, spacer, group]
+        if !item.shortcut.isEmpty {
+            let keys = NSTextField(labelWithString: item.shortcut)
+            keys.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+            keys.textColor = Design.mute
+            let cap = NSView()
+            cap.wantsLayer = true
+            cap.layer?.cornerRadius = 5
+            cap.layer?.backgroundColor = Design.well.cgColor
+            cap.layer?.borderWidth = 1
+            cap.layer?.borderColor = Design.stroke.cgColor
+            keys.translatesAutoresizingMaskIntoConstraints = false
+            cap.addSubview(keys)
+            NSLayoutConstraint.activate([
+                keys.topAnchor.constraint(equalTo: cap.topAnchor, constant: 2),
+                keys.bottomAnchor.constraint(equalTo: cap.bottomAnchor, constant: -2),
+                keys.leadingAnchor.constraint(equalTo: cap.leadingAnchor, constant: 6),
+                keys.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: -6),
+            ])
+            views.append(cap)
+        }
+        let r = NSStackView(views: views)
+        r.alignment = .centerY
+        r.spacing = 9
         r.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 12)
         return r
+    }
+
+    private func highlightedTitle(_ text: String, query: String) -> NSAttributedString {
+        let base = NSMutableAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 13.5),
+            .foregroundColor: Design.ink,
+        ])
+        let q = Array(query.lowercased().filter { !$0.isWhitespace })
+        guard !q.isEmpty else { return base }
+        var qi = 0
+        var idx = text.startIndex
+        while idx < text.endIndex && qi < q.count {
+            let next = text.index(after: idx)
+            if String(text[idx]).lowercased().first == q[qi] {
+                let nsRange = NSRange(idx..<next, in: text)
+                if nsRange.location + nsRange.length <= base.length {
+                    base.addAttributes([
+                        .foregroundColor: Design.accent,
+                        .font: NSFont.systemFont(ofSize: 13.5, weight: .semibold),
+                    ], range: nsRange)
+                }
+                qi += 1
+            }
+            idx = next
+        }
+        return base
     }
 }
 

@@ -216,6 +216,7 @@ final class BuildLogPopover: NSViewController, NSPopoverDelegate {
         popover?.close()
         let c = BuildLogPopover(job: job, onCancel: onCancel)
         let p = NSPopover()
+        p.appearance = NSAppearance(named: .darkAqua)
         p.behavior = .transient
         p.delegate = c
         p.contentViewController = c
@@ -225,34 +226,52 @@ final class BuildLogPopover: NSViewController, NSPopoverDelegate {
     }
 
     override func loadView() {
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 320))
-        header.font = .systemFont(ofSize: 11, weight: .semibold)
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 580, height: 340))
+        v.wantsLayer = true
+        v.appearance = NSAppearance(named: .darkAqua)
+        v.layer?.backgroundColor = Design.stage.cgColor
+        header.font = .systemFont(ofSize: 12, weight: .semibold)
+        header.textColor = Design.ink
         header.lineBreakMode = .byTruncatingTail
-        header.maximumNumberOfLines = 3
+        header.maximumNumberOfLines = 2
         header.preferredMaxLayoutWidth = 420
         text.isEditable = false
         text.isRichText = false
         text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        text.textColor = Design.ink
         text.drawsBackground = false
-        text.textContainerInset = NSSize(width: 6, height: 4)
+        text.textContainerInset = NSSize(width: 10, height: 8)
         shown = Array(job.lines.suffix(Self.keepLines))
         text.string = shown.joined(separator: "\n")
         let scroll = NSScrollView()
         scroll.documentView = text
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
-        let cancel = ClosureButton(symbol: "xmark.circle", tip: "Cancel build (a Gradle daemon may finish its current task)") { [weak self] in self?.onCancel() }
-        let copy = ClosureButton(symbol: "doc.on.doc", tip: "Copy the log") { [weak self] in
+        scroll.wantsLayer = true
+        scroll.layer?.backgroundColor = NSColor(white: 0, alpha: 0.28).cgColor
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = Design.stroke.cgColor
+        let cancel = GlassButton(symbol: "xmark.circle", title: "Cancel", label: "Cancel build (a Gradle daemon may finish its current task)", style: .record, target: nil, action: nil)
+        cancel.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        cancel.font = .systemFont(ofSize: 11, weight: .medium)
+        cancel.onPress = { [weak self] in self?.onCancel() }
+        let copy = GlassButton(symbol: "doc.on.doc", title: "Copy", label: "Copy the log", style: .well, target: nil, action: nil)
+        copy.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        copy.font = .systemFont(ofSize: 11, weight: .medium)
+        copy.onPress = { [weak self] in
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(self?.job.lines.joined(separator: "\n") ?? "", forType: .string)
         }
-        for sub in [header, scroll, cancel, copy] as [NSView] { sub.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(sub) }
+        for sub in [header, divider, scroll, cancel, copy] as [NSView] { sub.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(sub) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: v.topAnchor, constant: 10), header.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 12),
-            header.trailingAnchor.constraint(lessThanOrEqualTo: copy.leadingAnchor, constant: -8),
+            header.topAnchor.constraint(equalTo: v.topAnchor, constant: 12), header.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 14),
+            header.trailingAnchor.constraint(lessThanOrEqualTo: copy.leadingAnchor, constant: -10),
             cancel.centerYAnchor.constraint(equalTo: header.centerYAnchor), cancel.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -12),
-            copy.centerYAnchor.constraint(equalTo: header.centerYAnchor), copy.trailingAnchor.constraint(equalTo: cancel.leadingAnchor, constant: -8),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8), scroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+            copy.centerYAnchor.constraint(equalTo: header.centerYAnchor), copy.trailingAnchor.constraint(equalTo: cancel.leadingAnchor, constant: -6),
+            divider.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10), divider.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: v.trailingAnchor), divider.heightAnchor.constraint(equalToConstant: 1),
+            scroll.topAnchor.constraint(equalTo: divider.bottomAnchor), scroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: v.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: v.bottomAnchor),
         ])
         view = v
@@ -281,7 +300,7 @@ final class BuildLogPopover: NSViewController, NSPopoverDelegate {
             text.string = shown.joined(separator: "\n")
         } else {
             text.textStorage?.append(NSAttributedString(string: (text.string.isEmpty ? "" : "\n") + added.joined(separator: "\n"),
-                                                        attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor]))
+                                                        attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: Design.ink]))
         }
         if atEnd { text.scrollToEndOfDocument(nil) }
         refresh()

@@ -72,5 +72,5 @@ extension Workbench {
         NSWorkspace.shared.open(Scripts.folder)
     }
 
-    @objc func showVariables(_ sender: Any?) { SettingsWindow.shared.show() }
+    @objc func showVariables(_ sender: Any?) { SettingsWindow.shared.show(tab: .variables) }
 }
