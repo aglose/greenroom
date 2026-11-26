@@ -177,6 +177,12 @@ final class CrawlRun {
         /// `--standby`: launches go to apksim's warm JVM when one is up (set when the crawler offers it). The engine
         /// keeps launches cold where a warm JVM cannot serve them (`--record-deps`, `--base`).
         var standby = false
+        /// `--freeze-network`: every launch answered from the walk's one recording of the app's server answers (what it
+        /// lacks fetched once and kept), with the clock at the time it began, so screens showing server data replay the
+        /// same. `--deterministic`: a route that does not replay to the same screen is not walked past. Both set when
+        /// the crawler offers them.
+        var freezeNetwork = false
+        var deterministic = false
         /// `--data-ignore PATTERN`, each: what the app writes at every action and no screen reads (the repository's
         /// `.greenroom/map.json` `dataIgnore`, RepoMapSettings), so replays after it are not new launches.
         var dataIgnore: [String] = []
@@ -203,6 +209,9 @@ final class CrawlRun {
         var standby = false
         /// `--data-ignore PATTERN` (apksim 0.64.0).
         var dataIgnore = false
+        /// `--freeze-network` and `--deterministic`.
+        var freezeNetwork = false
+        var deterministic = false
         static let none = Support()
     }
 
@@ -243,7 +252,8 @@ final class CrawlRun {
             killer.cancel()
             func has(_ flag: String) -> Bool { text.range(of: flag + "(?![\\w-])", options: .regularExpression) != nil }
             s = Support(seed: has("--seed") && has("--only-file"), recordDeps: has("--record-deps"), maxActions: has("--max-actions"), events: has("--events"), diffSeed: has("--diff-seed") && has("--diff-controls"),
-                        standby: has("--standby"), dataIgnore: has("--data-ignore"))
+                        standby: has("--standby"), dataIgnore: has("--data-ignore"),
+                        freezeNetwork: has("--freeze-network"), deterministic: has("--deterministic"))
         }
         supportLock.lock(); supportCache[key] = s; supportLock.unlock()
         return s
@@ -294,6 +304,9 @@ final class CrawlRun {
         if settings.recordDeps { a.append("--record-deps") }
         if settings.events { a.append("--events") }
         if settings.standby { a.append("--standby") }
+        // An offline walk has no server to answer from: what it shows is the app's offline state, already the same each time.
+        if settings.freezeNetwork && !settings.offline { a.append("--freeze-network") }
+        if settings.deterministic { a.append("--deterministic") }
         for d in settings.dataIgnore { a += ["--data-ignore", d] }
         if let n = settings.maxActions { a += ["--max-actions", String(n)] }
         let tail = settings.engineOptions + (settings.offline ? ["--network-profile", "offline"] : [])

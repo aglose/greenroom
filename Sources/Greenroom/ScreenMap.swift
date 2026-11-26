@@ -809,6 +809,8 @@ final class ScreenMap: NSView {
                 self.starting = false
                 settings.events = events
                 settings.standby = support.standby
+                settings.freezeNetwork = support.freezeNetwork
+                settings.deterministic = support.deterministic
                 if support.dataIgnore { settings.dataIgnore = RepoMapSettings.dataIgnore(in: self.repoRoot) }
                 // What each screen depends on is recorded, so this walk can be the map a later walk starts from and a
                 // pull request is compared with (without it, the next walk of the app is a full one again).
