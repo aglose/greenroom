@@ -1120,28 +1120,35 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     func badge(for session: Session) -> NSView? {
         guard let e = entries[session.worktree.path] else { return nil }
-        let b = NSButton(title: label(e), target: self, action: #selector(openMapClicked(_:)))
+        // When a diff count against main is known, show a single compact pill so the session's PR/branch title never
+        // gets squeezed out of the narrow sidebar (the walk detail stays in the tooltip).
+        if case .done = e.status, let n = e.changed {
+            let c = NSButton(title: n == 0 ? "no changes" : "\(n) changed", target: self, action: #selector(openChangesClicked(_:)))
+            c.isBordered = false
+            c.font = .systemFont(ofSize: 10, weight: .semibold)
+            c.contentTintColor = n == 0 ? .tertiaryLabelColor : Design.warning
+            c.identifier = NSUserInterfaceItemIdentifier(session.worktree.path)
+            c.toolTip = [e.changedWords, label(e), detail(e)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n") + "\nClick to see the changes."
+            c.setContentHuggingPriority(.required, for: .horizontal)
+            c.setContentCompressionResistancePriority(.init(600), for: .horizontal)
+            return c
+        }
+        let shortLabel: String = {
+            if case .done(_, let crashes, let unfinished) = e.status, let i = e.impact, !i.full, crashes == 0, !unfinished, e.wall == .none {
+                return "\(i.walked)/\(i.total)"
+            }
+            return label(e)
+        }()
+        let b = NSButton(title: shortLabel, target: self, action: #selector(openMapClicked(_:)))
         b.isBordered = false
         b.font = .systemFont(ofSize: 10, weight: .medium)
         b.contentTintColor = { if case .failed = e.status { return .systemOrange } else { return .secondaryLabelColor } }()
         b.identifier = NSUserInterfaceItemIdentifier(session.worktree.path)
-        b.toolTip = detail(e)
+        b.toolTip = [label(e), detail(e)].filter { !$0.isEmpty }.joined(separator: "\n")
         b.setContentHuggingPriority(.required, for: .horizontal)
-        b.setContentCompressionResistancePriority(.required, for: .horizontal)
+        b.setContentCompressionResistancePriority(.init(600), for: .horizontal)
         b.isEnabled = { if case .done = e.status { return true } else { return false } }()
-        // What the build changes against the base branch: a click opens the comparison.
-        guard case .done = e.status, let n = e.changed else { return b }
-        let c = NSButton(title: n == 0 ? "no changes" : "\(n) changed", target: self, action: #selector(openChangesClicked(_:)))
-        c.isBordered = false
-        c.font = .systemFont(ofSize: 10, weight: .semibold)
-        c.contentTintColor = n == 0 ? .tertiaryLabelColor : Design.warning
-        c.identifier = NSUserInterfaceItemIdentifier(session.worktree.path)
-        c.toolTip = (e.changedWords ?? "") + ". Click to see the screens."
-        c.setContentHuggingPriority(.required, for: .horizontal)
-        c.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let both = NSStackView(views: [c, b])
-        both.spacing = 6
-        return both
+        return b
     }
 
     @objc private func openChangesClicked(_ sender: NSButton) {
@@ -1315,6 +1322,37 @@ enum SlotClone {
     enum Outcome { case cloned(String), none, failed(String) }
 
     static func freshName(prefix: String = "evg") -> String { prefix + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8)) }
+
+    /// Seeds `<target>-0` (and `.device`) from `<source>-0` for each package where the source exists. When `overwrite`
+    /// is false, an existing target slot is left untouched so a session's own app data is never clobbered.
+    @discardableResult
+    static func seed(from source: String, to target: String, in root: URL, overwrite: Bool = false) -> Bool {
+        guard source != target else { return false }
+        let fm = FileManager.default
+        var seeded = false
+        for pkg in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            let from = pkg.appendingPathComponent(source + "-0", isDirectory: true)
+            let to = pkg.appendingPathComponent(target + "-0", isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: from.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            if !overwrite, fm.fileExists(atPath: to.path) {
+                let fromKey = from.appendingPathComponent("apksim-keystore.properties").path
+                let toKey = to.appendingPathComponent("apksim-keystore.properties").path
+                let missingSignIn = fm.fileExists(atPath: fromKey) && !fm.fileExists(atPath: toKey)
+                if !missingSignIn { continue }
+            }
+            if DeviceData.inUse(to) { continue }
+            for suffix in ["", ".device"] {
+                let a = pkg.appendingPathComponent(source + "-0" + suffix)
+                let b = pkg.appendingPathComponent(target + "-0" + suffix)
+                try? fm.removeItem(at: b)
+                guard fm.fileExists(atPath: a.path) else { continue }
+                if clonefile(a.path, b.path, 0) != 0 { try? fm.copyItem(at: a, to: b) }
+            }
+            seeded = true
+        }
+        return seeded
+    }
 
     /// Clones `<slot>-0` (and its `.device` folder) of every package that has one to a throwaway slot name.
     static func make(slot: String, in root: URL, prefix: String = "evg") -> Outcome {

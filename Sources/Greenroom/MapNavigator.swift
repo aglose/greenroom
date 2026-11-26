@@ -16,6 +16,7 @@ final class MapNavigatorModel: @unchecked Sendable {
     struct Item {
         var key: String
         var screen: MapSnapshot.Screen
+        var baseScreen: MapSnapshot.Screen? = nil
         var status: MapDiff.Status?
         var change: MapDiff.ScreenChange?
         var parent: Int?
@@ -40,6 +41,7 @@ final class MapNavigatorModel: @unchecked Sendable {
     let index: [String: Int]
     let links: [Link]
     let hasDiff: Bool
+    let hasBase: Bool
     /// One step in either direction over the links.
     let neighbours: [[Int]]
     let counts: [MapNavigator.Filter: Int]
@@ -54,6 +56,7 @@ final class MapNavigatorModel: @unchecked Sendable {
     init(head: MapSnapshot, diff: MapDiff?, base: MapSnapshot?) {
         id = Self.key(for: head, diff, base)
         hasDiff = diff != nil
+        hasBase = base != nil
         let changes = Dictionary((diff?.screens ?? []).map { ($0.lineage, $0) }, uniquingKeysWith: { a, _ in a })
         var items: [Item] = []
         var index: [String: Int] = [:]
@@ -71,9 +74,14 @@ final class MapNavigatorModel: @unchecked Sendable {
         if let base {
             for s in base.screens {
                 let lineage = s.lineage.isEmpty ? s.id : s.lineage
-                if let at = index[lineage] { if baseKey[s.id] == nil { baseKey[s.id] = items[at].key }; continue }
+                if let at = index[lineage] {
+                    if baseKey[s.id] == nil { baseKey[s.id] = items[at].key }
+                    if items[at].baseScreen == nil { items[at].baseScreen = s }
+                    continue
+                }
                 guard let c = changes[lineage], c.head == nil else { continue }
                 let k = add(s)
+                if let at = index[k] { items[at].baseScreen = s }
                 baseKey[s.id] = k
                 baseOnly.insert(k)
             }
@@ -249,7 +257,8 @@ struct MapNavigatorPlan {
             let it = m.items[i]
             surfaceScreens.append(MapSurfaceScreen(lineage: k, id: it.screen.id, title: it.screen.title, activity: it.screen.activity, depth: depth[i],
                                                    parent: parent[i].flatMap { p in collapsed.contains(groupOf[key(p)] ?? "") ? groupOf[key(p)] : key(p) },
-                                                   captures: it.screen.captures, crashes: it.crashes, exits: it.exits, loops: it.loops))
+                                                   captures: it.screen.captures, baseCaptures: it.baseScreen?.captures, baseTitle: it.baseScreen?.title,
+                                                   groupID: g.isEmpty ? nil : g, crashes: it.crashes, exits: it.exits, loops: it.loops))
             if let c = it.change { changes[k] = c }
         }
         var titled: [String] = [], placed: [MapPlacement.Group] = []
@@ -267,11 +276,12 @@ struct MapNavigatorPlan {
                     }
                 }
                 tile.pictures = g.members.compactMap { k in m.index[k].map { m.items[$0].screen.captures } }.filter { !$0.isEmpty }.prefix(MapSurfaceTile.shown).map { $0 }
-                surfaceScreens.append(MapSurfaceScreen(lineage: g.id, id: g.id, title: info.summary, activity: "click to open", depth: g.minDepth, parent: nil, captures: [:], tile: tile))
+                surfaceScreens.append(MapSurfaceScreen(lineage: g.id, id: g.id, title: info.summary, activity: "click to open", depth: g.minDepth, parent: nil, captures: [:], groupID: g.id, tile: tile))
                 changes[g.id] = MapDiff.ScreenChange(lineage: g.id, base: nil, head: nil, status: info.changed > 0 ? .modified : .same)
             } else {
                 titled.append(g.id)
-                placed.append(MapPlacement.Group(frame: g.frame, title: "▾ \(info.title) · \(info.members.count)"))
+                let groupLabel = info.changed > 0 ? "▾ \(info.title) · \(info.changed) changed (\(info.members.count))" : "▾ \(info.title) · \(info.members.count)"
+                placed.append(MapPlacement.Group(frame: g.frame, title: groupLabel, hasChanges: info.changed > 0))
             }
         }
         func end(_ i: Int) -> String { groupOf[key(i)].flatMap { collapsed.contains($0) ? $0 : nil } ?? key(i) }
@@ -483,6 +493,11 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
 
     // The controls.
     private let segments = NSSegmentedControl()
+    /// Instant toggle between this branch (Head) and the base branch (e.g. `main`) right on the graph canvas (`B` key).
+    private let sideControl = NSSegmentedControl(labels: ["Head", "Base (B)"], trackingMode: .selectOne, target: nil, action: nil)
+    /// Display name for the base side on the toggle (e.g. `main`).
+    var baseLabel = "main" { didSet { updateSideLabels() } }
+    var showingBase: Bool { surface.showingBase }
     private let field = NSSearchField()
     private let count = NSTextField(labelWithString: "")
     private let fitButton = GlassButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Fit the map (F)", target: nil, action: nil)
@@ -518,12 +533,21 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         segments.target = self
         segments.action = #selector(segmentPicked)
         segments.setAccessibilityLabel("Show")
+        sideControl.segmentStyle = .rounded
+        sideControl.controlSize = .small
+        sideControl.selectedSegment = 0
+        sideControl.target = self
+        sideControl.action = #selector(sidePicked)
+        sideControl.isHidden = true
+        sideControl.toolTip = "Flip graph cards between this branch and the base branch (press B)"
+        sideControl.setAccessibilityLabel("Compare version")
+        updateSideLabels()
         field.placeholderString = "Search titles, texts, activities  ⌘F"
         field.controlSize = .small
         field.font = .systemFont(ofSize: 12)
         field.delegate = self
         field.sendsSearchStringImmediately = true
-        field.widthAnchor.constraint(equalToConstant: 250).isActive = true
+        field.widthAnchor.constraint(equalToConstant: 210).isActive = true
         field.setAccessibilityLabel("Search the map")
         count.font = .systemFont(ofSize: 11)
         count.textColor = Design.mute
@@ -535,7 +559,7 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         foldButton.onPress = { [weak self] in self?.toggleFold() }
         regionButton.onPress = { [weak self] in self?.stepRegion(1) }
         let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [segments, spacer, previousButton, nextButton, field, count, fitButton])
+        let bar = NSStackView(views: [segments, sideControl, spacer, previousButton, nextButton, field, count, fitButton])
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -621,6 +645,7 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         let keptFilter = keepingPlace ? filter : .all
         filter = keptFilter
         folded = true
+        if !keepingPlace { surface.showingBase = false }
         overrides = [:]
         pendingReveal = nil
         let keptSelection = keepingPlace ? selectedKey : nil
@@ -728,6 +753,26 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         if let f = Filter(rawValue: segments.selectedSegment) { setFilter(f) }
     }
 
+    private func updateSideLabels() {
+        sideControl.setLabel("Head", forSegment: 0)
+        sideControl.setLabel("\(baseLabel) (B)", forSegment: 1)
+    }
+
+    @objc private func sidePicked() {
+        setShowingBase(sideControl.selectedSegment == 1)
+    }
+
+    func setShowingBase(_ on: Bool) {
+        let allowed = on && (model?.hasBase == true)
+        surface.showingBase = allowed
+        sideControl.selectedSegment = allowed ? 1 : 0
+    }
+
+    func toggleBase() {
+        guard model?.hasBase == true else { return }
+        setShowingBase(!surface.showingBase)
+    }
+
     private func refreshControls() {
         guard let m = model else { return }
         for f in Filter.allCases {
@@ -735,6 +780,9 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
             segments.setEnabled(!f.needsDiff || m.hasDiff, forSegment: f.rawValue)
         }
         segments.selectedSegment = filter.rawValue
+        sideControl.isHidden = !(m.hasDiff && m.hasBase)
+        if !m.hasBase && surface.showingBase { surface.showingBase = false }
+        sideControl.selectedSegment = surface.showingBase ? 1 : 0
         let canFold = m.hasDiff && filter == .all && (m.counts[.changed] ?? 0) > 0
         let n = plan?.folded ?? 0
         foldButton.isHidden = !(canFold && (folded ? n > 0 : true))
@@ -828,6 +876,7 @@ final class MapNavigator: NSView, NSSearchFieldDelegate, NSTableViewDataSource, 
         }
         guard plain, let c = event.charactersIgnoringModifiers?.lowercased() else { super.keyDown(with: event); return }
         switch c {
+        case "b", " ": if model?.hasBase == true { toggleBase() } else { super.keyDown(with: event) }
         case "f": surface.fitAll()
         case "n": step(1)
         case "p": step(-1)

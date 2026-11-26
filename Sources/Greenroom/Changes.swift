@@ -412,6 +412,8 @@ final class ChangesRun {
     var onState: ((State) -> Void)?
     private(set) var head: Build?
     private(set) var base: Build?
+    /// The commit of the base snapshot when `fromMain` answered from history (used to resolve the base APK on demand if needed).
+    private(set) var baseCommit: String?
     /// The comparison is with the base branch's stored map: only this build is walked.
     private(set) var headOnly = false
     let session: Session
@@ -610,6 +612,8 @@ final class ChangesRun {
             found = await baseline()
         }
         guard gen == generation, let base = found else { return true }
+        self.baseCommit = base.snapshot.commit
+        self.base = storedBaseBuild(forCommit: base.snapshot.commit, in: ws)
 
         // 2. This build's own map: the session's walk of it (seeded from the base branch's, so only what changed).
         func snapshot() async -> MapSnapshot? { await History.snapshot(of: head, workspace: ws.root, profile: base.profile, stateRoot: root) }
@@ -656,6 +660,37 @@ final class ChangesRun {
         set.unplaced = note?.unplaced ?? []
         state = .done(set)
         return true
+    }
+
+    /// Finds a locally stored build for `commit` (store lookup first, then the workspace's main row builds).
+    private func storedBaseBuild(forCommit commit: String, in ws: Workspace) -> Build? {
+        let fm = FileManager.default
+        if let b = controller.store.build(forSha: commit), fm.fileExists(atPath: b.apk.path) { return b }
+        if let row = controller.mainBuilds.row(for: ws) {
+            for b in [row.current, row.newest].compactMap({ $0 }) where fm.fileExists(atPath: b.apk.path) {
+                if let sha = b.sha, !sha.isEmpty, sha.hasPrefix(commit) || commit.hasPrefix(sha) { return b }
+            }
+            if let newest = row.newest, fm.fileExists(atPath: newest.apk.path) { return newest }
+        }
+        return nil
+    }
+
+    /// Resolves a local `Build` for the base on demand (for Live compare and Change Tour when `fromMain` compared against a stored snapshot).
+    @MainActor
+    func resolveBaseBuild() async -> Build? {
+        if let b = base, FileManager.default.fileExists(atPath: b.apk.path) { return b }
+        guard let ws = controller.workspace(of: session) else { return nil }
+        if let commit = baseCommit, let b = storedBaseBuild(forCommit: commit, in: ws) {
+            base = b
+            return b
+        }
+        let target: BaseRef = baseCommit.map { .ref($0) } ?? .baseBranch
+        let res = await Bases.resolve(base: target, in: ws, sessions: controller.sessions, store: controller.store, worktree: session.worktree)
+        if case .build(let b) = res {
+            base = b
+            return b
+        }
+        return nil
     }
 
     /// Files the heads and bases of a finished pair walk (each that has a commit and is not dirty).
@@ -774,8 +809,10 @@ final class ChangeTour {
     }
 
     /// `baseOptions` are the engine options of the base build's launches (as the comparison's own walk had).
-    func start(set: ChangeSet, head: Build, base: Build, baseOptions: [String], progress: @escaping (String) -> Void,
-               completion: @escaping (Outcome) -> Void) {
+    /// `signInSlot`: a kept sign-in data slot to clone onto both tour devices (plus `--biometrics auto`) when the
+    /// comparison was walked signed in.
+    func start(set: ChangeSet, head: Build, base: Build, baseOptions: [String], signInSlot: String? = nil,
+               progress: @escaping (String) -> Void, completion: @escaping (Outcome) -> Void) {
         guard !isRunning else { return }
         isRunning = true
         cancelled = false
@@ -783,7 +820,7 @@ final class ChangeTour {
         Self.sweepLogs()
         Self.active.append(self)
         Task { @MainActor in
-            let outcome = await self.run(set: set, head: head, base: base, baseOptions: baseOptions, progress: progress)
+            let outcome = await self.run(set: set, head: head, base: base, baseOptions: baseOptions, signInSlot: signInSlot, progress: progress)
             self.isRunning = false
             Self.active.removeAll { $0 === self }
             completion(outcome)
@@ -836,15 +873,21 @@ final class ChangeTour {
     private static func navigate(_ sim: Simulator, start: String?, steps: [String]) -> String? {
         let commands = [start.map { "restart \($0)" } ?? "restart"] + steps
         for (i, c) in commands.enumerated() {
-            let answer = sim.sendSync(c)
+            var answer = sim.sendSync(c)
+            if answer.hasPrefix("error"), i > 0 {
+                // Async screens (Compose lists, tabs, biometric auto-unlock) may finish painting a beat after settle.
+                Thread.sleep(forTimeInterval: 0.8)
+                _ = sim.sendSync("settle 1500 150")
+                answer = sim.sendSync(c)
+            }
             if answer.hasPrefix("error") { return "step \(i) (\(ScreenMap.describe(c))) failed: " + answer.replacingOccurrences(of: "error: ", with: "") }
-            _ = sim.sendSync("settle 1500 100")
+            _ = sim.sendSync(i == 0 ? "settle 4000 300" : "settle 2500 150")
         }
         return nil
     }
 
     @MainActor
-    private func run(set: ChangeSet, head: Build, base: Build, baseOptions: [String], progress: @escaping (String) -> Void) async -> Outcome {
+    private func run(set: ChangeSet, head: Build, base: Build, baseOptions: [String], signInSlot: String?, progress: @escaping (String) -> Void) async -> Outcome {
         let folder = set.folder
         let wanted = Self.stops(of: set)
         try? FileManager.default.removeItem(at: folder.appendingPathComponent("tour.json"))
@@ -864,14 +907,32 @@ final class ChangeTour {
         let baseRoutes = wanted.map { $0.status == .changed ? route(set.baseMap, $0.baseID) : nil }
         if headRoutes.allSatisfy({ $0 == nil }) { return skip(folder, "The map has no route to these screens, so the tour cannot replay them.") }
 
-        // Two hidden simulators, each with data of its own that goes afterwards.
-        let slotH = SlotClone.freshName(), slotB = SlotClone.freshName()
+        // Two hidden simulators, each with data of its own (cloned from the kept sign-in when walked signed in) that goes afterwards.
+        let dataRoot = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
+        var slotH = SlotClone.freshName(prefix: "tourh")
+        var slotB = SlotClone.freshName(prefix: "tourb")
+        var signInFlags: [String] = []
+        if let source = signInSlot {
+            let cloned: (String?, String?) = await Task.detached(priority: .userInitiated) {
+                SlotClone.waitUntilFree(source, in: dataRoot, timeout: 10)
+                let h: String? = { if case .cloned(let n) = SlotClone.make(slot: source, in: dataRoot, prefix: "tourh") { return n }; return nil }()
+                let b: String? = { if case .cloned(let n) = SlotClone.make(slot: source, in: dataRoot, prefix: "tourb") { return n }; return nil }()
+                return (h, b)
+            }.value
+            if let h = cloned.0, let b = cloned.1 {
+                slotH = h; slotB = b
+                signInFlags = ["--biometrics", "auto"]
+            } else {
+                if let h = cloned.0 { SlotClone.remove(h, in: dataRoot) }
+                if let b = cloned.1 { SlotClone.remove(b, in: dataRoot) }
+            }
+        }
         slots = [slotH, slotB]
         let hs: Simulator, bs: Simulator
         do {
             try Engine.shared.prepare()
-            hs = try sim(apk: head.apk, options: ["--data-slots", slotH, "--appearance", "light"])
-            bs = try sim(apk: base.apk, options: ["--data-slots", slotB, "--appearance", "light"] + baseOptions)
+            hs = try sim(apk: head.apk, options: ["--data-slots", slotH, "--appearance", "light"] + signInFlags)
+            bs = try sim(apk: base.apk, options: ["--data-slots", slotB, "--appearance", "light"] + signInFlags + baseOptions)
         } catch {
             teardown()
             return skip(folder, "The tour could not start the two builds: \(error.localizedDescription)")

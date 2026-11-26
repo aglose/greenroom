@@ -98,6 +98,8 @@ struct Session {
     var dirty: Bool
     var ahead: Int
     var claude: ClaudeSession?
+    /// The GitHub pull request for this worktree's branch (from `gh pr list`), if any.
+    var githubPR: GH.BranchPull? = nil
     /// The newest build of this worktree, once one has been recorded in the store.
     var build: Build?
     var simulator: Simulator?
@@ -114,7 +116,17 @@ struct Session {
     var isMain: Bool { worktree.standardizedFileURL.path == workspace.standardizedFileURL.path }
     var title: String {
         if let b = branch, b == "main" || b == "master" { return b }
-        return claude?.title ?? branch ?? "(detached \(String(head.prefix(7))))"
+        if let t = claude?.title { return t }
+        if let pr = githubPR { return "#\(pr.number) \(pr.title.isEmpty ? (branch ?? shortHead) : pr.title)" }
+        return branch ?? "(detached \(String(head.prefix(7))))"
+    }
+    /// Short, unmistakable label for a simulator running this session's build.
+    var simLabel: String {
+        if let pr = githubPR {
+            let draft = pr.isDraft ? " Draft" : ""
+            return "#\(pr.number)\(draft) · \(branch ?? shortHead)"
+        }
+        return "\(branch ?? title) · \(shortHead)"
     }
     var shortHead: String { String(head.prefix(7)) }
     /// The engine's data slot for this worktree: its own app data, kept across rebuilds and restarts.
@@ -124,9 +136,10 @@ struct Session {
     var pullRequests: [ClaudePR] {
         (claude?.prs ?? []).filter { pr in pr.branch == nil || branch == nil || pr.branch == branch }
     }
-    var hasOpenPR: Bool { pullRequests.contains { $0.state == .open } }
+    var hasOpenPR: Bool { (githubPR?.isOpen ?? false) || pullRequests.contains { $0.state == .open } }
     /// Every pull request known is closed and one of them merged: the work is in.
     var prMerged: Bool {
+        if let pr = githubPR { return pr.isMerged }
         let prs = pullRequests
         return !prs.isEmpty && prs.allSatisfy { $0.state == .merged || $0.state == .closed } && prs.contains { $0.state == .merged }
     }

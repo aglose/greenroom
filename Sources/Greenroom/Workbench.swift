@@ -274,6 +274,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             let others = engine.simulators.filter(\.isAlive) + engine.closing
             let slotted = DeviceData.options(for: apk, options, others: others, root: engine.engineState.appendingPathComponent("cache/data", isDirectory: true))
             let sim = try engine.open(apk: apk, options: slotted)
+            if sim.displayLabel == nil, let label = storedBuildLabel(for: apk) { sim.displayLabel = label }
             if remember {
                 Recents.add(apk)
                 NSDocumentController.shared.noteNewRecentDocumentURL(apk)
@@ -306,9 +307,31 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         code == 0 ? "\(sim.name) has quit" : "\(sim.name) ended (exit \(code)). Help > Show Simulator Logs has the details."
     }
 
+    /// Readable label for a stored build APK (`builds/<key>/app.apk`), so loose simulators and recents never just say "app".
+    private func storedBuildLabel(for apk: URL) -> String? {
+        let buildsDir = sessions.store.builds.standardizedFileURL.path + "/"
+        let path = apk.standardizedFileURL.path
+        guard path.hasPrefix(buildsDir) else { return nil }
+        guard let key = path.dropFirst(buildsDir.count).split(separator: "/").first.map(String.init), !key.isEmpty else { return nil }
+        if let b = sessions.store.build(key) {
+            let lead = b.ref.flatMap { $0.isEmpty ? nil : $0 } ?? "build"
+            let short = b.sha.flatMap { $0.isEmpty ? nil : String($0.prefix(7)) } ?? String(b.key.prefix(8))
+            return "\(lead) · \(short)"
+        }
+        return "build \(String(key.prefix(8)))"
+    }
+
+    /// Redraws every simulator's caption, top bar chip, and sidebar after a displayLabel changes.
+    func refreshCaptions() {
+        for v in grid.views { v.updateCaption() }
+        if let sim = selected { window.subtitle = sim.effectiveLabel }
+        updateChrome()
+        setNeedsSidebar()
+    }
+
     func select(_ sim: Simulator?) {
         selected = sim
-        window.subtitle = sim?.name ?? ""
+        window.subtitle = sim?.effectiveLabel ?? ""
         sessions.selected(sim)
         noteLastOpened(sim)
         reload()
@@ -488,7 +511,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
         case .main(let m): return Self.identity(row) + "|" + sessions.mainRowKey(m)
         case .pull(let p): return Self.identity(row) + "|\(p.state)|\(p.build?.key ?? "")|\(p.simulator?.state == .running)|\(p.simulator != nil)|\(p.pull.title)|\(p.repo)"
-        case .simulator(let sim): return Self.identity(row) + "|\(sim.state)|\(sim.deviceSize)|\(sim.name)"
+        case .simulator(let sim): return Self.identity(row) + "|\(sim.state)|\(sim.deviceSize)|\(sim.effectiveLabel)"
         case .claudeOffer(let o): return Self.identity(row) + "|\(o.count)"
         default: return Self.identity(row)
         }
@@ -870,13 +893,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             let dot = sim.state == .running ? "● " : (sim.state == .starting ? "◌ " : "○ ")
             let text = NSMutableAttributedString(string: dot, attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold),
                                                                            .foregroundColor: sim.state == .running ? Design.accent : Design.mute])
-            text.append(NSAttributedString(string: sim.name, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.ink]))
-            if let session = sessions.session(forSimulator: sim) {
-                text.append(NSAttributedString(string: "  \(session.branch ?? session.shortHead)", attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
-            } else if alive > 1 {
-                text.append(NSAttributedString(string: "  \(alive) devices", attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
+            let primary = sim.effectiveLabel
+            text.append(NSAttributedString(string: primary, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.ink]))
+            if alive > 1 {
+                text.append(NSAttributedString(string: "  (\(alive) devices)", attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
             }
-            appChip.title = sim.name
+            appChip.title = primary
             appChip.attributedTitle = text
         } else {
             appChip.title = "Open an APK"
@@ -1032,12 +1054,57 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         changesSheet.controller = sessions
         changesSheet.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         changesSheet.onToggle = { [weak self] in self?.updateChrome() }
-        changesSheet.onGo = { [weak self] screen, map in self?.goThere(screen, map) }
-        changesSheet.onLive = { [weak self] session, base in
-            guard let self else { return }
-            self.sessions.activate(session)
-            self.compare(with: base.apk)
+        changesSheet.onGo = { [weak self] screen, map, session in self?.goThere(screen, map, session: session) }
+        changesSheet.onLive = { [weak self] session, base in self?.compareLive(session: session, base: base) }
+    }
+
+    /// Opens a session's build side by side with a base build, with mirrored input, clear Head/Base labels, and
+    /// signed-in data cloned when the repository has a kept sign-in.
+    func compareLive(session: Session, base: Build) {
+        sessions.activate(session)
+        guard let headSim = sessions.simulator(for: session) else {
+            toast.show("Could not open \(session.title) to compare", problem: true)
+            return
         }
+        headSim.displayLabel = "Head · \(session.simLabel)"
+        let baseShort = base.sha.map { String($0.prefix(7)) } ?? String(base.key.prefix(8))
+        let baseTitle = "Base · \(base.ref ?? "main") · \(baseShort)"
+        let basePath = base.apk.resolvingSymlinksInPath().path
+
+        // Reuse main's running simulator if it is already running this base APK (and is not the head simulator).
+        var baseSim: Simulator?
+        if let mainSim = sessions.mainBuilds.simulator(of: session.workspace),
+           mainSim !== headSim,
+           mainSim.apk.resolvingSymlinksInPath().path == basePath {
+            baseSim = mainSim
+        } else if let existing = Engine.shared.simulators.first(where: { $0.isAlive && $0 !== headSim && $0.apk.resolvingSymlinksInPath().path == basePath }) {
+            baseSim = existing
+        }
+        if let baseSim {
+            baseSim.displayLabel = baseTitle
+        } else {
+            var opts: [String] = []
+            if let deviceIdx = headSim.options.firstIndex(of: "--device"), deviceIdx + 1 < headSim.options.count {
+                opts += ["--device", headSim.options[deviceIdx + 1]]
+            }
+            let dataRoot = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
+            if let kept = SignIns.shared.record(SignIns.key(workspace: session.workspace)),
+               case .cloned(let cloneSlot) = SlotClone.make(slot: kept.slot, in: dataRoot, prefix: DeviceData.clonePrefix) {
+                opts += ["--data-slots", cloneSlot, "--biometrics", "auto"]
+            } else {
+                opts += ["--data-slots", DeviceData.clonePrefix + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8))]
+            }
+            if let launched = open(base.apk, remember: false, options: opts) {
+                launched.displayLabel = baseTitle
+                baseSim = launched
+            }
+        }
+        selected = headSim
+        window.subtitle = headSim.effectiveLabel
+        mirror = true
+        setComparing(true)
+        refreshCaptions()
+        toast.show("Comparing \(session.title) side by side with \(base.ref ?? "base") (input mirrored)")
     }
 
     /// Device > Changes… (⌘D): the current session's build against its base.
@@ -1053,31 +1120,96 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         changesSheet.open(session: session, compare: compare)
     }
 
-    /// Replays a screen's route from the map on the selected device: restart (at the route's deep link), then each
-    /// step, settling after each. The map closes first so the device can be watched getting there.
-    func goThere(_ screen: MapScreen, _ map: ScreenMapData, done: ((Bool) -> Void)? = nil) {
-        guard let sim = selected ?? Engine.shared.simulators.first(where: { $0.state == .running }), sim.state == .running else {
+    /// Replays a screen's route from the map on the target simulator (or the session's simulator, starting/selecting it
+    /// if needed): restart (at the route's deep link), then each step, settling after each. Closes open map/changes
+    /// sheets first so the device can be watched getting there.
+    func goThere(_ screen: MapScreen, _ map: ScreenMapData, session: Session? = nil, done: ((Bool) -> Void)? = nil) {
+        if let session {
+            if sessions.simulator(for: session) == nil { sessions.activate(session) }
+            if let sessionSim = sessions.simulator(for: session) {
+                select(sessionSim)
+            }
+        }
+        guard let initialSim = (session.flatMap { sessions.simulator(for: $0) }) ?? selected ?? Engine.shared.simulators.first(where: { $0.isAlive }) else {
             toast.show("Open the app first: the route is replayed on a running device", problem: true); done?(false); return
         }
-        let mapped = map.apk?.lastPathComponent ?? map.apkName
-        if sim.apk.lastPathComponent != mapped {
-            toast.show("The selected device runs \(sim.apk.lastPathComponent); this map is of \(mapped)", problem: true); done?(false); return
+        if session == nil {
+            let mapped = map.apk?.lastPathComponent ?? map.apkName
+            if !mapped.isEmpty, initialSim.apk.lastPathComponent != mapped {
+                toast.show("The selected device runs \(initialSim.apk.lastPathComponent); this map is of \(mapped)", problem: true); done?(false); return
+            }
         }
         screenMap.close()
+        changesSheet.close()
+        // If this session's repository has a kept sign-in and the simulator was launched without `--biometrics auto`
+        // (e.g. before signing in), relaunch it seeded from the kept sign-in so signed-in routes can actually replay.
+        let workspace = session?.workspace ?? sessions.session(forSimulator: initialSim)?.workspace
+        let needsSignedInRelaunch: Bool = {
+            guard let ws = workspace, SignIns.shared.record(SignIns.key(workspace: ws)) != nil else { return false }
+            return !initialSim.options.contains("--biometrics")
+        }()
+        if needsSignedInRelaunch, let ws = workspace {
+            toast.show("Signing in to go to \(screen.label)…")
+            let targetSlot = SessionsController.slot(of: initialSim) ?? DeviceData.slot(for: initialSim.options)
+            let label = initialSim.displayLabel
+            let apk = initialSim.apk
+            let baseOpts = initialSim.options
+            Engine.shared.close(initialSim)
+            Task { @MainActor [weak self] in
+                guard let self else { done?(false); return }
+                await Task.detached(priority: .userInitiated) {
+                    initialSim.waitUntilExit()
+                    let root = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
+                    if let kept = SignIns.shared.record(SignIns.key(workspace: ws)) {
+                        SlotClone.waitUntilFree(kept.slot, in: root, timeout: 10)
+                        SlotClone.seed(from: kept.slot, to: targetSlot, in: root, overwrite: true)
+                    }
+                }.value
+                let opts = baseOpts + ["--biometrics", "auto"]
+                guard let relaunched = self.open(apk, remember: false, options: opts) else {
+                    self.toast.show("Could not restart simulator to go to \(screen.label)", problem: true)
+                    done?(false)
+                    return
+                }
+                relaunched.displayLabel = label
+                self.refreshCaptions()
+                self.replayRoute(screen, on: relaunched, done: done)
+            }
+            return
+        }
+        replayRoute(screen, on: initialSim, done: done)
+    }
+
+    private func replayRoute(_ screen: MapScreen, on sim: Simulator, done: ((Bool) -> Void)?) {
         grid.view(for: sim).map { window.makeFirstResponder($0) }
         toast.show("Going to \(screen.label)…")
         let commands = [screen.start.map { "restart \($0)" } ?? "restart"] + screen.steps
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var failed: String?
-            for (i, c) in commands.enumerated() {
-                let answer = sim.sendSync(c)
-                if answer.hasPrefix("error") { failed = "Step \(i) (\(ScreenMap.describe(c))) failed: " + answer.replacingOccurrences(of: "error: ", with: ""); break }
-                _ = sim.sendSync("settle 1500 100")
+        Task { @MainActor [weak self] in
+            // Wait if the simulator was just started or relaunched.
+            let readyDeadline = Date().addingTimeInterval(45)
+            while sim.isAlive, !(sim.state == .running && sim.framesShown > 0), Date() < readyDeadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            DispatchQueue.main.async {
-                self?.toast.show(failed ?? "On \(screen.label)", problem: failed != nil)
-                done?(failed == nil)
+            guard sim.state == .running else {
+                self?.toast.show("Simulator did not become ready to go to \(screen.label)", problem: true)
+                done?(false)
+                return
             }
+            let failed: String? = await Task.detached(priority: .userInitiated) {
+                for (i, c) in commands.enumerated() {
+                    var answer = sim.sendSync(c)
+                    if answer.hasPrefix("error"), i > 0 {
+                        Thread.sleep(forTimeInterval: 0.8)
+                        _ = sim.sendSync("settle 1500 150")
+                        answer = sim.sendSync(c)
+                    }
+                    if answer.hasPrefix("error") { return "Step \(i) (\(ScreenMap.describe(c))) failed: " + answer.replacingOccurrences(of: "error: ", with: "") }
+                    _ = sim.sendSync(i == 0 ? "settle 4000 300" : "settle 2500 150")
+                }
+                return nil
+            }.value
+            self?.toast.show(failed ?? "On \(screen.label)", problem: failed != nil)
+            done?(failed == nil)
         }
     }
 
@@ -1646,10 +1778,16 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 symbol = "play.circle.fill"
             case .ended(let code): detail = code == 0 ? "Quit" : "Ended (exit \(code))"; symbol = "stop.circle"
             }
-            return cell(symbol: symbol, tint: sim.state == .running ? .systemGreen : .secondaryLabelColor, title: sim.name, detail: detail)
+            let title = sim.effectiveLabel
+            let rowView = cell(symbol: symbol, tint: sim.state == .running ? .systemGreen : .secondaryLabelColor, title: title, detail: detail)
+            rowView.toolTip = (sim.apk.path as NSString).abbreviatingWithTildeInPath
+            return rowView
         case .recent(let url):
-            return cell(symbol: "shippingbox", tint: .secondaryLabelColor, title: url.lastPathComponent,
-                        detail: (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath)
+            let title = storedBuildLabel(for: url) ?? url.lastPathComponent
+            let rowView = cell(symbol: "shippingbox", tint: .secondaryLabelColor, title: title,
+                               detail: (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath)
+            rowView.toolTip = (url.path as NSString).abbreviatingWithTildeInPath
+            return rowView
         }
     }
 

@@ -62,8 +62,12 @@ final class Simulator {
     var agentSession: String?
 
     var name: String { apk.deletingPathExtension().lastPathComponent }
+    /// A human-readable label identifying the branch, PR, or build this simulator runs (e.g. `main · 753faed` or
+    /// `#366 Draft · demo/greenroom-ui-diff-e2e`). Shown on the stage caption, sidebar Running row, and header chip.
+    var displayLabel: String?
     /// A matrix wall cell's combination ("Dark · German"), shown under its picture instead of the APK's name.
     var cellLabel: String?
+    var effectiveLabel: String { cellLabel ?? displayLabel ?? name }
     /// The engine process (a warm launch's client) for checks.
     var processID: Int32 { process.processIdentifier }
     var isAlive: Bool { if case .ended = state { return false }; return true }
