@@ -54,7 +54,7 @@ final class MapSignIn {
             let log = engine.logs.appendingPathComponent("map-sign-in-\(UUID().uuidString.prefix(8)).log")
             self.log = log
             s = Simulator(apk: apk, log: log)
-            try s.start(launcher: engine.launcher, stateDir: engine.engineState, options: ["--data-slots", slot], controlToken: engine.supportsControlToken)
+            try s.start(launcher: engine.launcher, stateDir: engine.engineState, options: ["--data-slots", slot, "--biometrics", "auto"], controlToken: engine.supportsControlToken)
         } catch {
             return end(.failed("The device for \(script.name) could not start: \(error.localizedDescription)"))
         }

@@ -305,7 +305,8 @@ final class SignInOnce: NSObject {
     }
 
     private func start() {
-        guard let sim = workbench.open(apk, remember: false, options: ["--data-slots", slot]) else {
+        // Enroll auto-matching biometrics so apps that rely on biometric sign-in can save credentials during Sign In Once.
+        guard let sim = workbench.open(apk, remember: false, options: ["--data-slots", slot, "--biometrics", "auto"]) else {
             workbench.toast.show("The app could not be started to sign in.", problem: true)
             end(kept: false)
             return
