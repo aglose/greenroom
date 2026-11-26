@@ -805,7 +805,7 @@ final class SessionsController {
     }
 
     func rowHeight(for s: Session) -> CGFloat {
-        (s.simulator != nil && s.simulator === workbench?.selected) ? 64 : 42
+        (s.simulator != nil && s.simulator === workbench?.selected) ? 74 : 42
     }
 
     private func shortcutIndex(for s: Session) -> Int? {
@@ -836,8 +836,11 @@ final class SessionsController {
         icon.widthAnchor.constraint(equalToConstant: 10).isActive = true
         let name = NSTextField(labelWithString: s.title)
         name.font = .systemFont(ofSize: 13, weight: isSelected ? .semibold : .regular)
+        name.maximumNumberOfLines = 1
         name.lineBreakMode = .byTruncatingTail
+        name.cell?.usesSingleLineMode = true
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        name.setContentCompressionResistancePriority(.required, for: .vertical)
         // The branch, the head's hash and the commits ahead are in the tooltip: the row keeps to what tells it apart.
         let build = buildAccessories(for: s)
         let line = detail(for: s)
@@ -846,12 +849,15 @@ final class SessionsController {
         let sub = NSTextField(labelWithString: mainPrefix + rawSub)
         sub.font = .systemFont(ofSize: 10)
         sub.textColor = build.color ?? (s.isStale && s.builtAt != nil ? .systemOrange : .secondaryLabelColor)
+        sub.maximumNumberOfLines = 1
         sub.lineBreakMode = .byTruncatingTail
+        sub.cell?.usesSingleLineMode = true
         sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sub.setContentCompressionResistancePriority(.required, for: .vertical)
         let text = NSStackView(views: [name, sub])
         text.orientation = .vertical
         text.alignment = .leading
-        text.spacing = 0
+        text.spacing = 1
         text.setContentCompressionResistancePriority(.init(700), for: .horizontal)
         text.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
         var topViews: [NSView] = [icon, text]
@@ -904,16 +910,16 @@ final class SessionsController {
         rebuildButton.image = NSImage(systemSymbolName: "hammer", accessibilityDescription: "Build")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
         rebuildButton.font = .systemFont(ofSize: 11, weight: .medium)
-        rebuildButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        rebuildButton.layer?.cornerRadius = 6
+        rebuildButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        rebuildButton.layer?.cornerRadius = 7
         rebuildButton.onPress = { [weak self] in self?.build(s) }
 
         let changesButton = GlassButton(symbol: "plusminus", title: "Changes", label: "Show changes for this session", style: .well, target: nil, action: nil)
         changesButton.image = NSImage(systemSymbolName: "plusminus", accessibilityDescription: "Changes")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
         changesButton.font = .systemFont(ofSize: 11, weight: .medium)
-        changesButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        changesButton.layer?.cornerRadius = 6
+        changesButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        changesButton.layer?.cornerRadius = 7
         changesButton.onPress = { [weak self] in self?.workbench?.showChanges(of: s) }
 
         let actionRow = NSStackView(views: [rebuildButton, changesButton])
@@ -926,8 +932,8 @@ final class SessionsController {
         card.orientation = .vertical
         card.alignment = .width
         card.hoverOnly = hover
-        card.spacing = 5
-        card.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 6)
+        card.spacing = 7
+        card.edgeInsets = NSEdgeInsets(top: 6, left: 4, bottom: 6, right: 6)
         card.toolTip = tooltipText
         return card
     }
