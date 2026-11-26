@@ -172,9 +172,14 @@ What Greenroom does:
   `.greenroom/map.json`, `{"dataIgnore": ["databases/app.db#events", "shared_prefs/x.xml#last_seen*"]}`, and every walk
   in the app passes each as `--data-ignore` (`RepoMapSettings`). A finished Screen Map walk says what most of its
   launches were for when one or two things the app wrote account for half of them, and points there.
-- **Warm launches.** Walks pass `--standby` when the crawler offers it. apksim keeps one warm JVM per folder, so with
-  several devices most relaunches still start cold, and a walk with `--record-deps` (every walk Greenroom makes, so it
-  can be a map) stays cold altogether.
+- **Warm launches.** Walks pass `--standby` when the crawler offers it. As of apksim 0.66.0+, a shared standby pool
+  (`APKSIM_STANDBY_POOL`, default `2`) serves parallel workers and supports `--record-deps` as well as
+  `--freeze-network` (apksim 0.66.1+), while `--base` and `--sweep` (which render with `--snapshot`) remain cold.
+- **Variant deduplication and startup-sync learning.** apksim 0.66.0+ deduplicates parameterized screen variants and
+  in-place mutations (recording `dedup_variants` and `variant_aliases` in `crawl.json`, preserved across Greenroom
+  snapshots) while keeping multi-window dialogs (`overlay: true`) separate and never hiding changes on carried
+  `--diff-seed` destinations. apksim 0.66.1+ also stops relaunching for existing SQLite tables rewritten autonomously
+  during shallow startup navigation across repeated launches.
 - **No second walk of one commit** (above).
 
 

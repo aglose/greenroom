@@ -174,8 +174,8 @@ final class CrawlRun {
         var seed: URL?
         /// `--only-file PATH`: with `seed`, the screen ids to explore again, one per line.
         var onlyFile: URL?
-        /// `--standby`: launches go to apksim's warm JVM when one is up (set when the crawler offers it). The engine
-        /// keeps launches cold where a warm JVM cannot serve them (`--record-deps`, `--base`).
+        /// `--standby`: launches go to apksim's warm JVM pool when available (set when the crawler offers it).
+        /// The engine keeps launches cold where a warm JVM cannot serve them (`--base`, `--sweep`).
         var standby = false
         /// `--freeze-network`: every launch answered from the walk's one recording of the app's server answers (what it
         /// lacks fetched once and kept), with the clock at the time it began, so screens showing server data replay the

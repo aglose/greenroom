@@ -177,6 +177,7 @@ def import_walk(walk, commit, tree, profile, engine, walked, seed=None):
         if isinstance(s.get("parent"), str): screen["parent"] = s["parent"]
         if isinstance(path.get("start"), str): screen["start"] = path["start"]
         if isinstance(s.get("flaky"), str): screen["flaky"] = s["flaky"]
+        if s.get("overlay") is True: screen["overlay"] = True
         deps = deps_of(s.get("deps"))
         if s.get("origin") == "carried":
             was = next((x for x in seed["screens"] if x.get("id") == sid), None) if seed else None
@@ -220,6 +221,10 @@ def import_walk(walk, commit, tree, profile, engine, walked, seed=None):
     # MapGit carries captures, never the signed-in account's server answers, so it is not one of `files`.
     if isinstance(data.get("screen_ids"), int) and not isinstance(data.get("screen_ids"), bool): snap["screenIds"] = data["screen_ids"]
     if isinstance(data.get("clock"), str): snap["clock"] = data["clock"]
+    if isinstance(data.get("dedup_variants"), bool): snap["dedupVariants"] = data["dedup_variants"]
+    va = data.get("variant_aliases")
+    if isinstance(va, dict) and va and all(isinstance(k, str) and isinstance(v, str) for k, v in va.items()):
+        snap["variantAliases"] = dict(va)
     if data.get("network") is not None:
         har = os.path.realpath(os.path.join(walk, "network.har"))
         if har.startswith(root.rstrip("/") + "/") and os.path.isfile(har):

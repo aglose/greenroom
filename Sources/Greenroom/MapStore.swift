@@ -78,7 +78,8 @@ final class MapStore {
             return MapSnapshot.Screen(id: id, lineage: "", activity: activity, title: (s["title"] as? String) ?? "",
                                       depth: (s["depth"] as? Int) ?? 0, parent: s["parent"] as? String, start: path["start"] as? String,
                                       steps: (path["steps"] as? [String]) ?? [], captures: captures, texts: (s["texts"] as? [String]) ?? [],
-                                      settled: (s["settled"] as? Bool) ?? true, flaky: s["flaky"] as? String, carriedFrom: carriedFrom, deps: deps, actions: actions)
+                                      settled: (s["settled"] as? Bool) ?? true, flaky: s["flaky"] as? String, carriedFrom: carriedFrom, deps: deps, actions: actions,
+                                      overlay: (s["overlay"] as? Bool) == true ? true : nil)
         }
 
         var next: [String: Int] = [:]       // each screen's controls are numbered in the order the file lists them
@@ -101,7 +102,9 @@ final class MapStore {
                            seconds: ((json["seconds"] as? [String: Any])?["total"] as? Double) ?? 0,
                            startDeps: MapStore.deps(json["start_deps"]), depsUnreliable: json["deps_unreliable"] as? String,
                            screenIds: json["screen_ids"] as? Int, clock: json["clock"] as? String,
-                           network: json["network"] != nil ? blob("network.har") : nil).canonical()
+                           network: json["network"] != nil ? blob("network.har") : nil,
+                           dedupVariants: json["dedup_variants"] as? Bool,
+                           variantAliases: (json["variant_aliases"] as? [String: String]).flatMap { $0.isEmpty ? nil : $0 }).canonical()
     }
 
     /// crawl.json's `actions` list. Nil when the screen has none written (a walk that did not read its controls).
@@ -164,6 +167,7 @@ final class MapStore {
             o["parent"] = sc.parent ?? NSNull()
             if let f = sc.flaky { o["flaky"] = f }
             if let d = sc.deps { o["deps"] = depsJSON(d) }
+            if sc.overlay == true { o["overlay"] = true }
             if let list = sc.actions {
                 o["actions"] = list.map { a -> [String: Any] in
                     var j: [String: Any] = ["label": a.label, "cmd": a.cmd, "kind": a.kind, "scrolls": a.scrolls, "skipped": a.skipped ?? NSNull()]
@@ -198,6 +202,8 @@ final class MapStore {
         // with --freeze-network the server answers it saw). A recording not in this store (a shared map) is left out.
         if let n = snapshot.screenIds { json["screen_ids"] = n }
         if let c = snapshot.clock { json["clock"] = c }
+        if let d = snapshot.dedupVariants { json["dedup_variants"] = d }
+        if let v = snapshot.variantAliases, !v.isEmpty { json["variant_aliases"] = v }
         if let h = snapshot.network, let from = blobURL(h) {
             let to = folder.appendingPathComponent("network.har")
             if clonefile(from.path, to.path, 0) == 0 || (try? fm.copyItem(at: from, to: to)) != nil { json["network"] = ["recording": "network.har"] }
