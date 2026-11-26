@@ -69,7 +69,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private let header = GlassView()
     private let rail = GlassView()
     private let overrideBar = NSStackView()
-    private let agentHud = GlassView(radius: 15)
+    private let agentHud = GlassView(radius: 18)
     private let agentHudDot = NSView()
     private let agentHudLabel = NSTextField(labelWithString: "")
     private var agentHudPause: GlassButton!
@@ -212,7 +212,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             overrideBar.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
             overrideBar.bottomAnchor.constraint(equalTo: grid.bottomAnchor, constant: -8),
             agentHud.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
-            agentHud.topAnchor.constraint(equalTo: grid.topAnchor, constant: 6),
+            agentHud.topAnchor.constraint(equalTo: grid.topAnchor, constant: 12),
+            agentHud.trailingAnchor.constraint(lessThanOrEqualTo: grid.trailingAnchor, constant: -14),
             toast.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
             toast.topAnchor.constraint(equalTo: grid.topAnchor, constant: 4),
             bottomDock.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
@@ -528,15 +529,20 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         agentHudDot.heightAnchor.constraint(equalToConstant: 8).isActive = true
         agentHudLabel.font = .systemFont(ofSize: 12, weight: .medium)
         agentHudLabel.textColor = Design.ink
+        agentHudLabel.maximumNumberOfLines = 1
         agentHudLabel.lineBreakMode = .byTruncatingTail
-        agentHudLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 260).isActive = true
+        agentHudLabel.cell?.usesSingleLineMode = true
+        agentHudLabel.cell?.truncatesLastVisibleLine = true
+        agentHudLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        agentHudLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 320).isActive = true
         agentHudPause = GlassButton(symbol: nil, title: "Pause", label: "Pause or resume the agent", style: .well, target: self, action: #selector(toggleAgentPause(_:)))
         agentHudPause.font = .systemFont(ofSize: 11, weight: .semibold)
-        agentHudPause.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        agentHudPause.layer?.cornerRadius = 12
+        agentHudPause.heightAnchor.constraint(equalToConstant: 24).isActive = true
         let row = NSStackView(views: [agentHudDot, agentHudLabel, agentHudPause])
-        row.spacing = 8
+        row.spacing = 10
         row.alignment = .centerY
-        row.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 6)
+        row.edgeInsets = NSEdgeInsets(top: 6, left: 14, bottom: 6, right: 6)
         row.translatesAutoresizingMaskIntoConstraints = false
         agentHud.addSubview(row)
         NSLayoutConstraint.activate([
@@ -558,10 +564,34 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let paused = agentTools?.paused ?? false
         agentHudDot.layer?.backgroundColor = (paused ? Design.warning : Design.agent).cgColor
         let latest = agentActivity.entries(session: nil, all: true).last
-        let action = paused ? "Paused" : (latest.map { "\($0.tool) \($0.summary)" } ?? "Connected")
-        let text = NSMutableAttributedString(string: client + "  ", attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink])
-        text.append(NSAttributedString(string: action, attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
+        let action: String
+        if paused {
+            action = "Paused"
+        } else if let latest {
+            let summary = latest.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if summary.isEmpty {
+                action = latest.tool
+            } else if summary.lowercased() == latest.tool.lowercased()
+                        || summary.lowercased().hasPrefix(latest.tool.lowercased() + " ") {
+                action = summary
+            } else {
+                action = "\(latest.tool) \(summary)"
+            }
+        } else {
+            action = "Connected"
+        }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let text = NSMutableAttributedString(
+            string: client + "  ",
+            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink, .paragraphStyle: paragraph]
+        )
+        text.append(NSAttributedString(
+            string: action,
+            attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute, .paragraphStyle: paragraph]
+        ))
         agentHudLabel.attributedStringValue = text
+        agentHud.toolTip = "\(client) — \(action)"
         agentHudPause.title = paused ? "Resume" : "Pause"
         agentHudPause.isOn = paused
     }
