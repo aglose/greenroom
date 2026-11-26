@@ -472,7 +472,13 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         self.rows = rows
         self.rowKeys = keys
         if !sameShape { table.reloadData() }
-        else if !changed.isEmpty { table.reloadData(forRowIndexes: changed, columnIndexes: [0]) }
+        else if !changed.isEmpty {
+            table.reloadData(forRowIndexes: changed, columnIndexes: [0])
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0
+                table.noteHeightOfRows(withIndexesChanged: changed)
+            }
+        }
         let selected = self.selected
         let want = selected.flatMap { s in rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }
