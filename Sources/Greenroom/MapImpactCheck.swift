@@ -322,19 +322,22 @@ enum MapImpactCheck {
             try? har.write(to: read.appendingPathComponent("network.har"))
             if var j = (try? JSONSerialization.jsonObject(with: Data(contentsOf: read.appendingPathComponent("crawl.json")))) as? [String: Any] {
                 j["screen_ids"] = 2; j["clock"] = "2026-11-25T21:04:00Z"; j["network"] = ["recording": "network.har", "entries": 1]
+                j["dedup_variants"] = true; j["variant_aliases"] = ["Alias-0001": "Home-0001"]
                 try? JSONSerialization.data(withJSONObject: j).write(to: read.appendingPathComponent("crawl.json"))
             }
             let withRead = store.importWalk(read, commit: quick.commit, tree: quick.tree, profile: quick.profile, engine: quick.engine,
                                             walked: ISO8601DateFormatter().date(from: quick.walked) ?? now, seed: filed0?.snapshot)
-            expect(withRead?.screenIds == 2 && withRead?.clock == "2026-11-25T21:04:00Z" && withRead?.network.flatMap { store.blobURL($0) } != nil,
-                   "a walk's screen_ids, clock and recording are kept with its snapshot")
+            expect(withRead?.screenIds == 2 && withRead?.clock == "2026-11-25T21:04:00Z" && withRead?.network.flatMap { store.blobURL($0) } != nil
+                   && withRead?.dedupVariants == true && withRead?.variantAliases == ["Alias-0001": "Home-0001"],
+                   "a walk's screen_ids, clock, dedup_variants, variant_aliases and recording are kept with its snapshot")
             if let withRead {
                 let seed2 = walks.appendingPathComponent("seed-roundtrip-read")
                 let wrote2 = store.writeSeed(withRead, to: seed2)
                 let sj = (try? JSONSerialization.jsonObject(with: Data(contentsOf: seed2.appendingPathComponent("crawl.json")))) as? [String: Any]
                 expect(wrote2 && sj?["screen_ids"] as? Int == 2 && sj?["clock"] as? String == "2026-11-25T21:04:00Z"
+                       && sj?["dedup_variants"] as? Bool == true && (sj?["variant_aliases"] as? [String: String]) == ["Alias-0001": "Home-0001"]
                        && (try? Data(contentsOf: seed2.appendingPathComponent("network.har"))) == har,
-                       "a seed written from it has the same screen_ids and clock, and the recording as network.har")
+                       "a seed written from it has the same screen_ids, clock, dedup settings, and the recording as network.har")
                 let back2 = store.importWalk(seed2, commit: withRead.commit, tree: withRead.tree, profile: withRead.profile, engine: withRead.engine,
                                              walked: ISO8601DateFormatter().date(from: withRead.walked) ?? now, seed: withRead)
                 var bare2 = withRead

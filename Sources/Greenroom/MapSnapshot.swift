@@ -96,6 +96,9 @@ struct MapSnapshot: Codable, Equatable {
         /// snapshot and compared with it (`--diff-seed`) taps only the controls that are not in this list. Nil in a
         /// snapshot written before they were kept: such a seed's screens are walked with every control tried.
         var actions: [Action]?
+        /// True when the screen had a multi-window overlay (dialog/popup on top of the activity), so variant
+        /// deduplication in a seeded walk never collapses an overlay with the activity behind it.
+        var overlay: Bool?
     }
 
     /// One control of a screen: crawl.json's `label`, `cmd`, `kind`, `box`, `skipped` and `scrolls`.
@@ -158,6 +161,10 @@ struct MapSnapshot: Codable, Equatable {
     var screenIds: Int?
     var clock: String?
     var network: String?
+    /// Variant deduplication settings from crawl.json (apksim 0.66.0): kept so a seeded walk deduplicates variants
+    /// the exact same way as its seed.
+    var dedupVariants: Bool?
+    var variantAliases: [String: String]?
 
     func screen(_ id: String) -> Screen? { screens.first { $0.id == id } }
 

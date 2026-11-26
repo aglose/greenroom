@@ -83,8 +83,9 @@ walk("deps", {
     "edges": [{"from": "Deps-0001", "action": "Open", "cmd": "tap 1", "to": "Deps-0002"}],
     "start_deps": {"classes": ["com.example.App"], "sources": ["com/example/App.kt"], "resources": ["style/Theme.App", "mipmap/ic_launcher"]},
     "deps_unreliable": "the probes were reset mid-screen", "seconds": {"total": 3.25},
-    # how it read its screens: id rule, clock, and the --freeze-network recording (named by hash, not carried)
-    "screen_ids": 2, "clock": "2026-11-25T21:04:00Z", "network": {"recording": "network.har", "entries": 1, "fetched": 1}},
+    # how it read its screens: id rule, clock, variant dedup, and the --freeze-network recording (named by hash, not carried)
+    "screen_ids": 2, "clock": "2026-11-25T21:04:00Z", "dedup_variants": True, "variant_aliases": {"Deps-0099": "Deps-0002"},
+    "network": {"recording": "network.har", "entries": 1, "fetched": 1}},
     {"a.png": png(11), "b.png": png(12), "network.har": b'{"log": {"version": "1.2", "entries": []}}'})
 # seeded from the deps walk's snapshot: a carried screen the seed walked, one the seed carried, one the seed lacks, and a
 # carried screen with no deps of its own (it keeps the seed's)
