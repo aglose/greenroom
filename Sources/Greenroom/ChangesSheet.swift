@@ -46,7 +46,7 @@ final class ChangeTileItem: NSCollectionViewItem {
     func configure(_ c: ChangeScreen) {
         screenID = c.id
         nameLabel.stringValue = c.title
-        status.stringValue = c.status.word + ": " + c.detail
+        status.stringValue = Self.compactDetail(c)
         status.textColor = c.status.color
         dot.layer?.backgroundColor = c.status.color.cgColor
         picture.show(nil, empty: "")
@@ -55,6 +55,19 @@ final class ChangeTileItem: NSCollectionViewItem {
             SnapshotImages.load(url, maxPixel: 420) { [weak self] image in if self?.screenID == id { self?.picture.show(image, empty: "") } }
         } else { picture.show(nil, empty: "No capture") }
         refreshSelection()
+    }
+
+    private static func compactDetail(_ c: ChangeScreen) -> String {
+        let raw = c.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return c.status.word.capitalized }
+        // Shorten large pixel counts like "87,044 px" → "87k px" so tile captions don't truncate mid-number.
+        let regex = try? NSRegularExpression(pattern: #"(\d{1,3}),(\d{3})\s*px"#)
+        let ns = raw as NSString
+        if let m = regex?.firstMatch(in: raw, range: NSRange(location: 0, length: ns.length)),
+           let thousands = Int(ns.substring(with: m.range(at: 1))), thousands >= 10 {
+            return ns.replacingCharacters(in: m.range, with: "\(thousands)k px")
+        }
+        return raw
     }
 
     override var isSelected: Bool { didSet { refreshSelection() } }
@@ -177,6 +190,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     // Screens tab.
     private let collection = NSCollectionView()
     private let screensEmpty = NSTextField(wrappingLabelWithString: "")
+    private var screensDetailWell: NSView!
+    private var screensGridWidth: NSLayoutConstraint!
     private let detailTitle = NSTextField(labelWithString: "")
     private let detailStatus = NSTextField(wrappingLabelWithString: "")
     private var modeButtons: [GlassButton] = []
@@ -198,9 +213,14 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private let videoButtons = NSStackView()
     private let chapterRow = NSStackView()
     private let playButton = GlassButton(symbol: "play.fill", title: "Play", label: "Play both clips together", style: .well, target: nil, action: nil)
+    private let videoScrubber = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let videoTimeLabel = NSTextField(labelWithString: "0:00 / 0:00")
+    private let rerecordButton = GlassButton(symbol: "arrow.clockwise", title: "Re-record", label: "Record the change tour again", style: .well, target: nil, action: nil)
+    private var videoControlsBar = NSStackView()
     private let videoColumns = NSStackView()
     private var playing = false
     private var chapterTimeObserver: Any?
+    private weak var observedPlayer: AVPlayer?
     private var chapterButtons: [GlassButton] = []
 
     // Live tab.
@@ -243,13 +263,13 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
 
     private func build() {
         dim.wantsLayer = true
-        dim.layer?.backgroundColor = NSColor(white: 0, alpha: 0.5).cgColor
+        dim.layer?.backgroundColor = NSColor(white: 0, alpha: 0.72).cgColor
         for v in [dim, panel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             dim.topAnchor.constraint(equalTo: topAnchor), dim.bottomAnchor.constraint(equalTo: bottomAnchor),
             dim.leadingAnchor.constraint(equalTo: leadingAnchor), dim.trailingAnchor.constraint(equalTo: trailingAnchor),
             panel.topAnchor.constraint(equalTo: topAnchor, constant: 58), panel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
-            panel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28), panel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
+            panel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -68), panel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
         ])
 
         // Header: the head build, "against", the base picker, and what can be done with the result.
@@ -387,12 +407,13 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         screensEmpty.alignment = .center
         let gridBox = NSView()
         for v in [scroll, screensEmpty] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; gridBox.addSubview(v) }
+        screensGridWidth = gridBox.widthAnchor.constraint(equalToConstant: 330)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: gridBox.topAnchor), scroll.bottomAnchor.constraint(equalTo: gridBox.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: gridBox.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: gridBox.trailingAnchor),
             screensEmpty.centerXAnchor.constraint(equalTo: gridBox.centerXAnchor), screensEmpty.centerYAnchor.constraint(equalTo: gridBox.centerYAnchor),
             screensEmpty.widthAnchor.constraint(lessThanOrEqualTo: gridBox.widthAnchor, constant: -40),
-            gridBox.widthAnchor.constraint(equalToConstant: 330),
+            screensGridWidth,
         ])
 
         detailTitle.font = .systemFont(ofSize: 14, weight: .semibold)
@@ -459,6 +480,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         detail.alignment = .leading
         for v in [dhead, detailStatus, detailNotes, detailBody] as [NSView] { v.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true }
         let well = wellView()
+        screensDetailWell = well
         pin(detail, in: well, inset: 12)
 
         let row = NSStackView(views: [gridBox, well])
@@ -520,10 +542,17 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         videoColumns.distribution = .fillEqually
         videoColumns.spacing = 12
         playButton.target = self; playButton.action = #selector(playPressed)
+        videoScrubber.target = self; videoScrubber.action = #selector(scrubberMoved)
+        videoScrubber.isContinuous = true
+        videoScrubber.setContentHuggingPriority(.init(1), for: .horizontal)
+        videoTimeLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
+        videoTimeLabel.textColor = Design.mute
+        videoTimeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        rerecordButton.target = self; rerecordButton.action = #selector(rerecordTourPressed)
+        videoControlsBar = NSStackView(views: [playButton, videoScrubber, videoTimeLabel, rerecordButton])
+        videoControlsBar.spacing = 10
+        videoControlsBar.alignment = .centerY
         chapterRow.spacing = 6
-        let chapterScroll = NSStackView(views: [playButton, chapterRow])
-        chapterScroll.spacing = 10
-        chapterScroll.alignment = .centerY
         videoNote.font = .systemFont(ofSize: 13)
         videoNote.textColor = Design.mute
         videoNote.alignment = .center
@@ -533,11 +562,12 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         noteBox.orientation = .vertical
         noteBox.alignment = .centerX
         noteBox.spacing = 10
-        let column = NSStackView(views: [videoColumns, chapterScroll, noteBox])
+        let column = NSStackView(views: [videoColumns, videoControlsBar, chapterRow, noteBox])
         column.orientation = .vertical
-        column.spacing = 10
+        column.spacing = 8
         column.alignment = .leading
         videoColumns.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        videoControlsBar.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         noteBox.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         videoColumns.setContentHuggingPriority(.init(1), for: .vertical)
         let well = wellView()
@@ -772,7 +802,20 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         case .needsMain(let title, let text, let waiting):
             card(title, text, spinning: waiting)
             statusLabel.stringValue = ""
-            if waiting { compareButton.title = "Stop"; compareButton.style = .record }
+            if waiting {
+                compareButton.title = "Stop"; compareButton.style = .record
+            } else if let s = session, let c = controller, let ws = c.workspace(of: s) {
+                let name = MainBuilds.shortName(ws.baseRef)
+                if !c.mainBuilds.applies(to: ws) {
+                    if !ws.keepMain && AndroidProject.isApp(ws.root) {
+                        let b = GlassButton(symbol: "hammer", title: "Keep \(name) built", label: "Enable automatic builds of \(name) and compare again", style: .accent, target: self, action: #selector(enableKeepMain))
+                        stateButtons.addArrangedSubview(b)
+                    }
+                } else if ws.auto == .off {
+                    let b = GlassButton(symbol: "figure.walk", title: "Turn on walking", label: "Enable automatic walking for this repository and compare again", style: .accent, target: self, action: #selector(enableWalking))
+                    stateButtons.addArrangedSubview(b)
+                }
+            }
         case .done(let set):
             changeSet = set
             stateCard.isHidden = true
@@ -788,7 +831,10 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             card("Stopped", "The comparison was stopped. Nothing was kept.")
             statusLabel.stringValue = ""
         }
-        for b in tabButtons { b.isEnabled = changeSet != nil }
+        for b in tabButtons {
+            b.isEnabled = changeSet != nil
+            b.isOn = changeSet != nil && b.tag == tab.rawValue
+        }
         if run?.isActive != true { compareButton.title = changeSet == nil ? "Compare" : "Compare again"; compareButton.style = .accent }
     }
     private var offer: BuildOffer?
@@ -824,6 +870,18 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
                 self.onSay?("Could not check out \(o.sha.prefix(7))", true)
             }
         }
+    }
+
+    @objc private func enableKeepMain() {
+        guard let s = session, let ws = controller?.workspace(of: s) else { return }
+        controller?.setKeepMain(true, for: ws.root)
+        compare(base: baseRef, name: baseName, baseOption: baseOption, start: startLink)
+    }
+
+    @objc private func enableWalking() {
+        guard let s = session else { return }
+        controller?.setAuto(.onBuild, for: s)
+        compare(base: baseRef, name: baseName, baseOption: baseOption, start: startLink)
     }
 
     // MARK: Header and status
@@ -949,6 +1007,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         shown = groups.flatMap(\.screens)
         collection.reloadData()
         screensEmpty.stringValue = shown.isEmpty ? "No screen differs from the base." : ""
+        screensDetailWell?.isHidden = shown.isEmpty
+        screensGridWidth?.isActive = !shown.isEmpty
         selectedScreen = nil
         showDetail(nil)
         if let first = shown.first { selectScreen(first.id) }
@@ -985,23 +1045,36 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         tiles.spacing = 10
         summaryStack.addArrangedSubview(tiles)
         if set.isUnchanged {
-            let ok = NSImageView(image: NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 22, weight: .medium)) ?? NSImage())
-            ok.contentTintColor = Design.accent
-            let words = NSStackView(views: [label("No differences", size: 15, weight: .semibold, color: Design.ink),
-                                            label(set.identical ? "Head and base are the same build, so nothing was walked." : (set.unreached > 0
-                                                  ? "None of the \(s.same) screens both walks reached differs. \(set.unreached) more were reached by one walk only, because the other did not finish."
-                                                  : "Every one of the \(s.same) screens the walk reached looks and is built the same as in the base."), size: 12)])
+            let crashed = !set.crashes.isEmpty
+            let iconName = crashed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+            let icon = NSImageView(image: NSImage(systemSymbolName: iconName, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 22, weight: .medium)) ?? NSImage())
+            icon.contentTintColor = crashed ? Design.record : Design.accent
+            let heading = crashed ? "Crashed during comparison" : "No differences"
+            let subtext: String
+            if crashed {
+                subtext = "No screen differences were recorded, but the app crashed during the walk. Check the crashes below."
+            } else if set.identical {
+                subtext = "Head and base are the same build, so nothing was walked."
+            } else if set.unreached > 0 {
+                subtext = "None of the \(s.same) screens both walks reached differs. \(set.unreached) more were reached by one walk only, because the other did not finish."
+            } else {
+                subtext = "Every one of the \(s.same) screens the walk reached looks and is built the same as in the base."
+            }
+            let words = NSStackView(views: [label(heading, size: 15, weight: .semibold, color: Design.ink), label(subtext, size: 12)])
             words.orientation = .vertical
             words.alignment = .leading
             words.spacing = 2
-            let row = NSStackView(views: [ok, words])
+            let row = NSStackView(views: [icon, words])
             row.spacing = 10
             row.alignment = .centerY
             summaryStack.addArrangedSubview(row)
         } else {
             summaryStack.addArrangedSubview(section("WHAT DIFFERS", set.differing.map { c in
                 let sign = c.status == .new ? "+" : (c.status == .gone ? "−" : "~")
-                return (sign, c.status.color, c.title + "  ·  " + c.detail)
+                return (sign, c.status.color, c.title + "  ·  " + c.detail, { [weak self] in
+                    self?.selectTab(.screens)
+                    self?.selectScreen(c.id)
+                })
             }))
         }
         if !set.unplaced.isEmpty {
@@ -1031,8 +1104,12 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     private let tourLine = NSTextField(labelWithString: "")
 
     private func section(_ heading: String, _ rows: [(String, NSColor, String)]) -> NSView {
+        section(heading, rows.map { ($0.0, $0.1, $0.2, nil) })
+    }
+
+    private func section(_ heading: String, _ rows: [(String, NSColor, String, (() -> Void)?)]) -> NSView {
         var views: [NSView] = [label(heading, size: 10, weight: .semibold)]
-        for (mark, color, text) in rows.prefix(40) {
+        for (mark, color, text, action) in rows.prefix(40) {
             let m = label(mark, size: 13, weight: .semibold, color: color)
             m.alignment = .center
             m.widthAnchor.constraint(equalToConstant: 16).isActive = true
@@ -1040,7 +1117,12 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             t.lineBreakMode = .byTruncatingTail
             let r = NSStackView(views: [m, t])
             r.spacing = 8
-            views.append(r)
+            if let action {
+                let row = ClickableSummaryRow(content: r, onClick: action)
+                views.append(row)
+            } else {
+                views.append(r)
+            }
         }
         let s = NSStackView(views: views)
         s.orientation = .vertical
@@ -1335,14 +1417,32 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     var tourProcessIDs: [Int32] { tourRunner?.processIDs ?? [] }
 
     @objc private func recordTourPressed() { recordTour(force: tour?.skipped != nil) }
+    @objc private func rerecordTourPressed() { recordTour(force: true) }
     @objc private func stopTourPressed() { cancelTour() }
+
+    private func detachTimeObserver() {
+        if let obs = chapterTimeObserver {
+            observedPlayer?.removeTimeObserver(obs)
+            chapterTimeObserver = nil
+            observedPlayer = nil
+        }
+    }
 
     private func unloadVideo() {
         pausePlayers()
+        detachTimeObserver()
         baseVideo.player = nil
         headVideo.player = nil
+        videoScrubber.doubleValue = 0
+        videoTimeLabel.stringValue = "0:00 / 0:00"
         chapterRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         chapterButtons = []
+    }
+
+    private static func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite && seconds >= 0 else { return "0:00" }
+        let s = Int(seconds.rounded(.down))
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 
     private func refreshVideo() {
@@ -1355,10 +1455,24 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             videoNote.isHidden = true
             if (headVideo.player?.currentItem?.asset as? AVURLAsset)?.url != hf {
                 pausePlayers()
-                headVideo.player = AVPlayer(url: hf)
+                detachTimeObserver()
+                let hp = AVPlayer(url: hf)
+                headVideo.player = hp
                 baseVideo.player = t.base.map { AVPlayer(url: $0) }
                 for p in [headVideo.player, baseVideo.player] { p?.automaticallyWaitsToMinimizeStalling = false }
-                NotificationCenter.default.addObserver(self, selector: #selector(clipEnded(_:)), name: .AVPlayerItemDidPlayToEndTime, object: headVideo.player?.currentItem)
+                NotificationCenter.default.addObserver(self, selector: #selector(clipEnded(_:)), name: .AVPlayerItemDidPlayToEndTime, object: hp.currentItem)
+                observedPlayer = hp
+                chapterTimeObserver = hp.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main) { [weak self] time in
+                    guard let self, let item = hp.currentItem else { return }
+                    let dur = item.duration.seconds
+                    let cur = time.seconds
+                    if dur.isFinite && dur > 0 {
+                        self.videoScrubber.doubleValue = min(max(cur / dur, 0), 1)
+                        self.videoTimeLabel.stringValue = "\(Self.formatTime(cur)) / \(Self.formatTime(dur))"
+                    } else {
+                        self.videoTimeLabel.stringValue = "\(Self.formatTime(cur)) / 0:00"
+                    }
+                }
             }
             chapterRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
             chapterButtons = []
@@ -1369,11 +1483,13 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
                 chapterButtons.append(b)
             }
             videoColumns.isHidden = false
-            playButton.isHidden = false
+            videoControlsBar.isHidden = false
+            chapterRow.isHidden = chapterButtons.isEmpty
             return
         }
         videoColumns.isHidden = true
-        playButton.isHidden = true
+        videoControlsBar.isHidden = true
+        chapterRow.isHidden = true
         chapterRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
         videoNote.isHidden = false
         if running {
@@ -1388,6 +1504,17 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             videoNote.stringValue = tourStatus.isEmpty ? "Both builds recorded at each new or changed screen, side by side." : tourStatus
             videoButtons.addArrangedSubview(GlassButton(symbol: "record.circle", title: "Record the change tour", label: "Take both builds to each screen that differs and record them", style: .accent, target: self, action: #selector(recordTourPressed)))
         }
+    }
+
+    @objc private func scrubberMoved() {
+        guard let item = headVideo.player?.currentItem else { return }
+        let dur = item.duration.seconds
+        guard dur.isFinite && dur > 0 else { return }
+        let secs = videoScrubber.doubleValue * dur
+        let t = CMTime(seconds: secs, preferredTimescale: 600)
+        headVideo.player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+        baseVideo.player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+        videoTimeLabel.stringValue = "\(Self.formatTime(secs)) / \(Self.formatTime(dur))"
     }
 
     @objc private func clipEnded(_ n: Notification) { playing = false; playButton.title = "Play" }
@@ -1461,6 +1588,39 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         }
         return out
     }
+}
+
+private final class ClickableSummaryRow: NSView {
+    private let onClick: () -> Void
+    private var hovering = false { didSet { refresh() } }
+
+    init(content: NSView, onClick: @escaping () -> Void) {
+        self.onClick = onClick
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.cornerCurve = .continuous
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+        ])
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private func refresh() {
+        layer?.backgroundColor = hovering ? Design.wellOn.cgColor : NSColor.clear.cgColor
+    }
+
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) { onClick() }
 }
 
 extension SessionsController {

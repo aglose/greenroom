@@ -552,7 +552,7 @@ final class ChangesRun {
         let evidence = controller.evidence, main = controller.mainBuilds
         let intro = "A pull request is compared with a map of \(name), made by walking \(name) once for this project. After that, only the screens a change touches are walked."
         guard main.applies(to: ws) else {
-            return ("\(name) has not been walked yet", intro + " Turn on \u{201C}Keep \(name) Built\u{201D} in the repository's + menu and the walk starts by itself.", false)
+            return ("\(name) has not been walked yet", intro + " Turn on \u{201C}Keep \(name) built\u{201D} in the repository's + menu and the walk starts by itself.", false)
         }
         if ws.auto == .off {
             return ("\(name) has not been walked yet", intro + " Walking is off for this repository: turn it on in the repository's + menu.", false)

@@ -39,6 +39,7 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
     /// Said to the person in the workbench's toast.
     var onSay: ((String, Bool) -> Void)?
     var onOpenTrace: ((URL) -> Void)?
+    var onClose: (() -> Void)?
 
     // What is running or was last run.
     private struct Step {
@@ -72,9 +73,11 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
         count.font = .systemFont(ofSize: 12)
         count.textColor = Design.mute
         let folderButton = GlassButton(symbol: "folder", label: "Show the recordings folder in Finder", target: self, action: #selector(showFolder(_:)))
+        let close = GlassButton(symbol: "xmark", label: "Close Recordings", style: .plain, target: self, action: #selector(closePressed))
+        close.heightAnchor.constraint(equalToConstant: 26).isActive = true
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let top = NSStackView(views: [title, count, spacer, folderButton])
+        let top = NSStackView(views: [title, count, spacer, folderButton, close])
         top.spacing = 6
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("recording"))
@@ -121,12 +124,20 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let row1b = NSStackView(views: [
             button("bisect", "arrow.triangle.branch", "Find the first build that differs…", "Replay on several builds and find the first that differs", #selector(bisectPicked(_:))),
         ])
+        let deleteSpacer = NSView()
+        deleteSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let deleteButton = GlassButton(symbol: "trash", title: "Delete…", label: "Move to the Trash", style: .record, target: self, action: #selector(deletePicked(_:)))
+        deleteButton.font = .systemFont(ofSize: 12, weight: .medium)
+        deleteButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        actionButtons["delete"] = deleteButton
         let row2 = NSStackView(views: [
             button("trace", "waveform.path.ecg", "Trace viewer", "Open in the trace viewer", #selector(openTrace(_:))),
             button("reveal", "magnifyingglass", "Reveal in Finder", "Reveal in Finder", #selector(reveal(_:))),
-            button("delete", "trash", "Delete…", "Move to the Trash", #selector(deletePicked(_:))),
+            deleteSpacer,
+            deleteButton,
         ])
-        for r in [row1, row1b, row2] { r.spacing = 6; r.distribution = .fillProportionally }
+        for r in [row1, row1b] { r.spacing = 6; r.distribution = .fillProportionally }
+        row2.spacing = 6
         let rows = NSStackView(views: [selectedName, selectedMeta, row1, row1b, row2])
         rows.orientation = .vertical
         rows.alignment = .leading
@@ -134,6 +145,7 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
         rows.setCustomSpacing(10, after: selectedMeta)
         rows.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(rows)
+        row2.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
 
         // The result of the last replay or search, and the engine's output.
         let result = Self.card()
@@ -286,16 +298,36 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
 
     func numberOfRows(in tableView: NSTableView) -> Int { tableView === buildsTable ? builds.count : recordings.count }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { RecordingRowView() }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         if tableView === buildsTable {
             guard row < builds.count else { return nil }
             let u = builds[row]
+            let label = Self.buildLabel(for: u, among: builds)
             let date = (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate).map { Self.shortDate.string(from: $0) } ?? ""
-            return Self.cell("buildCell", title: "\(row + 1).  \(u.lastPathComponent)", subtitle: date + (row == 0 ? "  ·  oldest: assumed good" : ""), in: tableView, compact: true)
+            return Self.cell("buildCell", title: "\(row + 1).  \(label)", subtitle: date + (row == 0 ? "  ·  oldest: assumed good" : ""), in: tableView, compact: true)
         }
         guard row < recordings.count else { return nil }
         let r = recordings[row]
         return Self.cell("recordingCell", title: r.name, subtitle: r.meta + (r.package.map { "  ·  " + $0 } ?? ""), in: tableView, compact: false)
+    }
+
+    private static func buildLabel(for url: URL, among list: [URL]) -> String {
+        let base = url.lastPathComponent
+        let duplicates = list.filter { $0.lastPathComponent == base }.count > 1
+        guard duplicates else { return base }
+        let dir = url.deletingLastPathComponent()
+        let metaURL = dir.appendingPathComponent("build.json")
+        if let data = try? Data(contentsOf: metaURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let ref = (json["ref"] as? String) ?? (json["branch"] as? String)
+            let sha = (json["head"] as? String ?? json["sha"] as? String).map { String($0.prefix(7)) }
+            let parts = [ref, sha].compactMap { $0 }.filter { !$0.isEmpty }
+            if !parts.isEmpty { return "\(parts.joined(separator: " · ")) (\(base))" }
+        }
+        let parent = dir.lastPathComponent
+        return parent.isEmpty ? base : "\(parent)/\(base)"
     }
 
     private static let shortDate: DateFormatter = {
@@ -626,17 +658,17 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
         func conclude(_ c: Bisect.Conclusion?) {
             let (text, color) = Self.words(for: c, builds: list, stopped: stopRequested, replays: replays)
             finishSession(headline: text, color: color)
-            if let c, case .firstDifferent(let i, _, _) = c, let step = steps.first(where: { $0.name == list[i].lastPathComponent }),
+            if let c, case .firstDifferent(let i, _, _) = c, let step = steps.first(where: { $0.name == Self.buildLabel(for: list[i], among: list) }),
                case .done(.diverged(let d)) = step.state { showFrames(d) }
             completion?(c)
         }
         func step() {
             if stopRequested { conclude(nil); return }
             guard let i = state.next else { conclude(state.conclusion); return }
-            let name = list[i].lastPathComponent
+            let name = Self.buildLabel(for: list[i], among: list)
             steps.append(Step(name: name, state: .running))
             let n = steps.count - 1
-            setHeadline("Replaying \(name)  (\(replays + 1), about \(replays + max(1, state.stepsLeftEstimate)) in all)…", Design.ink)
+            setHeadline("Replaying \(name) (\(replays + 1)/~\(replays + max(1, state.stepsLeftEstimate)))…", Design.ink)
             runOne(recording, apk: list[i], label: name) { [weak self] outcome, out in
                 guard let self else { return }
                 replays += 1
@@ -660,7 +692,7 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
 
     /// The search's answer as words and colour.
     private static func words(for c: Bisect.Conclusion?, builds: [URL], stopped: Bool, replays: Int) -> (String, NSColor) {
-        func n(_ i: Int) -> String { builds[i].lastPathComponent }
+        func n(_ i: Int) -> String { Self.buildLabel(for: builds[i], among: builds) }
         guard let c else { return ("Stopped after \(replays) replay\(replays == 1 ? "" : "s"); no answer", Design.warning) }
         switch c {
         case .firstDifferent(let i, let good, _):
@@ -805,4 +837,14 @@ final class RecordingsPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var framesShown: Bool { !frames.isHidden && frameImages.contains { $0.image != nil } }
     /// Chooses the recording as a click on its row would.
     func debugSelect(_ file: URL) { if let i = recordings.firstIndex(where: { $0.url == file }) { table.selectRowIndexes([i], byExtendingSelection: false) } }
+
+    @objc private func closePressed() { onClose?() }
+}
+
+private final class RecordingRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        Design.accent.withAlphaComponent(0.18).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 2), xRadius: 8, yRadius: 8).fill()
+    }
+    override var isEmphasized: Bool { get { false } set {} }
 }

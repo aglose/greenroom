@@ -257,13 +257,13 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
 
     private func build() {
         dim.wantsLayer = true
-        dim.layer?.backgroundColor = NSColor(white: 0, alpha: 0.5).cgColor
+        dim.layer?.backgroundColor = NSColor(white: 0, alpha: 0.72).cgColor
         for v in [dim, panel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             dim.topAnchor.constraint(equalTo: topAnchor), dim.bottomAnchor.constraint(equalTo: bottomAnchor),
             dim.leadingAnchor.constraint(equalTo: leadingAnchor), dim.trailingAnchor.constraint(equalTo: trailingAnchor),
             panel.topAnchor.constraint(equalTo: topAnchor, constant: 58), panel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
-            panel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28), panel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
+            panel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -68), panel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
         ])
 
         // Header: title + compact 1-line configuration pills + Run / Record + close.
@@ -354,8 +354,8 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         // Detail.
         detailTitle.font = .systemFont(ofSize: 14, weight: .semibold)
         detailTitle.textColor = Design.ink
-        detailTitle.lineBreakMode = .byTruncatingTail
-        detailTitle.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        detailTitle.lineBreakMode = .byTruncatingMiddle
+        detailTitle.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         detailStatus.font = .systemFont(ofSize: 12)
         detailStatus.textColor = Design.mute
         detailStatus.maximumNumberOfLines = 2
@@ -372,7 +372,9 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         let modeRow = NSStackView(views: modeButtons)
         modeRow.spacing = 4
 
-        let hint = label("↑↓ navigate · W wipe · A accept", size: 11, color: Design.mute.withAlphaComponent(0.75))
+        let hint = label("↑↓ · W wipe · A accept", size: 11, color: Design.mute.withAlphaComponent(0.75))
+        hint.lineBreakMode = .byTruncatingTail
+        hint.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         acceptButton.target = self; acceptButton.action = #selector(acceptSelected)
         acceptButton.isHidden = true
         let dspacer = NSView(); dspacer.setContentHuggingPriority(.init(1), for: .horizontal)
@@ -687,11 +689,13 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
         }
         collection.reloadData()
         if let id = selectedID, let i = shown.firstIndex(where: { $0.id == id }) {
+            collection.deselectAll(nil)
             collection.selectItems(at: [IndexPath(item: i, section: 0)], scrollPosition: [])
             showDetail(shown[i])
         } else if let first = shown.first {
             select(first.id, in: 0)
         } else {
+            collection.deselectAll(nil)
             selectedID = nil
             showDetail(nil)
         }
@@ -735,6 +739,7 @@ final class SnapshotReview: NSView, NSCollectionViewDataSource, NSCollectionView
     /// Selects a tile by id (scripted checks, and after a run).
     func select(_ id: String, in index: Int? = nil) {
         guard let i = index ?? shown.firstIndex(where: { $0.id == id }), shown.indices.contains(i) else { return }
+        collection.deselectAll(nil)
         collection.selectItems(at: [IndexPath(item: i, section: 0)], scrollPosition: .centeredVertically)
         selectedID = id
         showDetail(shown[i])

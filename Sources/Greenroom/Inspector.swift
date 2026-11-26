@@ -302,9 +302,21 @@ final class Inspector: NSViewController, NSTableViewDataSource, NSTableViewDeleg
 
     // MARK: Filtering & Accessibility Checks
 
+    private var minTargetPx: CGFloat {
+        let density: CGFloat
+        if let opts = simulator?.options, let i = opts.firstIndex(of: "--device"), i + 1 < opts.count, opts[i + 1].contains("pixel-10-pro-fold") {
+            density = 2.6
+        } else if let size = simulator?.deviceSize, min(size.width, size.height) >= 1050 && max(size.width, size.height) >= 2200 {
+            density = 2.6
+        } else {
+            density = 2.0
+        }
+        return 48 * density
+    }
+
     private func isTappable(_ n: ScreenNode) -> Bool { n.click || n.field }
     private func isMissingLabel(_ n: ScreenNode) -> Bool { isTappable(n) && n.label.isEmpty }
-    private func isSmallTarget(_ n: ScreenNode) -> Bool { isTappable(n) && (n.frame.width < 120 || n.frame.height < 120) }
+    private func isSmallTarget(_ n: ScreenNode) -> Bool { isTappable(n) && (n.frame.width < minTargetPx || n.frame.height < minTargetPx) }
     private func hasA11yIssue(_ n: ScreenNode) -> Bool { isMissingLabel(n) || isSmallTarget(n) }
     private func area(_ n: ScreenNode) -> CGFloat { n.frame.width * n.frame.height }
 

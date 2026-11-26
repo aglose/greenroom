@@ -44,6 +44,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private var logErrorCount = 0
     private var networkRuleCount = 0
     private var recording = Set<ObjectIdentifier>()
+    private var recordingStarted: [ObjectIdentifier: Date] = [:]
+    private var recordTimer: Timer?
     private let compareQueue = DispatchQueue(label: "greenroom-compare")
     private var compareScheduled = false
     private var compareTimer: Timer?
@@ -64,9 +66,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
     private var agentPanel: AgentPanel?
     private let agentHost = NSView()
-    private let status = NSTextField(labelWithString: "")
+    private let status = NSTextField(wrappingLabelWithString: "")
     // The floating chrome: a glass bar along the top, a badged rail on the right, override pills & Agent HUD on stage.
     private let header = GlassView()
+    private var headerBar: NSStackView?
+    private var sidebarCollapseObserver: NSKeyValueObservation?
     private let rail = GlassView()
     private let overrideBar = NSStackView()
     private let agentHud = GlassView(radius: 18)
@@ -76,9 +80,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private var appChip: GlassButton!
     private var deviceButton: GlassButton!
     private var deviceButtons: [GlassButton] = []
+    private var exitMatrixButton: GlassButton!
     private var mirrorButton: GlassButton!
     private var layoutButtons: [GlassButton] = []
     private var recordButton: GlassButton!
+    private var saveRecordButton: GlassButton!
     private var railButtons: [String: GlassButton] = [:]
     private var railBadges: [String: NSTextField] = [:]
     private var railDots: [String: NSView] = [:]
@@ -181,6 +187,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         side.maximumThickness = 320
         side.isCollapsed = UserDefaults.standard.bool(forKey: Self.sidebarHiddenKey)   // open until the person folds it away
         split.addSplitViewItem(side)
+        sidebarCollapseObserver = side.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.updateHeaderInset() }
+        }
         let content = NSViewController()
         let stack = StageBackground()
         for v in [grid, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
@@ -209,13 +218,13 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             emptyStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
             emptyStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
             emptyStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
-            overrideBar.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
-            overrideBar.bottomAnchor.constraint(equalTo: grid.bottomAnchor, constant: -8),
+            overrideBar.trailingAnchor.constraint(equalTo: grid.trailingAnchor, constant: -14),
+            overrideBar.topAnchor.constraint(equalTo: grid.topAnchor, constant: 12),
             agentHud.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
             agentHud.topAnchor.constraint(equalTo: grid.topAnchor, constant: 12),
             agentHud.trailingAnchor.constraint(lessThanOrEqualTo: grid.trailingAnchor, constant: -14),
-            toast.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
-            toast.topAnchor.constraint(equalTo: grid.topAnchor, constant: 4),
+            toast.trailingAnchor.constraint(equalTo: grid.trailingAnchor, constant: -14),
+            toast.bottomAnchor.constraint(equalTo: bottomDock.topAnchor, constant: -12),
             bottomDock.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: Design.margin),
             bottomDock.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
             bottomDock.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: -Design.margin),
@@ -229,7 +238,6 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         memoryMeter.onReading = { [weak self] in self?.grid.memoryLabel.show($0) }
         let contentItem = NSSplitViewItem(viewController: content)
         contentItem.minimumThickness = 520
-        contentItem.maximumThickness = NSSplitViewItem.unspecifiedDimension
         split.addSplitViewItem(contentItem)
         inspector.onPick = { [weak self] node in
             guard let self, let sim = self.selected else { return }
@@ -628,14 +636,18 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             GlassButton(symbol: "rotate.right", label: "Rotate (⌘R)", target: self, action: #selector(rotate(_:))),
             GlassButton(symbol: "circle.lefthalf.filled", label: "Light or dark (⇧⌘A)", target: self, action: #selector(appearance(_:))),
         ]
+        exitMatrixButton = GlassButton(symbol: "xmark.square", title: "Exit Matrix", label: "Close the matrix wall", style: .well, target: self, action: #selector(closeMatrix(_:)))
+        exitMatrixButton.isHidden = true
         mirrorButton = GlassButton(symbol: "dot.radiowaves.left.and.right", title: "Mirror", label: "Send touches and keys to every device (⇧⌘M)", style: .well, target: self, action: #selector(toggleMirror(_:)))
         layoutButtons = [
             GlassButton(symbol: "iphone", label: "One device", target: self, action: #selector(showOne(_:))),
             GlassButton(symbol: "rectangle.split.2x1", label: "Every device, side by side (⌘\\)", target: self, action: #selector(showAll(_:))),
-            GlassButton(symbol: "plusminus", label: "Compare: mark what differs (⇧⌘D)", target: self, action: #selector(toggleCompare(_:))),
+            GlassButton(symbol: "square.on.square.dashed", label: "Compare: mark what differs (⇧⌘D)", target: self, action: #selector(toggleCompare(_:))),
         ]
         let shot = GlassButton(symbol: "camera", label: "Screenshot (⌘S)", target: self, action: #selector(screenshot(_:)))
         recordButton = GlassButton(symbol: "record.circle", title: "", label: "Record input, log, network and screen (⌥⌘R)", style: .record, target: self, action: #selector(toggleRecording(_:)))
+        saveRecordButton = GlassButton(symbol: "square.and.arrow.down", label: "Save recording (⇧⌘S)", style: .well, target: self, action: #selector(saveRecordingAndShow(_:)))
+        saveRecordButton.isHidden = true
         let library = GlassButton(symbol: "sidebar.left", label: "Show or hide the library", target: self, action: #selector(toggleLibrary(_:)))
         let commands = GlassButton(symbol: "magnifyingglass", title: "⌘K", label: "Search every command, device, app and recording (⌘K)", style: .well, target: self, action: #selector(showPalette(_:)))
 
@@ -668,12 +680,13 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         walkChip.onOpen = { [weak self] in self?.showMap() }
         let deviceCluster = group([deviceButton, divider()] + deviceButtons)
-        let captureCluster = group([shot, divider(), recordButton])
-        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, walkChip, mirrorButton, group(layoutButtons), captureCluster, commands])
+        let captureCluster = group([shot, divider(), recordButton, saveRecordButton])
+        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, walkChip, exitMatrixButton, mirrorButton, group(layoutButtons), captureCluster, commands])
         bar.spacing = 8
         bar.setHuggingPriority(.init(1), for: .horizontal)
         bar.setHuggingPriority(.init(1), for: .vertical)
-        bar.edgeInsets = NSEdgeInsets(top: 0, left: 76, bottom: 0, right: 8)   // the window's own buttons sit on the glass's left
+        headerBar = bar
+        updateHeaderInset()
         bar.translatesAutoresizingMaskIntoConstraints = false
         // A narrow window drops the buttons it can do without (each is in the menus and ⌘K too), then clips, rather
         // than the bar holding the window wide.
@@ -792,20 +805,24 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         agentHost.isHidden = true
         testsPane.isHidden = true
         testsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+        testsPane.onClose = { [weak self] in self?.setShowingTests(false) }
         testsPane.follow(selected)
         testsLeading = testsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         diagnosticsPane.isHidden = true
         wireDiagnostics()
+        diagnosticsPane.onClose = { [weak self] in self?.setShowingDiagnostics(false) }
         diagnosticsLeading = diagnosticsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         recordingsPane.isHidden = true
         recordingsPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
         recordingsPane.onOpenTrace = { [weak self] file in self?.view(recording: file) }
+        recordingsPane.onClose = { [weak self] in self?.setShowingRecordings(false) }
         recordingsLeading = recordingsPane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         devicePane.targets = { [weak self] in
             guard let self else { return [] }
             return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
         }
         devicePane.onOverridesChange = { [weak self] in self?.refreshOverrides() }
+        devicePane.onClose = { [weak self] in self?.setShowingDevice(false) }
         deviceLeading = devicePane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         inspectorLeading = inspectorView.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         agentLeading = agentHost.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
@@ -922,7 +939,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
     }
 
-    private func updateChrome() {
+    func updateChrome() {
         guard appChip != nil else { return }
         let alive = Engine.shared.simulators.filter(\.isAlive).count
         if let sim = selected {
@@ -946,6 +963,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         deviceButton.title = kind
         deviceButton.isEnabled = live != nil
         for b in deviceButtons { b.isEnabled = live != nil }
+        exitMatrixButton?.isHidden = matrixSims.isEmpty
         mirrorButton.isOn = mirror
         mirrorButton.title = mirror ? "Mirroring" : "Mirror"
         mirrorButton.isHidden = alive < 2 && !mirror
@@ -954,8 +972,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         layoutButtons[2].isOn = comparing
         for b in layoutButtons.dropFirst() { b.isEnabled = alive > 1 || sideBySide }
         recordButton.isOn = isRecording
-        recordButton.title = isRecording ? "Rec" : ""
+        if isRecording, let sim = selected, let start = recordingStarted[ObjectIdentifier(sim)] {
+            let secs = max(0, Int(Date().timeIntervalSince(start)))
+            recordButton.title = String(format: "%d:%02d", secs / 60, secs % 60)
+        } else {
+            recordButton.title = isRecording ? "0:00" : ""
+        }
         recordButton.isEnabled = live != nil
+        saveRecordButton?.isHidden = !isRecording
         railButtons["inspect"]?.isOn = inspecting
         railButtons["dock"]?.isOn = showingBottomDock
         railButtons["network"]?.isOn = showingNetwork
@@ -984,7 +1008,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     private func installSnapshotReview(in host: NSView) {
         snapshotReview.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(snapshotReview, positioned: .below, relativeTo: scrim)
+        host.addSubview(snapshotReview, positioned: .below, relativeTo: rail)
         NSLayoutConstraint.activate([snapshotReview.topAnchor.constraint(equalTo: host.topAnchor), snapshotReview.bottomAnchor.constraint(equalTo: host.bottomAnchor),
                                      snapshotReview.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(snapshotReview.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         snapshotReview.defaultAPK = { [weak self] in self?.selected?.apk }
@@ -1084,7 +1108,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     private func installChangesSheet(in host: NSView) {
         changesSheet.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(changesSheet, positioned: .below, relativeTo: scrim)
+        host.addSubview(changesSheet, positioned: .below, relativeTo: rail)
         NSLayoutConstraint.activate([changesSheet.topAnchor.constraint(equalTo: host.topAnchor), changesSheet.bottomAnchor.constraint(equalTo: host.bottomAnchor),
                                      changesSheet.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(changesSheet.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         changesSheet.controller = sessions
@@ -1305,17 +1329,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         // Apps.
         add("open", "Open APK…", "App", "folder", "⌘O") { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
-        add("compare.apk", "Compare with another build…", "App", "plusminus", "⇧⌘O") { [weak self] in self?.compareWithAPK(nil) }
+        add("compare.apk", "Compare with another build…", "App", "square.on.square.dashed", "⇧⌘O") { [weak self] in self?.compareWithAPK(nil) }
         add("matrix", "Matrix wall: every device, appearance, language and text size", "App", "square.grid.3x3", "⌥⌘X", keywords: "grid locale dark font rtl") { [weak self] in self?.showMatrix(nil) }
         if !matrixSims.isEmpty { add("matrix.close", "Close the matrix wall", "App", "xmark.square") { [weak self] in self?.closeMatrix(nil) } }
         let sample = Engine.shared.root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
         if FileManager.default.fileExists(atPath: sample.path) { add("open.sample", "Open the sample app", "App", "shippingbox") { [weak self] in self?.open(sample) } }
-        for style in AppIconStyle.allCases {
-            add("icon." + style.rawValue, "App icon: \(style.title)", "App", "app.badge", keywords: "app icon dock theme appearance \(style.title)") { [weak self] in
-                AppIcon.current = style
-                self?.toast.show("App icon: \(style.title)")
-            }
-        }
         for url in Recents.all.prefix(8) {
             add("open." + url.path, "Open " + url.deletingPathExtension().lastPathComponent, "Recent", "clock.arrow.circlepath", keywords: url.path) { [weak self] in self?.open(url) }
         }
@@ -1344,8 +1362,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             if grid.canTidy {
                 add("tidy", "Tidy up the simulators", "Device", "square.grid.2x2", keywords: "arrange layout tile reset size") { [weak self] in self?.tidyUp(nil) }
             }
-            setting("dark", "Dark appearance", "moon", "appearance dark", keywords: "night theme")
-            setting("light", "Light appearance", "sun.max", "appearance light", keywords: "day theme")
+            setting("dark", "Dark appearance", "moon", "appearance dark", keywords: "dark mode night theme")
+            setting("light", "Light appearance", "sun.max", "appearance light", keywords: "light mode day theme")
             for (d, _) in [("phone", 0), ("foldable", 0), ("pixel-10-pro-fold", 0), ("watch", 0), ("tablet", 0), ("desktop", 0), ("tv", 0)] {
                 setting("device." + d, "Switch to \(Self.title(d))", "iphone.gen3", "device \(d)", keywords: "device size form factor")
                 add("beside." + d, "Open beside as \(Self.title(d))", "Device", "rectangle.split.2x1", keywords: "another second") { [weak self] in
@@ -1391,7 +1409,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         // Layout and panes.
         add("layout.one", "Show one device", "View", "iphone") { [weak self] in self?.setSideBySide(false) }
         add("layout.all", "Show every device side by side", "View", "rectangle.split.2x1", "⌘\\") { [weak self] in self?.showAll(nil) }
-        add("compare", comparing ? "Stop comparing" : "Compare the devices", "View", "plusminus", "⇧⌘D") { [weak self] in self?.toggleCompare(nil) }
+        add("compare", comparing ? "Stop comparing" : "Compare the devices", "View", "square.on.square.dashed", "⇧⌘D") { [weak self] in self?.toggleCompare(nil) }
         add("mirror", mirror ? "Stop mirroring input" : "Mirror input to every device", "View", "dot.radiowaves.left.and.right", "⇧⌘M") { [weak self] in self?.toggleMirror(nil) }
         add("pane.device", showingDevice ? "Hide device controls" : "Show device controls", "Panes", "slider.horizontal.3") { [weak self] in self?.toggleDevicePane(nil) }
         add("pane.diagnostics", showingDiagnostics ? "Hide diagnostics" : "Show diagnostics", "Panes", "stethoscope", keywords: "performance fps memory cpu accessibility background clipboard skin") { [weak self] in self?.toggleDiagnostics(nil) }
@@ -1422,6 +1440,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             .sorted { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
         for f in newest.prefix(6) {
             add("recording." + f.lastPathComponent, "Open recording " + f.deletingPathExtension().lastPathComponent, "Recordings", "film", keywords: "replay trace") { [weak self] in self?.view(recording: f) }
+        }
+        for style in AppIconStyle.allCases {
+            add("icon." + style.rawValue, "App icon: \(style.title)", "App", "app.badge", keywords: "app icon dock \(style.title)") { [weak self] in
+                AppIcon.current = style
+                self?.toast.show("App icon: \(style.title)")
+            }
         }
         return out
     }
@@ -1585,6 +1609,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         timeline.onSave = { [weak self] in self?.saveRecordingAndShow(nil) }
         networkPane.onSay = { [weak self] text, problem in self?.toast.show(text, problem: problem) }
+        networkPane.onClose = { [weak self] in self?.setShowingNetwork(false) }
         timeline.onClose = { [weak self] in self?.setBottomDock(false) }
         logPanel.onErrorCount = { [weak self] count in
             self?.logErrorCount = count
@@ -1607,9 +1632,16 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             self.updateChrome()
         }
         bottomDock.onHighlightDiff = { [weak self] item in
-            guard let self, let sim = self.selected else { return }
-            self.grid.view(for: sim)?.outlined = item?.rect
+            guard let self else { return }
+            for v in self.grid.views { v.outlined = nil }
+            guard let item, let target = item.simulator ?? self.selected else { return }
+            self.grid.view(for: target)?.outlined = item.rect
         }
+    }
+
+    private func updateHeaderInset() {
+        let collapsed = splitController?.splitViewItems.first?.isCollapsed ?? false
+        headerBar?.edgeInsets = NSEdgeInsets(top: 0, left: collapsed ? 76 : 8, bottom: 0, right: 8)
     }
 
     private static let sidebarHiddenKey = "sidebarHidden"
@@ -1619,6 +1651,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         guard let item = splitController.splitViewItems.first, item.isCollapsed else { return }
         item.animator().isCollapsed = false
         UserDefaults.standard.set(false, forKey: Self.sidebarHiddenKey)
+        updateHeaderInset()
     }
 
     @objc func addRepository(_ sender: Any?) { sessions.chooseRepository() }
@@ -1628,6 +1661,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let hide = !item.isCollapsed
         item.animator().isCollapsed = hide
         UserDefaults.standard.set(hide, forKey: Self.sidebarHiddenKey)   // remembered: the next window opens the same way
+        updateHeaderInset()
     }
 
     @objc private func showOne(_ sender: Any?) { setSideBySide(false) }
@@ -1706,6 +1740,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
         status.font = .systemFont(ofSize: 11)
         status.textColor = .tertiaryLabelColor
+        status.alignment = .left
+        status.lineBreakMode = .byWordWrapping
         status.maximumNumberOfLines = 4
 
         let view = NSView()
@@ -1804,15 +1840,16 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .pull(let pull):
             return sessions.pullCell(pull)
         case .simulator(let sim):
+            let kind = sim.options.firstIndex(of: "--device").flatMap { i in i + 1 < sim.options.count ? Self.title(sim.options[i + 1]) : nil } ?? "Phone"
             let detail: String
             let symbol: String
             switch sim.state {
-            case .starting: detail = "Starting…"; symbol = "circle.dotted"
+            case .starting: detail = "\(kind) · Starting…"; symbol = "circle.dotted"
             case .running:
                 let size = sim.deviceSize
-                detail = size.width > 0 ? "Running · \(Int(size.width))×\(Int(size.height))" : "Running"
+                detail = size.width > 0 ? "\(kind) · \(Int(size.width))×\(Int(size.height))" : "\(kind) · Running"
                 symbol = "play.circle.fill"
-            case .ended(let code): detail = code == 0 ? "Quit" : "Ended (exit \(code))"; symbol = "stop.circle"
+            case .ended(let code): detail = code == 0 ? "\(kind) · Quit" : "\(kind) · Ended (exit \(code))"; symbol = "stop.circle"
             }
             let title = sim.effectiveLabel
             let rowView = cell(symbol: symbol, tint: sim.state == .running ? .systemGreen : .secondaryLabelColor, title: title, detail: detail)
@@ -2095,9 +2132,35 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         sim.send(on ? "rec on all" : "rec off all") { [weak self] answer in
             guard let self else { return }
             if answer.hasPrefix("error") { self.toast.show("Recorder: " + answer.replacingOccurrences(of: "error: ", with: ""), problem: true); return }
-            if on { self.recording.insert(key) } else { self.recording.remove(key) }
+            if on {
+                self.recording.insert(key)
+                self.recordingStarted[key] = Date()
+            } else {
+                self.recording.remove(key)
+                self.recordingStarted.removeValue(forKey: key)
+            }
+            self.updateRecordTimer()
             self.toast.show(on ? "Recording \(sim.name): input, log, network and screen" : "Recording stopped")
             self.updateChrome()
+        }
+    }
+
+    private func updateRecordTimer() {
+        if recording.isEmpty {
+            recordTimer?.invalidate()
+            recordTimer = nil
+        } else if recordTimer == nil {
+            recordTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                let aliveKeys = Set(Engine.shared.simulators.filter(\.isAlive).map(ObjectIdentifier.init))
+                self.recording.formIntersection(aliveKeys)
+                self.recordingStarted = self.recordingStarted.filter { aliveKeys.contains($0.key) }
+                if self.recording.isEmpty {
+                    self.recordTimer?.invalidate()
+                    self.recordTimer = nil
+                }
+                self.updateChrome()
+            }
         }
     }
 
@@ -2209,7 +2272,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             setBottomDock(true, tab: .compare)
         } else {
             for v in grid.views { v.boxes = []; v.areas = [] }
-            bottomDock.setCompareSummary(text: "", items: [], counts: (0, 0))
+            bottomDock.setCompareSummary(text: "", items: [], counts: (0, 0, 0))
             if showingBottomDock && bottomDock.activeTab == .compare { setBottomDock(false) }
         }
         reload()
@@ -2250,7 +2313,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             guard self.comparing, let base = self.live, running.count > 1 else {
                 self.compareScheduled = false
                 if self.comparing {
-                    self.bottomDock.setCompareSummary(text: "Compare: open a second simulator (File > Compare With APK…, or the device menu's Open Beside As).", items: [], counts: (0, 0))
+                    self.bottomDock.setCompareSummary(text: "Compare: open a second simulator (File > Compare With APK…, or the device menu's Open Beside As).", items: [], counts: (0, 0, 0))
                 }
                 return
             }
@@ -2270,7 +2333,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         var baseBoxes: [CGRect] = []
         var text: [String] = []
         var diffItems: [CompareDiffItem] = []
-        var totalAdded = 0, totalMoved = 0
+        var totalAdded = 0, totalRemoved = 0, totalMoved = 0
         func rect(_ n: ScreenNode) -> CGRect { CGRect(x: n.left, y: n.top, width: n.right - n.left, height: n.bottom - n.top) }
         for (other, c) in results {
             baseBoxes += c.onlyA.map(rect) + c.moved.map { rect($0.a) }
@@ -2278,25 +2341,32 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 v.boxes = c.onlyB.map(rect) + c.moved.map { rect($0.b) }
                 v.areas = c.cells
             }
-            totalAdded += c.onlyA.count + c.onlyB.count
+            totalAdded += c.onlyA.count
+            totalRemoved += c.onlyB.count
             totalMoved += c.moved.count
-            for n in c.onlyA.prefix(6) {
-                diffItems.append(CompareDiffItem(symbol: "+", title: n.label.isEmpty ? "(unlabeled)" : n.label, detail: "Only in \(base.name)", rect: rect(n), isAdded: true))
+            var baseLabel = base.effectiveLabel
+            var otherLabel = other.effectiveLabel
+            if baseLabel == otherLabel {
+                baseLabel += " (base)"
+                otherLabel += " (compare)"
             }
-            for n in c.onlyB.prefix(6) {
-                diffItems.append(CompareDiffItem(symbol: "−", title: n.label.isEmpty ? "(unlabeled)" : n.label, detail: "Only in \(other.name)", rect: rect(n), isAdded: false))
+            for n in c.onlyA.prefix(12) {
+                diffItems.append(CompareDiffItem(symbol: "+", title: n.label.isEmpty ? "(unlabeled)" : n.label, detail: "Only in \(baseLabel)", rect: rect(n), isAdded: true, simulator: base))
             }
-            for pair in c.moved.prefix(6) {
+            for n in c.onlyB.prefix(12) {
+                diffItems.append(CompareDiffItem(symbol: "−", title: n.label.isEmpty ? "(unlabeled)" : n.label, detail: "Only in \(otherLabel)", rect: rect(n), isAdded: false, simulator: other))
+            }
+            for pair in c.moved.prefix(12) {
                 let dx = pair.b.left - pair.a.left, dy = pair.b.top - pair.a.top
-                diffItems.append(CompareDiffItem(symbol: "↔", title: pair.a.label.isEmpty ? "(unlabeled)" : pair.a.label, detail: "Moved (\(dx >= 0 ? "+\(dx)" : "\(dx)"), \(dy >= 0 ? "+\(dy)" : "\(dy)")) px", rect: rect(pair.a), isAdded: false))
+                diffItems.append(CompareDiffItem(symbol: "↔", title: pair.a.label.isEmpty ? "(unlabeled)" : pair.a.label, detail: "Moved (\(dx >= 0 ? "+\(dx)" : "\(dx)"), \(dy >= 0 ? "+\(dy)" : "\(dy)")) px", rect: rect(pair.a), isAdded: false, simulator: base))
             }
             let size = other.deviceSize
-            text.append("\(base.name) → \(other.name) \(Int(size.width))×\(Int(size.height)): \(c.summary)")
+            text.append("\(baseLabel) → \(otherLabel) \(Int(size.width))×\(Int(size.height)): \(c.summary)")
             text += c.lines(limit: 5).map { "  " + $0 }
         }
         grid.view(for: base)?.boxes = baseBoxes
         grid.view(for: base)?.areas = []
-        bottomDock.setCompareSummary(text: text.joined(separator: "\n"), items: diffItems, counts: (totalAdded, totalMoved))
+        bottomDock.setCompareSummary(text: text.joined(separator: "\n"), items: diffItems, counts: (totalAdded, totalRemoved, totalMoved))
     }
 
     @objc func toggleSideBySide(_ sender: Any?) { if !sideBySide { Reports.shared.count(.sideBySide) }; setSideBySide(!sideBySide) }

@@ -3,11 +3,11 @@ import AppKit
 /// The chosen simulator's log as it is written: the app's android.util.Log lines and the engine's own.
 final class LogPanel: NSView, NSSearchFieldDelegate {
     private enum LevelFilter: Int, CaseIterable {
-        case all, error, warn, info
+        case all, error, warn, info, debug
     }
 
     private enum Severity {
-        case error, warn, info, other
+        case error, warn, info, debug, other
     }
 
     private let text = NSTextView()
@@ -17,6 +17,7 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
     private var errorButton: GlassButton!
     private var warnButton: GlassButton!
     private var infoButton: GlassButton!
+    private var debugButton: GlassButton!
     private var activeFilter: LevelFilter = .all
 
     private var lines: [String] = []
@@ -29,6 +30,7 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
     private static let monoFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
     private static let errorColor = NSColor(srgbRed: 1.0, green: 0.482, blue: 0.447, alpha: 1) // #FF7B72
     private static let infoColor = NSColor(srgbRed: 0.576, green: 0.773, blue: 0.992, alpha: 1)  // #93C5FD
+    private static let debugColor = Design.mute
     private static let defaultColor = Design.ink.withAlphaComponent(0.85)
 
     /// Fired on the main queue whenever the number of error/fatal (`E`/`F`) lines changes.
@@ -57,6 +59,7 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
         errorButton = makeFilterButton(title: "Errors", label: "Show error log lines", filter: .error)
         warnButton = makeFilterButton(title: "Warn", label: "Show warning log lines", filter: .warn)
         infoButton = makeFilterButton(title: "Info", label: "Show info log lines", filter: .info)
+        debugButton = makeFilterButton(title: "Debug", label: "Show debug log lines", filter: .debug)
 
         filter.placeholderString = "Filter tag or text"
         filter.controlSize = .small
@@ -73,7 +76,7 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
 
-        let topBar = NSStackView(views: [allButton, errorButton, warnButton, infoButton, spacer, filter, clearButton, copyButton])
+        let topBar = NSStackView(views: [allButton, errorButton, warnButton, infoButton, debugButton, spacer, filter, clearButton, copyButton])
         topBar.orientation = .horizontal
         topBar.alignment = .centerY
         topBar.spacing = 6
@@ -176,6 +179,8 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
             levelFiltered = lines.filter { Self.severity(of: $0) == .warn }
         case .info:
             levelFiltered = lines.filter { Self.severity(of: $0) == .info }
+        case .debug:
+            levelFiltered = lines.filter { Self.severity(of: $0) == .debug }
         }
         let q = filter.stringValue
         return q.isEmpty ? levelFiltered : levelFiltered.filter { $0.localizedCaseInsensitiveContains(q) }
@@ -193,6 +198,9 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
         if line.contains(" I/") || line.contains(" I ") || line.hasPrefix("I/") {
             return .info
         }
+        if line.contains(" D/") || line.contains(" D ") || line.hasPrefix("D/") {
+            return .debug
+        }
         return .other
     }
 
@@ -201,21 +209,23 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
         case .error: return errorColor
         case .warn: return Design.warning
         case .info: return infoColor
+        case .debug: return debugColor
         case .other: return defaultColor
         }
     }
 
-    private func levelCounts() -> (all: Int, error: Int, warn: Int, info: Int) {
-        var e = 0, w = 0, i = 0
+    private func levelCounts() -> (all: Int, error: Int, warn: Int, info: Int, debug: Int) {
+        var e = 0, w = 0, i = 0, d = 0
         for line in lines {
             switch Self.severity(of: line) {
             case .error: e += 1
             case .warn: w += 1
             case .info: i += 1
+            case .debug: d += 1
             case .other: break
             }
         }
-        return (lines.count, e, w, i)
+        return (lines.count, e, w, i, d)
     }
 
     private func notifyErrorCountIfNeeded() {
@@ -235,11 +245,13 @@ final class LogPanel: NSView, NSSearchFieldDelegate {
         errorButton.title = c.error > 0 ? "Errors (\(c.error))" : "Errors"
         warnButton.title = c.warn > 0 ? "Warn (\(c.warn))" : "Warn"
         infoButton.title = c.info > 0 ? "Info (\(c.info))" : "Info"
+        debugButton.title = c.debug > 0 ? "Debug (\(c.debug))" : "Debug"
 
         allButton.isOn = activeFilter == .all
         errorButton.isOn = activeFilter == .error
         warnButton.isOn = activeFilter == .warn
         infoButton.isOn = activeFilter == .info
+        debugButton.isOn = activeFilter == .debug
     }
 
     private func render() {

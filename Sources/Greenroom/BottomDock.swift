@@ -7,6 +7,7 @@ struct CompareDiffItem {
     let detail: String
     let rect: CGRect?
     let isAdded: Bool
+    weak var simulator: Simulator? = nil
 }
 
 /// Unified bottom dock hosting the Log, Timeline, and Compare tabs over frosted glass, with a drag-resize top handle.
@@ -152,8 +153,9 @@ final class BottomDock: NSView {
         refreshTabTitles()
     }
 
-    func setCompareSummary(text: String, items: [CompareDiffItem], counts: (added: Int, moved: Int)) {
-        compareDiffCount = !items.isEmpty ? items.count : (counts.added + counts.moved)
+    func setCompareSummary(text: String, items: [CompareDiffItem], counts: (added: Int, removed: Int, moved: Int)) {
+        let total = counts.added + counts.removed + counts.moved
+        compareDiffCount = total > 0 ? total : items.count
         compareView.update(text: text, items: items, counts: counts)
         refreshTabTitles()
     }
@@ -235,6 +237,7 @@ final class CompareTabView: NSView {
     var onSelect: ((CompareDiffItem?) -> Void)?
 
     private let addedPill = ComparePillView(color: Design.accent)
+    private let removedPill = ComparePillView(color: Design.record)
     private let movedPill = ComparePillView(color: Design.warning)
     private let emptyLabel = NSTextField(wrappingLabelWithString: "No differences yet. Compare two screens to inspect layout changes.")
     private let scroll = NSScrollView()
@@ -242,6 +245,7 @@ final class CompareTabView: NSView {
     private let stack = NSStackView()
 
     private var rows: [CompareDiffRow] = []
+    private var footerLabel: NSTextField?
     private var selectedIndex: Int?
 
     override init(frame: NSRect) {
@@ -251,7 +255,7 @@ final class CompareTabView: NSView {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
 
-        let header = NSStackView(views: [addedPill, movedPill, spacer])
+        let header = NSStackView(views: [addedPill, removedPill, movedPill, spacer])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
@@ -306,20 +310,22 @@ final class CompareTabView: NSView {
             emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
         ])
 
-        update(text: "", items: [], counts: (added: 0, moved: 0))
+        update(text: "", items: [], counts: (added: 0, removed: 0, moved: 0))
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func update(text: String, items: [CompareDiffItem], counts: (added: Int, moved: Int)) {
+    func update(text: String, items: [CompareDiffItem], counts: (added: Int, removed: Int, moved: Int)) {
         plainSummary = text
         selectedIndex = nil
 
         addedPill.text = "+\(counts.added) added"
+        removedPill.text = "−\(counts.removed) removed"
         movedPill.text = "↔ \(counts.moved) moved"
 
         for row in rows { stack.removeArrangedSubview(row); row.removeFromSuperview() }
         rows = []
+        if let f = footerLabel { stack.removeArrangedSubview(f); f.removeFromSuperview(); footerLabel = nil }
 
         for (index, item) in items.enumerated() {
             let row = CompareDiffRow(item: item)
@@ -327,6 +333,16 @@ final class CompareTabView: NSView {
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             rows.append(row)
+        }
+
+        let total = counts.added + counts.removed + counts.moved
+        if total > items.count && !items.isEmpty {
+            let more = total - items.count
+            let label = NSTextField(labelWithString: "+ \(more) more difference\(more == 1 ? "" : "s")")
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = Design.mute
+            stack.addArrangedSubview(label)
+            footerLabel = label
         }
 
         let isEmpty = items.isEmpty

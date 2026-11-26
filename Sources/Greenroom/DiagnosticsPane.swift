@@ -15,6 +15,7 @@ final class DiagnosticsPane: NSView {
     /// The text a device's caption appends (its live fps), or nil.
     var onChip: ((Simulator, String?) -> Void)?
     var onSay: ((String, Bool) -> Void)?
+    var onClose: (() -> Void)?
     private(set) weak var simulator: Simulator?
     /// "Show on devices": each device's caption shows its fps.
     private(set) var showOnDevices = false
@@ -79,13 +80,15 @@ final class DiagnosticsPane: NSView {
         chipButton.font = .systemFont(ofSize: 12, weight: .medium)
         chipButton.layer?.cornerRadius = 13
         chipButton.onPress = { [weak self] in self?.setShowOnDevices(!(self?.showOnDevices ?? false)) }
-        let head = NSStackView(views: [title, spacer, chipButton])
+        let close = GlassButton(symbol: "xmark", label: "Close Diagnostics", style: .plain, target: self, action: #selector(closePressed))
+        close.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        let head = NSStackView(views: [title, spacer, chipButton, close])
         head.spacing = 8
 
         stack.orientation = .vertical
         stack.alignment = .width
         stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 20, right: 0)
         buildCards()
 
         let doc = DiagFlipped()
@@ -97,11 +100,12 @@ final class DiagnosticsPane: NSView {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         doc.translatesAutoresizingMaskIntoConstraints = false
+        let scrollFade = ScrollFadeOverlay(scrollView: scroll)
         answer.font = .systemFont(ofSize: 12)
         answer.textColor = Design.mute
         answer.maximumNumberOfLines = 2
         answer.alphaValue = 0
-        for v in [head, scroll, answer] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        for v in [head, scroll, scrollFade, answer] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -112,6 +116,10 @@ final class DiagnosticsPane: NSView {
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             scroll.bottomAnchor.constraint(equalTo: answer.topAnchor, constant: -6),
+            scrollFade.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            scrollFade.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            scrollFade.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            scrollFade.heightAnchor.constraint(equalToConstant: 26),
             answer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             answer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             answer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
@@ -302,7 +310,9 @@ final class DiagnosticsPane: NSView {
     static func parseAudit(_ reply: String) -> (String, [Finding]) {
         let line = reply.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let colon = line.range(of: ": "), line.contains("issue") else { return (line.isEmpty ? "No answer" : line.prefix(1).uppercased() + line.dropFirst() + ".", []) }
-        let head = String(line[..<colon.lowerBound])
+        var head = String(line[..<colon.lowerBound])
+        head = head.replacingOccurrences(of: "1 issue(s)", with: "1 issue")
+        head = head.replacingOccurrences(of: "issue(s)", with: "issues")
         var found: [Finding] = []
         for item in line[colon.upperBound...].components(separatedBy: " ; ") {
             guard let r = item.range(of: #"^\s*\[(-?\d+),(-?\d+),(-?\d+),(-?\d+)\]\s*"#, options: .regularExpression) else { continue }
@@ -460,7 +470,10 @@ final class DiagnosticsPane: NSView {
     private func setClipboard() {
         let text = clipboardField.stringValue
         guard !text.isEmpty else { return }
-        send("clipboard set " + text.replacingOccurrences(of: "\n", with: " "))
+        simulator?.send("clipboard set " + text.replacingOccurrences(of: "\n", with: " ")) { [weak self] reply in
+            let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            self?.show(answer: trimmed.lowercased() == "ok" ? "Clipboard updated" : reply)
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.refreshClipboard() }
     }
 
@@ -608,6 +621,7 @@ final class DiagnosticsPane: NSView {
     }
 
     @objc private func clipboardEntered() { setClipboard() }
+    @objc private func closePressed() { onClose?() }
 
     private func addCard(_ c: NSView) {
         stack.addArrangedSubview(c)
