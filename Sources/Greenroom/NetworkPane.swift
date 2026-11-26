@@ -31,6 +31,7 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
     private(set) var rules: [[String: Any]] = []
     /// Called whenever the active mock/patch rule count changes.
     var onRulesChange: ((Int) -> Void)?
+    var onClose: (() -> Void)?
     private var actionButtons: [GlassButton] = []
     private var selectedEvent: NetEvent?
     private var ruleTimer: Timer?
@@ -149,7 +150,9 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let top = NSStackView(views: [title, count, spacer] + conditionButtons)
+        let close = GlassButton(symbol: "xmark", label: "Close Network", style: .plain, target: self, action: #selector(closePressed))
+        close.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        let top = NSStackView(views: [title, count, spacer] + conditionButtons + [close])
         top.spacing = 4
         let rulesTitle = NSTextField(labelWithString: "Rules")
         rulesTitle.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -478,7 +481,8 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
             else if status > 0 { what = "answers \(status)" }
             else { what = "+\((r["latencyMs"] as? Int ?? 0) / 1000) s" }
             let pattern = (r["pattern"] as? String ?? "").replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
-            let label = NSTextField(labelWithString: "\(r["method"] as? String ?? "*") \(pattern)  →  \(what)  ·  \(r["hits"] as? Int ?? 0) hits")
+            let hits = r["hits"] as? Int ?? 0
+            let label = NSTextField(labelWithString: "\(r["method"] as? String ?? "*") \(pattern)  →  \(what)  ·  \(hits) hit\(hits == 1 ? "" : "s")")
             label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
             label.textColor = Design.ink
             label.lineBreakMode = .byTruncatingMiddle
@@ -507,6 +511,8 @@ final class NetworkPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSS
     @objc private func clearRules(_ sender: Any?) {
         simulator?.send("network rule clear") { [weak self] _ in self?.refreshRules() }
     }
+
+    @objc private func closePressed() { onClose?() }
 
     @objc private func tabPicked(_ sender: GlassButton) {
         tab = sender.tag

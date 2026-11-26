@@ -270,6 +270,7 @@ extension Workbench {
         let cells = matrix.cells
         guard !cells.isEmpty else { done?([]); return }
         beforeMatrix = (sideBySide, mirror)
+        stage.ignoreSavedArrangement = true
         for cell in cells {
             guard let sim = open(apk, remember: false, options: cell.options, fromAgent: true) else { continue }
             sim.cellLabel = cell.label
@@ -278,6 +279,7 @@ extension Workbench {
         if let sim = matrixSims.first { select(sim) }
         setSideBySide(true)
         setMirror(true)
+        updateChrome()
         done?(matrixSims)
     }
 
@@ -286,12 +288,14 @@ extension Workbench {
         matrixGeneration += 1
         let sims = matrixSims
         matrixSims = []
+        stage.ignoreSavedArrangement = false
         for sim in sims { Engine.shared.close(sim) }
         if let before = beforeMatrix {
             beforeMatrix = nil
             setMirror(before.mirror)
             setSideBySide(before.sideBySide)
         }
+        updateChrome()
     }
 
     /// A cell relaunched (adb, the debugger, a network recording turned on) keeps its place, caption and rate.

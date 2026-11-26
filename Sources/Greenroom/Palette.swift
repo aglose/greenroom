@@ -180,15 +180,22 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
             shown = used + items.filter { i in !used.contains { $0.id == i.id } }
         } else {
             shown = items.compactMap { item -> (PaletteItem, Int)? in
-                // Keywords count only where they contain the typed text as it was typed (an app's path holds every letter).
-                let keyword: Int? = item.keywords.lowercased().split(separator: " ").contains { $0.hasPrefix(q.lowercased()) } ? 20 : nil
-                let best = [Self.score(q, item.title), keyword].compactMap { $0 }.max()
+                // Keywords: word-prefix matches rank higher; non-Recent items also allow fuzzy subsequence matching
+                // (so "dkm" finds "dark mode" while an APK path in Recent won't match arbitrary letters).
+                let ql = q.lowercased()
+                let kwPrefix: Int? = item.keywords.lowercased().split(separator: " ").contains { $0.hasPrefix(ql) } ? 20 : nil
+                let kwFuzzy: Int? = (kwPrefix == nil && item.group != "Recent" && !item.keywords.isEmpty)
+                    ? Self.score(q, item.keywords).map { max(1, $0 - 8) }
+                    : nil
+                let best = [Self.score(q, item.title), kwPrefix, kwFuzzy].compactMap { $0 }.max()
                 guard let s = best else { return nil }
                 let boost = recent.firstIndex(of: item.id).map { max(0, 6 - $0) } ?? 0
                 return (item, s + boost)
             }.sorted { $0.1 > $1.1 }.map(\.0)
         }
         none.isHidden = !shown.isEmpty
+        let rowsHeight = shown.isEmpty ? 64 : CGFloat(min(shown.count, 9)) * 38
+        height.constant = min(440, max(150, 96 + rowsHeight))
         table.reloadData()
         if !shown.isEmpty { table.selectRowIndexes([0], byExtendingSelection: false); table.scrollRowToVisible(0) }
     }

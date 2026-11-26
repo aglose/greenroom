@@ -12,6 +12,7 @@ final class DevicePane: NSView {
     var onToAllChange: ((Bool) -> Void)?
     /// Called whenever a device override changes so the stage can update its active override pills.
     var onOverridesChange: (() -> Void)?
+    var onClose: (() -> Void)?
 
     struct ActiveOverride {
         let id: String
@@ -87,13 +88,15 @@ final class DevicePane: NSView {
         applies.textColor = Design.mute
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let head = NSStackView(views: [title, spacer, applies, Self.well([toAllButtons.0, toAllButtons.1])])
+        let close = GlassButton(symbol: "xmark", label: "Close Device Controls", style: .plain, target: self, action: #selector(closePressed))
+        close.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        let head = NSStackView(views: [title, spacer, applies, Self.well([toAllButtons.0, toAllButtons.1]), close])
         head.spacing = 8
 
         stack.orientation = .vertical
         stack.alignment = .width
         stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 20, right: 0)
         buildCards()
 
         let doc = FlippedView()
@@ -105,11 +108,12 @@ final class DevicePane: NSView {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         doc.translatesAutoresizingMaskIntoConstraints = false
+        let scrollFade = ScrollFadeOverlay(scrollView: scroll)
         answer.font = .systemFont(ofSize: 12)
         answer.textColor = Design.mute
         answer.maximumNumberOfLines = 2
         answer.alphaValue = 0
-        for v in [head, scroll, answer] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        for v in [head, scroll, scrollFade, answer] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -120,6 +124,10 @@ final class DevicePane: NSView {
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             scroll.bottomAnchor.constraint(equalTo: answer.topAnchor, constant: -6),
+            scrollFade.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            scrollFade.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            scrollFade.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            scrollFade.heightAnchor.constraint(equalToConstant: 26),
             answer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             answer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             answer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
@@ -181,6 +189,7 @@ final class DevicePane: NSView {
 
     @objc private func pickSelected() { toAll = false; onToAllChange?(false); refresh() }
     @objc private func pickAll() { toAll = true; onToAllChange?(true); refresh() }
+    @objc private func closePressed() { onClose?() }
 
     /// Sends a command to the devices the controls change.
     private func send(_ command: String) {
@@ -588,6 +597,59 @@ private final class FlowView: NSView {
 }
 
 private final class FlippedView: NSView { override var isFlipped: Bool { true } }
+
+/// Subtle bottom fade over a scroll view that appears only while more content sits below the visible fold.
+final class ScrollFadeOverlay: NSView {
+    private let gradient = CAGradientLayer()
+    private weak var scrollView: NSScrollView?
+    private var boundsObs: NSObjectProtocol?
+    private var frameObs: NSObjectProtocol?
+
+    init(scrollView: NSScrollView) {
+        self.scrollView = scrollView
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.addSublayer(gradient)
+        gradient.colors = [
+            NSColor(srgbRed: 0.08, green: 0.085, blue: 0.10, alpha: 0.0).cgColor,
+            NSColor(srgbRed: 0.08, green: 0.085, blue: 0.10, alpha: 0.55).cgColor,
+        ]
+        gradient.startPoint = CGPoint(x: 0.5, y: 1.0)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0.0)
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        boundsObs = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
+            self?.refresh()
+        }
+        frameObs = NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView, queue: .main) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    deinit {
+        if let o = boundsObs { NotificationCenter.default.removeObserver(o) }
+        if let o = frameObs { NotificationCenter.default.removeObserver(o) }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.frame = bounds
+        CATransaction.commit()
+        refresh()
+    }
+
+    func refresh() {
+        guard let sv = scrollView, let doc = sv.documentView else { isHidden = true; return }
+        let vis = sv.documentVisibleRect
+        let hasMore = doc.bounds.height > vis.height + 6 && vis.maxY < doc.bounds.maxY - 6
+        isHidden = !hasMore
+    }
+}
 
 private final class MenuHandler: NSObject {
     static var key = 0

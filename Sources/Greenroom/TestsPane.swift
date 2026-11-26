@@ -38,6 +38,7 @@ final class TestsPane: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, N
     var onSay: ((String, Bool) -> Void)?
     /// Called on the main thread when a run ends.
     var onFinish: ((TestRun) -> Void)?
+    var onClose: (() -> Void)?
 
     private static let lastTestKey = "testsLastTestAPK"
     private static let lastFilterKey = "testsLastClassFilter"
@@ -58,7 +59,9 @@ final class TestsPane: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, N
         for b in [runButton, againButton, stopButton] { b.font = .systemFont(ofSize: 12, weight: .medium); b.heightAnchor.constraint(equalToConstant: 28).isActive = true }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let top = NSStackView(views: [title, spacer, againButton, stopButton, runButton])
+        let close = GlassButton(symbol: "xmark", label: "Close Tests", style: .plain, target: self, action: #selector(closePressed))
+        close.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        let top = NSStackView(views: [title, spacer, againButton, stopButton, runButton, close])
         top.spacing = 6
 
         func inputRow(_ name: String, _ label: NSTextField, _ pick: @escaping () -> Void) -> NSStackView {
@@ -483,6 +486,8 @@ final class TestsPane: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, N
     func controlTextDidEndEditing(_ obj: Notification) {
         UserDefaults.standard.set(filter.stringValue, forKey: Self.lastFilterKey)
     }
+
+    @objc private func closePressed() { onClose?() }
 }
 
 /// One row of the tree: a status icon, the name, and a muted time or count on the right.

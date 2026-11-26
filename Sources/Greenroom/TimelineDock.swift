@@ -3,7 +3,6 @@ import AppKit
 /// The last minute of one simulator on four tracks (touches, frames drawn, requests, log lines), live, with a
 /// playhead that can be dragged back to a moment; the network pane follows it to the request made then.
 final class TimelineDock: NSView {
-    private let glass = GlassView(radius: 18)
     private let tracks = TimelineTracks()
     private let state = NSTextField(labelWithString: "Live")
     private var liveButton: GlassButton!
@@ -17,9 +16,6 @@ final class TimelineDock: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         appearance = NSAppearance(named: .darkAqua)
-        let title = NSTextField(labelWithString: "Timeline")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.textColor = Design.ink
         state.font = .systemFont(ofSize: 12, weight: .semibold)
         let hint = NSTextField(labelWithString: "Drag to look back")
         hint.font = .systemFont(ofSize: 12)
@@ -28,20 +24,16 @@ final class TimelineDock: NSView {
         hint.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         liveButton = GlassButton(symbol: nil, title: "Back to live", label: "Follow the present again", style: .accent, target: self, action: #selector(backToLive(_:)))
         saveButton = GlassButton(symbol: "square.and.arrow.down", title: "Save recording", label: "Save what the flight recorder holds", style: .well, target: self, action: #selector(save(_:)))
-        let close = GlassButton(symbol: "chevron.down", label: "Hide the timeline", target: self, action: #selector(closeDock(_:)))
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let head = NSStackView(views: [title, state, hint, spacer, liveButton, saveButton, close])
+        let head = NSStackView(views: [state, hint, spacer, liveButton, saveButton])
         head.spacing = 10
-        head.setCustomSpacing(6, after: title)
-        for v in [glass, head, tracks] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        for v in [head, tracks] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
-            glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
-            glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            head.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            head.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            head.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            tracks.topAnchor.constraint(equalTo: head.bottomAnchor, constant: 8),
+            head.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            head.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            head.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            tracks.topAnchor.constraint(equalTo: head.bottomAnchor, constant: 6),
             tracks.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             tracks.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             tracks.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),

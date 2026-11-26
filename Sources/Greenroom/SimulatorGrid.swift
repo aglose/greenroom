@@ -38,7 +38,18 @@ final class SimulatorGrid: NSView {
     /// Whether the devices were put where they are by hand (Tidy Up undoes it).
     var isArranged: Bool { !placements.isEmpty }
     /// Whether Tidy Up would change anything on screen now.
-    var canTidy: Bool { isArranged && arrangeable }
+    var canTidy: Bool { isArranged && arrangeable && !ignoreSavedArrangement }
+    /// Set while Matrix Wall owns the stage so stale per-device placements never scramble the grid.
+    var ignoreSavedArrangement = false {
+        didSet {
+            if ignoreSavedArrangement && isArranged {
+                placements = [:]
+                stacking = []
+                gesture = nil
+                needsLayout = true
+            }
+        }
+    }
 
     func view(for sim: Simulator) -> SimulatorView? { views.first { $0.simulator === sim } }
 
@@ -164,12 +175,22 @@ final class SimulatorGrid: NSView {
             let ch = bounds.height / CGFloat(rows)
             var out: [CGRect] = []
             for row in 0..<rows {
-                let items = Array(aspects[(row * cols)..<min((row + 1) * cols, aspects.count)])
-                let total = items.reduce(0) { $0 + $1.squareRoot() }
+                let start = row * cols
+                let end = min((row + 1) * cols, aspects.count)
+                let weights = (start..<end).map { i -> CGFloat in
+                    views[i].isWatch && views.count > 1 ? min(aspects[i].squareRoot(), 0.62) : aspects[i].squareRoot()
+                }
+                let total = weights.reduce(0, +)
                 var x: CGFloat = 0
-                for a in items {
-                    let w = bounds.width * a.squareRoot() / total
-                    out.append(CGRect(x: x, y: CGFloat(row) * ch, width: w, height: ch))
+                for (offset, weight) in weights.enumerated() {
+                    let i = start + offset
+                    let w = bounds.width * weight / total
+                    var rect = CGRect(x: x, y: CGFloat(row) * ch, width: w, height: ch)
+                    if views[i].isWatch && views.count > 1 {
+                        let cap = min(rect.width, rect.height, 320)
+                        rect = CGRect(x: rect.midX - cap / 2, y: rect.midY - cap / 2, width: cap, height: cap)
+                    }
+                    out.append(rect)
                     x += w
                 }
             }
@@ -235,7 +256,8 @@ final class SimulatorGrid: NSView {
     /// arranged devices have on average; else a step down and right from the last device.
     private func freePlacement(for v: SimulatorView, avoiding taken: [CGRect]) -> Placement {
         let sizes = placements.values.map(\.longSide)
-        let longSide = sizes.isEmpty ? max(v.pictureLongSide, v.minimumLongSide) : sizes.reduce(0, +) / CGFloat(sizes.count)
+        var longSide = sizes.isEmpty ? max(v.pictureLongSide, v.minimumLongSide) : sizes.reduce(0, +) / CGFloat(sizes.count)
+        if v.isWatch { longSide = min(longSide, max(v.minimumLongSide, 240)) }
         let size = v.cell(longSide: clampedLongSide(v, longSide, within: bounds.size)).size
         let step: CGFloat = 16
         var y: CGFloat = 0
@@ -375,11 +397,15 @@ final class SimulatorGrid: NSView {
         layoutSubtreeIfNeeded()
     }
 
-    /// On a stage not arranged yet, the saved places of the devices shown, if any of them has one.
+    /// On a stage not arranged yet, the saved places of the devices shown, only when every current device matches a
+    /// saved entry (so an unrelated device mix or Matrix Wall never inherits stale overlapping coordinates).
     private func restoreSaved() {
-        guard arrangeable, !isArranged, gesture == nil,
+        guard arrangeable, !ignoreSavedArrangement, !isArranged, gesture == nil,
               let saved = UserDefaults.standard.dictionary(forKey: Self.savedKey) as? [String: [Double]], !saved.isEmpty else { return }
-        for (id, key) in keys() {
+        let currentKeys = keys()
+        guard !currentKeys.isEmpty,
+              currentKeys.values.allSatisfy({ saved[$0]?.count == 3 }) else { return }
+        for (id, key) in currentKeys {
             if let s = saved[key], s.count == 3 { placements[id] = Placement(origin: CGPoint(x: s[0], y: s[1]), longSide: s[2]) }
         }
         if isArranged { animateNext = true }

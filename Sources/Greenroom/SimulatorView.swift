@@ -364,6 +364,8 @@ final class SimulatorView: NSView {
         }
     }
 
+    var isWatch: Bool { body == .watch }
+
     func updateCaption() {
         guard let sim = simulator else { caption.attributedStringValue = NSAttributedString(); caption.toolTip = nil; return }
         let size = sim.deviceSize
@@ -466,9 +468,14 @@ final class SimulatorView: NSView {
         let ringRect = rimRect.insetBy(dx: -3, dy: -3)
         ringLayer.frame = ringRect
         ringLayer.cornerRadius = rimLayer.cornerRadius + 3
-        let cam = max(8, min(14, r.width * 0.044))
+        let cam = max(8, min(14, min(r.width, r.height) * 0.044))
         switch body {
-        case .phone: cameraLayer.frame = CGRect(x: r.midX - cam / 2, y: r.minY + cam * 0.9, width: cam, height: cam)
+        case .phone:
+            if r.width > r.height {
+                cameraLayer.frame = CGRect(x: r.minX + cam * 0.9, y: r.midY - cam / 2, width: cam, height: cam)
+            } else {
+                cameraLayer.frame = CGRect(x: r.midX - cam / 2, y: r.minY + cam * 0.9, width: cam, height: cam)
+            }
         case .fold: cameraLayer.frame = CGRect(x: r.maxX - cam * 2.6, y: r.minY + cam * 1.1, width: cam, height: cam)
         default: cameraLayer.frame = .zero
         }
