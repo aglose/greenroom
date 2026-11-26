@@ -113,6 +113,11 @@ publish() {
   done
   local dir; dir=$(mktemp -d); gh release download "$tag" --repo "$REPO" --pattern appcast.xml --dir "$dir"
   grep -q "sparkle:edSignature=" "$dir/appcast.xml" && grep -q "$v" "$dir/appcast.xml" || die "appcast does not carry $v with a signature"
+  while IFS= read -r delta; do
+    [[ -z "$delta" ]] && continue
+    grep -Fxq "$delta" <<<"$assets" || die "appcast references $delta, which is missing from the draft release"
+  done < <(grep -oE '[^/"'\'']+\.delta' "$dir/appcast.xml" | sort -u || true)
+  rm -rf "$dir"
   gh release edit "$tag" --repo "$REPO" --notes-file "$file" --draft=false
   sleep 5
   local feed; feed=$(curl -sL "https://github.com/$REPO/releases/latest/download/appcast.xml")

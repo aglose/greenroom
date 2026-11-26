@@ -56,15 +56,21 @@ NOTARY_PROFILE=greenroom scripts/dmg.sh --identity "Developer ID Application" --
    headless through the app.
 2. `scripts/dmg.sh --notarize`: sends the app to Apple's notary service and staples the ticket to it, builds the
    disk image with the app and a link to /Applications, signs the image, notarizes and staples it too (so it opens
-   on a Mac that is offline), and writes its SHA-256 beside it. The release job attaches the disk image, its SHA-256,
-   the `.dSYM.zip`, and `appcast.xml` to the draft release.
+   on a Mac that is offline), and writes its SHA-256 beside it.
+3. `scripts/appcast.sh`: downloads the last 5 published releases' DMGs and runs Sparkle's `generate_appcast` to
+   produce `appcast.xml` and binary `.delta` updates (typically ~1–2 MB instead of the full ~346 MB DMG). The release
+   job attaches the disk image, its SHA-256, the `.dSYM.zip`, `appcast.xml`, and the `.delta` files to the draft
+   release.
 
 ## Updates
 
 Installed copies read `https://github.com/aglose/greenroom/releases/latest/download/appcast.xml`: the appcast of the
-newest *published* release, which the release job builds with `generate_appcast` and attaches. A draft is invisible
-to them until it is published. `scripts/update-check.sh IDENTITY` runs an update end to end on this Mac (an old build
-installed, a new one offered by a local appcast, downloaded, verified and installed on quit).
+newest *published* release, which the release job builds with `scripts/appcast.sh` (Sparkle's `generate_appcast`) and
+attaches alongside binary `.delta` files for the previous 5 published releases. Clients on one of those releases
+download the ~1–2 MB `.delta` instead of the full disk image; older or modified copies fall back to the full `.dmg`.
+A draft is invisible to them until it is published. `scripts/update-check.sh IDENTITY` runs a delta update end to end
+on this Mac (an old build installed, a new one offered by a local appcast with a binary delta, downloaded, verified
+and installed on quit).
 
 ## Updating the engine
 
