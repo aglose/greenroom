@@ -1034,10 +1034,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         NSLayoutConstraint.activate([screenMap.topAnchor.constraint(equalTo: host.topAnchor), screenMap.bottomAnchor.constraint(equalTo: host.bottomAnchor),
                                      screenMap.leadingAnchor.constraint(equalTo: host.leadingAnchor), Self.giving(screenMap.trailingAnchor.constraint(equalTo: host.trailingAnchor))])
         screenMap.defaultAPK = { [weak self] in self?.selected?.apk }
-        screenMap.worktree = { [weak self] in self?.selected.flatMap { self?.worktree(of: $0) } }
+        screenMap.worktree = { [weak self] in
+            guard let self, let sim = self.selected else { return nil }
+            if let w = self.worktree(of: sim) { return w }
+            return self.sessions.mainBuilds.workspace(for: sim).map { self.sessions.mainBuilds.trunk(of: $0.root) }
+        }
         screenMap.signInKey = { [weak self] in
-            guard let self, let w = self.selected.flatMap({ self.worktree(of: $0) }) else { return nil }
-            return self.sessions.sessions.first { $0.worktree.path == w.path }.map { SignIns.key(workspace: $0.workspace) }
+            guard let self, let sim = self.selected else { return nil }
+            if let s = self.sessions.session(forSimulator: sim) { return SignIns.key(workspace: s.workspace) }
+            return self.sessions.mainBuilds.workspace(for: sim).map { SignIns.key(workspace: $0.root) }
         }
         screenMap.signInOnce = { [weak self] apk, key, app, done in
             guard let self else { return }
@@ -1203,7 +1208,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         changesSheet.close()
         // If this session's repository has a kept sign-in and the simulator was launched without `--biometrics auto`
         // (e.g. before signing in), relaunch it seeded from the kept sign-in so signed-in routes can actually replay.
-        let workspace = session?.workspace ?? sessions.session(forSimulator: initialSim)?.workspace
+        let workspace = session?.workspace ?? sessions.session(forSimulator: initialSim)?.workspace ?? sessions.mainBuilds.workspace(for: initialSim)?.root
         let needsSignedInRelaunch: Bool = {
             guard let ws = workspace, SignIns.shared.record(SignIns.key(workspace: ws)) != nil else { return false }
             return !initialSim.options.contains("--biometrics")

@@ -118,6 +118,26 @@ enum MapStoreCheck {
         group.wait()
         expect(blobCount() == 8, "imports from several queues at once keep one blob each")
 
+        // Stored snapshot -> ScreenMapData & ScreenMap.loadStoredMade (prefers signed-in baseline when present).
+        let signedProfile = MapProfile(signIn: "session-data")
+        var signedSnap = store.importWalk(walkA, commit: "aaaa111", tree: "tree1", profile: signedProfile, engine: "e1", walked: when)!
+        for i in signedSnap.screens.indices { signedSnap.screens[i].lineage = signedSnap.screens[i].id + "@aaaa111" }
+        expect(store.save(signedSnap), "save signed-in snapshot alongside unsigned one")
+        expect(Set(store.profiles()) == Set([profile.id, signedProfile.id]), "profiles() lists both stored profiles")
+        let apk = dir.appendingPathComponent("app.apk")
+        let ctx = MapContext(store: store, commit: "aaaa111", tree: "tree1", engine: "e1", baseline: { _ in nil }, baseBranch: "main", unsignedCounts: false)
+        let sem = DispatchSemaphore(value: 0)
+        var loaded: (ScreenMapData, ScreenMap.Made)?
+        Task {
+            loaded = await ScreenMap.loadStoredMade(context: ctx, preferred: [signedProfile], apk: apk)
+            sem.signal()
+        }
+        sem.wait()
+        expect(loaded != nil && loaded?.0.screens.count == 7 && loaded?.0.screens.allSatisfy { $0.captures.count == 1 } == true,
+               "loadStoredMade reconstructs ScreenMapData with all captures from MapStore")
+        expect(loaded?.1.source.head.profile == signedProfile && loaded?.1.filed == true && loaded?.1.baseBranch == "main" && loaded?.1.counts == true,
+               "loadStoredMade picks the signed-in main baseline snapshot")
+
         print("[greenroom] map-store check: \(ok ? "PASS" : "FAIL")")
         exit(ok ? 0 : 1)
     }

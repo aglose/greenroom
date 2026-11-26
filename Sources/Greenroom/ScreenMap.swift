@@ -141,6 +141,7 @@ final class ScreenMap: NSView {
     private var mapStore: MapStore?
     private var stored: [MapSnapshot] = []
     private var shownCompare: (head: String, base: String?)?
+    private var loadedAPK: URL?
     private var generation = 0
 
     override init(frame: NSRect) {
@@ -404,11 +405,17 @@ final class ScreenMap: NSView {
         isOpen = true
         if pythonURL == nil { pythonURL = SnapshotRun.python() }
         reloadScripts()
-        if data == nil, !isWalking, let p = pausedHere, let part = ScreenMapData.read(URL(fileURLWithPath: p.folder)) {
-            showsPaused = true
-            present(part, animated: false, live: false)
-            setSummary(Self.pausedWords(p))
-        } else if data == nil, !isWalking, let f = lastFolder, let last = ScreenMapData.read(f) { present(last, animated: false, live: false) }
+        if !isWalking {
+            if data == nil, let p = pausedHere, let part = ScreenMapData.read(URL(fileURLWithPath: p.folder)) {
+                showsPaused = true
+                present(part, animated: false, live: false)
+                setSummary(Self.pausedWords(p))
+            } else if let apk = effectiveAPK, data == nil || loadedAPK?.path != apk.path {
+                loadStored(for: apk, fallbackToLastFolder: data == nil)
+            } else if data == nil, let f = lastFolder, let last = ScreenMapData.read(f) {
+                present(last, animated: false, live: false)
+            }
+        }
         refresh()
         isHidden = false
         alphaValue = 0
@@ -463,7 +470,13 @@ final class ScreenMap: NSView {
     // MARK: Settings
 
     var effectiveAPK: URL? { apkURL ?? defaultAPK() }
-    func setAPK(_ url: URL?) { apkURL = url; refresh() }
+    func setAPK(_ url: URL?) {
+        apkURL = url
+        refresh()
+        if isOpen, !isWalking, let apk = effectiveAPK, loadedAPK?.path != apk.path {
+            loadStored(for: apk, fallbackToLastFolder: false)
+        }
+    }
 
     var settings: CrawlRun.Settings {
         var s = CrawlRun.Settings()
@@ -943,6 +956,27 @@ final class ScreenMap: NSView {
     /// Shows a finished walk: the summary line and its chips at once, then the map once the walk is a snapshot (and,
     /// when the build has a commit, compared with its baseline).
     private func present(_ map: ScreenMapData, animated: Bool, live: Bool = true) {
+        loadedAPK = map.apk ?? effectiveAPK
+        applyPresentation(map, live: live)
+        generation += 1
+        let mine = generation
+        let apk = live ? (map.apk ?? effectiveAPK) : nil
+        let settings = self.settings, signedIn = lastSignedIn
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ctx = apk != nil ? await self.context(apk!) : nil
+            let profile = Evidence.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start, signedIn: signedIn, offline: settings.offline)
+            let engine = Engine.shared.version
+            let made = await Task.detached { await ScreenMap.makeSource(map, context: ctx, profile: profile, engine: engine) }.value
+            guard self.generation == mine, let made else {
+                if self.generation == mine { self.setSummary("The map could not be read back after the walk.", problem: true) }
+                return
+            }
+            self.show(made, animated: animated)
+        }
+    }
+
+    private func applyPresentation(_ map: ScreenMapData, live: Bool) {
         data = map
         let transitions = map.edges.filter { if case .screen = $0.to { return true } else { return false } }.count
         var parts = ["\(map.screens.count) screens", "\(transitions) transitions"]
@@ -965,22 +999,67 @@ final class ScreenMap: NSView {
         comboControl.isHidden = combos.count < 2
         onboarding.isHidden = true
         host.isHidden = false
+    }
+
+    /// Loads an existing stored snapshot for `apk`'s commit from the repository's `MapStore` so reopening the sheet on
+    /// an already-walked build (such as `main`) shows its map instead of the onboarding card.
+    private func loadStored(for apk: URL, fallbackToLastFolder: Bool) {
         generation += 1
         let mine = generation
-        let apk = live ? (map.apk ?? effectiveAPK) : nil
-        let settings = self.settings, signedIn = lastSignedIn
+        let s = self.settings
+        let signedIn = signInScript != nil || usesKeptSignIn
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let ctx = apk != nil ? await self.context(apk!) : nil
-            let profile = Evidence.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start, signedIn: signedIn, offline: settings.offline)
-            let engine = Engine.shared.version
-            let made = await Task.detached { await ScreenMap.makeSource(map, context: ctx, profile: profile, engine: engine) }.value
-            guard self.generation == mine, let made else {
-                if self.generation == mine { self.setSummary("The map could not be read back after the walk.", problem: true) }
-                return
+            if let ctx = await self.context(apk) {
+                var preferred: [MapProfile] = [
+                    Evidence.profile(depth: s.depth, seconds: s.seconds, appearances: s.appearances, start: s.start, signedIn: signedIn, offline: s.offline),
+                    Evidence.profile(depth: 0, seconds: 0, appearances: ["light"], start: nil, signedIn: true, offline: false),
+                ]
+                if ctx.unsignedCounts {
+                    preferred.append(Evidence.profile(depth: 0, seconds: 0, appearances: ["light"], start: nil, signedIn: false, offline: false))
+                }
+                let loaded = await Task.detached { await ScreenMap.loadStoredMade(context: ctx, preferred: preferred, apk: apk) }.value
+                guard self.generation == mine, !self.isWalking else { return }
+                if let (map, made) = loaded {
+                    self.showsPaused = false
+                    self.loadedAPK = apk
+                    self.applyPresentation(map, live: false)
+                    self.show(made, animated: false)
+                    return
+                }
             }
-            self.show(made, animated: animated)
+            guard self.generation == mine, !self.isWalking else { return }
+            if fallbackToLastFolder, self.data == nil, let f = self.lastFolder, let last = ScreenMapData.read(f) {
+                self.present(last, animated: false, live: false)
+            }
         }
+    }
+
+    nonisolated static func loadStoredMade(context ctx: MapContext, preferred: [MapProfile], apk: URL) async -> (ScreenMapData, Made)? {
+        func find(_ profileID: String) -> MapSnapshot? {
+            ctx.store.snapshot(profile: profileID, commit: ctx.commit) ?? ctx.store.snapshot(profile: profileID, tree: ctx.tree)
+        }
+        var snap: MapSnapshot?
+        var seen = Set<String>()
+        for p in preferred where seen.insert(p.id).inserted {
+            if let hit = find(p.id) { snap = hit; break }
+        }
+        if snap == nil {
+            let others = ctx.store.profiles().filter { !seen.contains($0) }.compactMap(find)
+            snap = others.sorted {
+                let aSigned = $0.profile.signIn != nil, bSigned = $1.profile.signIn != nil
+                if aSigned != bSigned { return aSigned }
+                return ($0.walked, $0.commit) > ($1.walked, $1.commit)
+            }.first
+        }
+        guard let snap else { return nil }
+        let found = await ctx.baseline(snap.profile)
+        let base = found.flatMap { $0.snapshot.commit == snap.commit ? nil : $0 }
+        let stored = loadStored(ctx.store, profile: snap.profile.id)
+        let src = MapSource.make(head: snap, base: base?.snapshot, history: stored.isEmpty ? [snap] : stored, blobURL: { ctx.store.blobURL($0) })
+        let made = Made(source: src, store: ctx.store, stored: stored, filed: true, baselineBehind: base?.behind, baselineCommit: base?.snapshot.commit,
+                        baseBranch: ctx.baseBranch, hasDeps: snap.startDeps != nil, counts: snap.profile.signIn != nil || ctx.unsignedCounts)
+        return (ScreenMapData.from(snapshot: snap, store: ctx.store, apk: apk), made)
     }
 
     /// What a finished walk becomes: its snapshot (filed in the context's store when the build has a commit, else kept

@@ -116,8 +116,12 @@ final class MainBuilds {
     }
 
     func owns(_ sim: Simulator) -> Bool {
-        guard let slot = SessionsController.slot(of: sim) else { return false }
-        return (sessions?.workspaces ?? []).contains { self.slot(of: $0.root) == slot }
+        workspace(for: sim) != nil
+    }
+
+    func workspace(for sim: Simulator) -> Workspace? {
+        guard let slot = SessionsController.slot(of: sim) else { return nil }
+        return (sessions?.workspaces ?? []).first { self.slot(of: $0.root) == slot }
     }
 
     /// The paths whose builds the store keeps (main's worktrees are not in `git worktree list` of the rows).

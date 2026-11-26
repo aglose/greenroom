@@ -106,6 +106,38 @@ struct ScreenMapData {
                              edges: edges, findings: findings, combos: combos, incomplete: (json["incomplete"] as? [String]) ?? [],
                              seconds: seconds, apk: apk)
     }
+
+    /// A stored history snapshot as `ScreenMapData`, with captures resolved from `store`'s blobs.
+    static func from(snapshot: MapSnapshot, store: MapStore, apk: URL?) -> ScreenMapData {
+        let used = Set(snapshot.screens.flatMap { $0.captures.keys })
+        let combos = snapshot.profile.combos.filter { used.contains($0) } + used.subtracting(snapshot.profile.combos).sorted()
+        let screens: [MapScreen] = snapshot.screens.map { s in
+            let order = combos + s.captures.keys.filter { !combos.contains($0) }.sorted()
+            let captures = order.compactMap { c -> (String, URL)? in
+                guard let hash = s.captures[c], let url = store.blobURL(hash) else { return nil }
+                return (c, url)
+            }
+            let controls = (s.actions ?? []).map { (label: $0.label, cmd: $0.cmd, skipped: $0.skipped) }
+            return MapScreen(id: s.id, activity: s.activity, title: s.title, depth: s.depth, parent: s.parent,
+                             start: s.start, steps: s.steps, captures: captures, texts: s.texts, settled: s.settled,
+                             flaky: s.flaky, controls: controls)
+        }
+        let edges: [MapEdge] = snapshot.edges.map { e in
+            let to: MapEdge.Target
+            switch e.to {
+            case nil: to = .unfollowed
+            case "EXIT": to = .exit
+            case "CRASH": to = .crash
+            case "SKIPPED": to = .skipped
+            case "FAILED": to = .failed
+            case let id?: to = .screen(id)
+            }
+            return MapEdge(from: e.from, action: e.action, cmd: e.cmd, to: to, note: e.note)
+        }
+        let findings: [MapFinding] = snapshot.findings.map { MapFinding(kind: $0.kind, detail: $0.detail, steps: $0.steps) }
+        return ScreenMapData(folder: store.folder, apkName: apk?.lastPathComponent ?? "", screens: screens, edges: edges,
+                             findings: findings, combos: combos, incomplete: snapshot.incomplete, seconds: snapshot.seconds, apk: apk)
+    }
 }
 
 /// A repository's `.greenroom/map.json`, as walks inside the app read it: only `dataIgnore`, the patterns of what the

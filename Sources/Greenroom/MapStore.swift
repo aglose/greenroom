@@ -258,6 +258,12 @@ final class MapStore {
         return names.filter { $0.hasSuffix(".json") }.map { String($0.dropLast(5)) }.sorted()
     }
 
+    /// The profile ids that have snapshots in this store, sorted.
+    func profiles() -> [String] {
+        let snaps = folder.appendingPathComponent("snapshots", isDirectory: true)
+        return ((try? fm.contentsOfDirectory(atPath: snaps.path)) ?? []).filter { MapStore.safe($0) != nil }.sorted()
+    }
+
     /// Where a capture is kept; nil when it is not in the store.
     func blobURL(_ hash: String) -> URL? {
         guard let h = MapStore.safe(hash) else { return nil }
