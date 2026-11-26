@@ -364,20 +364,32 @@ final class SimulatorView: NSView {
         }
     }
 
-    private func updateCaption() {
-        guard let sim = simulator else { caption.attributedStringValue = NSAttributedString(); return }
+    func updateCaption() {
+        guard let sim = simulator else { caption.attributedStringValue = NSAttributedString(); caption.toolTip = nil; return }
         let size = sim.deviceSize
-        let text = NSMutableAttributedString(string: kindName, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink])
-        if Recorder.isRecording(sim) { text.insert(NSAttributedString(string: "●  ", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.record]), at: 0) }
-        var rest = "   \(sim.cellLabel ?? sim.name)"
-        if size.width > 0 { rest += "   \(Int(size.width))×\(Int(size.height))" }
-        if !captionExtra.isEmpty { rest += "   ·   \(captionExtra)" }
-        text.append(NSAttributedString(string: rest, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.mute]))
+        let text = NSMutableAttributedString()
+        if Recorder.isRecording(sim) {
+            text.append(NSAttributedString(string: "●  ", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.record]))
+        }
+        if let label = sim.displayLabel, sim.cellLabel == nil {
+            text.append(NSAttributedString(string: label, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink]))
+            var rest = "   \(kindName)"
+            if size.width > 0 { rest += " · \(Int(size.width))×\(Int(size.height))" }
+            if !captionExtra.isEmpty { rest += " · \(captionExtra)" }
+            text.append(NSAttributedString(string: rest, attributes: [.font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: Design.mute]))
+        } else {
+            text.append(NSAttributedString(string: kindName, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: Design.ink]))
+            var rest = "   \(sim.cellLabel ?? sim.name)"
+            if size.width > 0 { rest += "   \(Int(size.width))×\(Int(size.height))" }
+            if !captionExtra.isEmpty { rest += "   ·   \(captionExtra)" }
+            text.append(NSAttributedString(string: rest, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Design.mute]))
+        }
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
         centred.lineBreakMode = .byTruncatingMiddle
         text.addAttribute(.paragraphStyle, value: centred, range: NSRange(location: 0, length: text.length))
         caption.attributedStringValue = text
+        caption.toolTip = (sim.displayLabel.map { "\($0)\n" } ?? "") + (sim.apk.path as NSString).abbreviatingWithTildeInPath
     }
 
     private func updateOutline() {

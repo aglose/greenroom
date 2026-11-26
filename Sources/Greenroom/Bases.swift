@@ -125,6 +125,20 @@ enum GH {
 
     struct Pull: Equatable { var number: Int; var sha: String; var ref: String; var title: String }
 
+    /// A pull request matched to a local branch via `gh pr list`.
+    struct BranchPull: Equatable {
+        var number: Int
+        var title: String
+        var branch: String
+        var state: String
+        var isDraft: Bool
+        var url: URL?
+
+        var isOpen: Bool { state.uppercased() == "OPEN" }
+        var isMerged: Bool { state.uppercased() == "MERGED" }
+        var isClosed: Bool { state.uppercased() == "CLOSED" }
+    }
+
     /// `gh pr view N -R SLUG --json headRefOid,headRefName,title` in the repository `dir` is in (`slug` nil: gh's own guess).
     static func pull(number: Int, slug: String?, in dir: URL) async -> (Pull?, String) {
         let r = await run(["pr", "view", String(number)] + (slug.map { ["-R", $0] } ?? []) + ["--json", "headRefOid,headRefName,title"], in: dir)
@@ -132,6 +146,26 @@ enum GH {
         guard let obj = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any],
               let sha = obj["headRefOid"] as? String, !sha.isEmpty else { return (nil, "gh gave no commit for pull request \(number)") }
         return (Pull(number: number, sha: sha, ref: obj["headRefName"] as? String ?? "", title: obj["title"] as? String ?? ""), "")
+    }
+
+    /// `gh pr list --state all --limit 50 --json ...`, keyed by `headRefName` (open PRs win over closed/merged, then highest number).
+    static func pullsByBranch(in dir: URL, slug: String? = nil) async -> [String: BranchPull] {
+        let r = await run(["pr", "list", "--state", "all", "--limit", "50"] + (slug.map { ["-R", $0] } ?? []) + ["--json", "number,title,headRefName,state,isDraft,url"], in: dir, timeout: 20)
+        guard r.status == 0, let arr = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [[String: Any]] else { return [:] }
+        var out: [String: BranchPull] = [:]
+        for obj in arr {
+            guard let number = obj["number"] as? Int, let branch = obj["headRefName"] as? String, !branch.isEmpty else { continue }
+            let pr = BranchPull(number: number, title: obj["title"] as? String ?? "", branch: branch,
+                                state: obj["state"] as? String ?? "OPEN", isDraft: obj["isDraft"] as? Bool ?? false,
+                                url: (obj["url"] as? String).flatMap(URL.init(string:)))
+            if let have = out[branch] {
+                if pr.isOpen != have.isOpen { if pr.isOpen { out[branch] = pr } }
+                else if pr.number > have.number { out[branch] = pr }
+            } else {
+                out[branch] = pr
+            }
+        }
+        return out
     }
 }
 

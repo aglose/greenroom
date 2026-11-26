@@ -298,11 +298,15 @@ struct MapDiff: Codable, Equatable {
             let b = baseBy[lineage], h = headBy[lineage]
             let bo = baseOut[lineage] ?? [:], ho = headOut[lineage] ?? [:]
             var routes = false
+            let inconclusive: Set<String> = ["FAILED", "SKIPPED", "UNFOLLOWED"]
             for cmd in Set(bo.keys).union(ho.keys).sorted() {
                 switch (bo[cmd], ho[cmd]) {
                 case let (was?, nil): edges.append(EdgeChange(from: lineage, cmd: cmd, action: was.action, status: .removed, baseTo: was.to, headTo: nil)); routes = true
                 case let (nil, now?): edges.append(EdgeChange(from: lineage, cmd: cmd, action: now.action, status: .added, baseTo: nil, headTo: now.to)); routes = true
                 case let (was?, now?) where was.to != now.to:
+                    // A control that failed to replay or was skipped/unfollowed on one walk is an inconclusive crawl
+                    // observation, not a redirected route in the app (real EXIT and CRASH outcomes still compare).
+                    if inconclusive.contains(was.to) || inconclusive.contains(now.to) { break }
                     edges.append(EdgeChange(from: lineage, cmd: cmd, action: now.action, status: .retargeted, baseTo: was.to, headTo: now.to)); routes = true
                 default: break
                 }

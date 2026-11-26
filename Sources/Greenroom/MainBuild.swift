@@ -239,8 +239,13 @@ final class MainBuilds {
         change()
         if openWhenReady.remove(ws.root.path) != nil { open(ws) }
         else if let sim = simulator(of: ws.root), sim.apk.resolvingSymlinksInPath().path != b.apk.resolvingSymlinksInPath().path {
+            let label = "\(names[ws.root.path] ?? Self.shortName(ws.baseRef))" + (b.sha.map { " · \(String($0.prefix(7)))" } ?? "")
             DevHooks.shared.relaunch(sim, apk: b.apk, options: sim.options) { [weak self] new in
-                if new != nil { self?.sessions?.workbench?.toast.show("Reloaded \(self?.names[ws.root.path] ?? "main") on its newest build") }
+                if let new {
+                    new.displayLabel = label
+                    self?.sessions?.workbench?.refreshCaptions()
+                    self?.sessions?.workbench?.toast.show("Reloaded \(self?.names[ws.root.path] ?? "main") on its newest build")
+                }
             }
         }
     }
@@ -271,7 +276,11 @@ final class MainBuilds {
         if let sim = simulator(of: ws.root) { wb.select(sim); return }
         guard let row = row(for: ws) else { return }
         if let b = row.newest {
-            _ = wb.open(b.apk, remember: false, options: ["--data-slots", slot(of: ws.root)])
+            let s = slot(of: ws.root)
+            let extra = sessions?.signInLaunchOptions(forWorkspace: ws.root, targetSlot: s) ?? []
+            let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra)
+            sim?.displayLabel = "\(row.name)" + (row.sha.map { " · \(String($0.prefix(7)))" } ?? "")
+            wb.refreshCaptions()
             if row.current == nil, row.isBusy { wb.toast.show("Opened the previous \(row.name) build; it reloads on the newest when that is built") }
             return
         }

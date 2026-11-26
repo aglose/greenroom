@@ -14,6 +14,9 @@ final class SessionsController {
     private(set) var used: [String] = []
     /// The newest recorded build of each worktree (by its path).
     private(set) var builds: [String: Build] = [:]
+    /// Open/closed GitHub PRs per workspace root, keyed by `headRefName`.
+    private var branchPRs: [String: [String: GH.BranchPull]] = [:]
+    private var lastPRFetch: [String: Date] = [:]
     private var watchers: [String: WorktreeWatcher] = [:]
     private var buildWatcher: BuildWatcher?
     private var watched: [String] = []
@@ -91,10 +94,53 @@ final class SessionsController {
     /// Hands every row its Claude session (or takes it away) without asking git again. Says nothing when no row's
     /// session changed in a way the row shows.
     func applyClaude() {
-        let next = ClaudeSessions.shared.attach(sessions)
+        let next = attachPulls(ClaudeSessions.shared.attach(sessions))
         let changed = next.map { $0.claude?.shown } != sessions.map { $0.claude?.shown }
         sessions = next
         if autoArchive() || changed { onChange?() }
+    }
+
+    private func attachPulls(_ list: [Session]) -> [Session] {
+        list.map { s in
+            var s = s
+            s.githubPR = s.branch.flatMap { branchPRs[s.workspace.path]?[$0] }
+            return s
+        }
+    }
+
+    /// Fetches GitHub PR metadata per workspace branch via `gh pr list` (at most every 3 minutes; skipped in checks).
+    private func refreshPulls(for spaces: [Workspace]) {
+        if CommandLine.arguments.contains(where: { $0.hasPrefix("--") && $0.hasSuffix("-check") }) { return }
+        let now = Date()
+        for ws in spaces {
+            let key = ws.root.path
+            guard GitHubRemote.has(ws.root) else { continue }
+            if let last = lastPRFetch[key], now.timeIntervalSince(last) < 180 { continue }
+            lastPRFetch[key] = now
+            let root = ws.root
+            Task { @MainActor [weak self] in
+                let slug = await GitHubRemote.repoSlug(for: root)
+                let map = await GH.pullsByBranch(in: root, slug: slug)
+                guard let self else { return }
+                if self.branchPRs[key] != map {
+                    self.branchPRs[key] = map
+                    self.sessions = self.attachPulls(self.sessions)
+                    for s in self.sessions where s.workspace.path == key {
+                        if let sim = self.simulator(for: s) { sim.displayLabel = s.simLabel }
+                    }
+                    self.workbench?.refreshCaptions()
+                    self.onChange?()
+                }
+            }
+        }
+    }
+
+    /// Launch options for a simulator of `workspace` on `targetSlot`: when the repository has a kept sign-in, seeds an
+    /// empty slot from it and passes `--biometrics auto` so biometric-protected apps auto-unlock on launch and restart.
+    func signInLaunchOptions(forWorkspace workspace: URL, targetSlot: String, overwrite: Bool = false) -> [String] {
+        guard let kept = SignIns.shared.record(SignIns.key(workspace: workspace)) else { return [] }
+        SlotClone.seed(from: kept.slot, to: targetSlot, in: SignIns.dataRoot, overwrite: overwrite)
+        return ["--biometrics", "auto"]
     }
 
     /// Uses another store (the check's own, so a check never touches the person's workspaces).
@@ -338,7 +384,8 @@ final class SessionsController {
             }
             guard mine == self.generation else { return }
             if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
-            self.sessions = ClaudeSessions.shared.attach(all)
+            self.sessions = self.attachPulls(ClaudeSessions.shared.attach(all))
+            self.refreshPulls(for: spaces)
             self.watch(all)
             if let want = self.runWhenListed, let s = self.sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == want }) {
                 self.runWhenListed = nil
@@ -460,7 +507,10 @@ final class SessionsController {
 
     @discardableResult
     private func start(_ session: Session, from apk: URL, options: [String] = [], fromAgent: Bool = false, remember: Bool = false) -> Simulator? {
-        guard let wb = workbench, let sim = wb.open(apk, remember: remember, options: ["--data-slots", session.slot] + options, fromAgent: fromAgent) else { return nil }
+        let signInOpts = options.contains("--biometrics") ? [] : signInLaunchOptions(forWorkspace: session.workspace, targetSlot: session.slot)
+        guard let wb = workbench, let sim = wb.open(apk, remember: remember, options: ["--data-slots", session.slot] + signInOpts + options, fromAgent: fromAgent) else { return nil }
+        sim.displayLabel = session.simLabel
+        wb.refreshCaptions()
         launched[session.slot] = Self.modified(apk)
         show(session)   // started from the palette, ⌘n or an agent: it is in use, so it is in the sidebar
         record(apk: apk, for: session)
@@ -584,6 +634,8 @@ final class SessionsController {
         launched[session.slot] = Self.modified(apk)
         DevHooks.shared.relaunch(old, apk: apk, options: old.options) { [weak self] new in
             guard let self, let new else { return }
+            new.displayLabel = session.simLabel
+            self.workbench?.refreshCaptions()
             self.workbench?.toast.show("Reloaded \(session.title) on its new build")
             self.onReload?(session, new)
         }
@@ -732,10 +784,18 @@ final class SessionsController {
 
     // MARK: Row view
 
-    /// The second line of a row: what tells it apart (its pull request), then where its build is.
+    /// The second line of a row: what tells it apart (its pull request and draft/state), branch, then build age.
     private func detail(for s: Session) -> (text: String, color: NSColor?) {
         var bits: [String] = []
-        if let pr = s.pullRequests.first(where: { $0.state == .open }) ?? s.pullRequests.first, let n = pr.number {
+        if let pr = s.githubPR {
+            let stateWord = pr.isDraft ? "Draft" : (pr.isMerged ? "Merged" : (pr.isClosed ? "Closed" : "Open"))
+            if s.claude?.title != nil {
+                bits.append("#\(pr.number) \(stateWord)")
+            } else {
+                bits.append(stateWord)
+                if let b = s.branch { bits.append(b) }
+            }
+        } else if let pr = s.pullRequests.first(where: { $0.state == .open }) ?? s.pullRequests.first, let n = pr.number {
             bits.append("#\(n)" + (pr.state == .merged ? " merged" : pr.state == .closed ? " closed" : ""))
         } else if let pr = s.claude?.pullRequest, let n = Int(pr.lastPathComponent) { bits.append("#\(n)") }
         if let built = s.builtAt { bits.append(Self.age(built) + (s.isStale ? ", stale" : "")) } else { bits.append("not built") }
@@ -792,7 +852,8 @@ final class SessionsController {
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 0
-        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        text.setContentCompressionResistancePriority(.init(700), for: .horizontal)
+        text.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
         var topViews: [NSView] = [icon, text]
         if let dot = ClaudeUI.dot(for: s.claude), s.claude?.running == true || s.claude?.status == .waiting { topViews.append(dot) }   // a finished session's dot said nothing
         if !isSelected, let walk = evidence.badge(for: s) { topViews.append(walk) }   // selected row gives full width to title
@@ -816,9 +877,13 @@ final class SessionsController {
         }
 
         var tip = [s.branch ?? "detached", s.shortHead + (s.ahead > 0 ? ", \(s.ahead) ahead" : ""), (s.worktree.path as NSString).abbreviatingWithTildeInPath]
+        if let pr = s.githubPR {
+            let tag = pr.isDraft ? "draft" : pr.state.lowercased()
+            tip.append("#\(pr.number) \(pr.title) (\(tag))" + (pr.url.map { "\n" + $0.absoluteString } ?? ""))
+        }
         if s.claude?.source == .t3 { tip.append("T3 Code thread" + (s.claude?.title.map { ": " + $0 } ?? "")) }
-        for pr in s.pullRequests { tip.append(pr.url.absoluteString + (pr.state.map { " (\($0.rawValue.lowercased()))" } ?? "")) }
-        if s.pullRequests.isEmpty, let pr = s.claude?.pullRequest { tip.append(pr.absoluteString) }
+        for pr in s.pullRequests where pr.number != s.githubPR?.number { tip.append(pr.url.absoluteString + (pr.state.map { " (\($0.rawValue.lowercased()))" } ?? "")) }
+        if s.pullRequests.isEmpty, s.githubPR == nil, let pr = s.claude?.pullRequest { tip.append(pr.absoluteString) }
         let tooltipText = tip.joined(separator: "\n")
 
         if !isSelected {

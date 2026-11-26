@@ -12,6 +12,11 @@ struct MapSurfaceScreen {
     var parent: String?
     /// Combination name to the capture's blob.
     var captures: [String: String]
+    /// The base snapshot's captures and title for this lineage (for instant Base ↔ Head toggling on the graph).
+    var baseCaptures: [String: String]? = nil
+    var baseTitle: String? = nil
+    /// Group identifier so unfocused cross-group routes stay tucked away until a screen is hovered or selected.
+    var groupID: String? = nil
     var crashes = 0
     var exits = 0
     var loops = 0
@@ -43,7 +48,7 @@ struct MapSurfaceEdge {
 /// Where everything goes, in the canvas's points: a card's frame per lineage (its capture and the 40 points of title
 /// under it), the groups' frames and titles, and the size of the whole. The layout (MapLayout) makes these.
 struct MapPlacement {
-    struct Group { var frame: CGRect; var title: String }
+    struct Group { var frame: CGRect; var title: String; var hasChanges: Bool = false }
     var frames: [String: CGRect]
     var groups: [Group] = []
     var size: CGSize
@@ -100,6 +105,17 @@ final class MapSurface: NSView {
     let pyramid: MapPyramid
     /// The combination the cards show.
     var combo = "light" { didSet { if oldValue != combo { reloadImages() } } }
+    /// When true, paired cards show their base (`main`) captures so you can blink-compare in place without moving.
+    var showingBase = false {
+        didSet {
+            guard oldValue != showingBase else { return }
+            mosaicVersion += 1
+            for (i, c) in live where c.label.superlayer != nil { c.labelled = -1; undecorated.insert(i) }
+            reloadImages()
+            restyle()
+            update()
+        }
+    }
 
     // The map, by index.
     private var screens: [MapSurfaceScreen] = []
@@ -115,6 +131,8 @@ final class MapSurface: NSView {
         let change: MapSurfaceEdge.Change?
         /// From a screen to one directly behind it (its parent's route to it).
         let tree: Bool
+        /// Both endpoints live in the same flow group (cross-group routes only appear on hover/selection).
+        let sameGroup: Bool
         let p0: CGPoint, c0: CGPoint, c1: CGPoint, p1: CGPoint
         let box: CGRect
         var mid: CGPoint {
@@ -133,13 +151,14 @@ final class MapSurface: NSView {
     // Layers. Containers first, then what lives in them.
     private let content = CALayer()
     private let groupOutlines = CAShapeLayer()
+    private let changedGroupOutlines = CAShapeLayer()
     private var groupTitles: [CATextLayer] = []
     /// Far away: a filled path per status, dim and lit.
     private var dotLayers: [[CAShapeLayer]] = []
     /// Far away, over the tiles: the cards' pictures in one bitmap for the region in view (MapMosaic).
     private let mosaicLayer = CALayer()
     private let mosaic: MapMosaic
-    private struct MosaicKey: Equatable { let region: CGRect; let scale: CGFloat; let focus: Int?; let combo: String; let version: Int }
+    private struct MosaicKey: Equatable { let region: CGRect; let scale: CGFloat; let focus: Int?; let combo: String; let showingBase: Bool; let version: Int }
     private var builtMosaic: MosaicKey?
     private var askedMosaic: MosaicKey?
     /// Bumped when small copies were loaded (there is more to draw) and when the map changes.
@@ -224,6 +243,9 @@ final class MapSurface: NSView {
         groupOutlines.fillColor = NSColor(white: 1, alpha: 0.018).cgColor
         groupOutlines.strokeColor = NSColor(white: 1, alpha: 0.08).cgColor
         content.addSublayer(groupOutlines)
+        changedGroupOutlines.fillColor = Design.warning.withAlphaComponent(0.035).cgColor
+        changedGroupOutlines.strokeColor = Design.warning.withAlphaComponent(0.28).cgColor
+        content.addSublayer(changedGroupOutlines)
         let fills: [NSColor] = [NSColor(white: 1, alpha: 0.34), Design.accent, Design.record, Design.warning, Design.mute.withAlphaComponent(0.6)]
         for color in fills {
             let pair = [CAShapeLayer(), CAShapeLayer()]
@@ -340,19 +362,23 @@ final class MapSurface: NSView {
             guard let a = indexOf[e.from], let b = indexOf[e.to], a != b else { continue }
             routesOut[a].append(routes.count)
             routesIn[b].append(routes.count)
+            let ga = screens[a].groupID, gb = screens[b].groupID
+            let sameGroup = ga == nil || gb == nil || ga == gb
             routes.append(makeRoute(a, b, labels: e.labels, change: e.change ?? (status[b] == .added ? .added : status[b] == .removed ? .removed : nil),
-                                    tree: screens[b].parent == screens[a].lineage))
+                                    tree: screens[b].parent == screens[a].lineage, sameGroup: sameGroup))
         }
 
         setFrameSize(input.placement.size)
         content.frame = CGRect(origin: .zero, size: input.placement.size)
 
         let outlines = CGMutablePath()
+        let changedOutlines = CGMutablePath()
         groupTitles.forEach { $0.removeFromSuperlayer() }
         groupTitles = groups.map { g in
-            outlines.addRoundedRect(in: g.frame, cornerWidth: 22, cornerHeight: 22)
+            (g.hasChanges ? changedOutlines : outlines).addRoundedRect(in: g.frame, cornerWidth: 22, cornerHeight: 22)
             let t = CATextLayer()
-            t.string = NSAttributedString(string: g.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.mute])
+            t.string = NSAttributedString(string: g.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                                                                        .foregroundColor: g.hasChanges ? Design.ink : Design.mute])
             t.contentsScale = window?.backingScaleFactor ?? 2
             t.anchorPoint = CGPoint(x: 0, y: 1)
             t.bounds = CGRect(x: 0, y: 0, width: max(60, (g.title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]).width + 8), height: 18)
@@ -361,6 +387,7 @@ final class MapSurface: NSView {
             return t
         }
         groupOutlines.path = outlines
+        changedGroupOutlines.path = changedOutlines
 
         builtEdges = nil
         dotsFocus = .none
@@ -409,7 +436,7 @@ final class MapSurface: NSView {
 
     /// The old canvas's curve: out of a card's right side into the next one's left, back to an earlier column from the
     /// left side into the right, and a bow out to the right within one column.
-    private func makeRoute(_ ia: Int, _ ib: Int, labels: [String], change: MapSurfaceEdge.Change?, tree: Bool) -> Route {
+    private func makeRoute(_ ia: Int, _ ib: Int, labels: [String], change: MapSurfaceEdge.Change?, tree: Bool, sameGroup: Bool) -> Route {
         let a = captureFrames[ia], b = captureFrames[ib]
         let p0: CGPoint, p1: CGPoint, c0: CGPoint, c1: CGPoint
         if b.minX > a.maxX {
@@ -434,7 +461,7 @@ final class MapSurface: NSView {
         }
         let xs = [p0.x, c0.x, c1.x, p1.x], ys = [p0.y, c0.y, c1.y, p1.y]
         let box = CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!).insetBy(dx: -12, dy: -12)
-        return Route(from: ia, to: ib, labels: labels, change: change, tree: tree, p0: p0, c0: c0, c1: c1, p1: p1, box: box)
+        return Route(from: ia, to: ib, labels: labels, change: change, tree: tree, sameGroup: sameGroup, p0: p0, c0: c0, c1: c1, p1: p1, box: box)
     }
 
     // MARK: Following the view
@@ -498,7 +525,7 @@ final class MapSurface: NSView {
             c.labelled = i
             c.labelToken += 1
             let token = c.labelToken, scale = (window?.backingScaleFactor ?? 2) * textScale
-            let title = screens[i].title, activity = screens[i].activity, width = f.width + 40
+            let title = activeTitle(for: i), activity = screens[i].activity, width = f.width + 40
             c.label.frame = CGRect(x: -20, y: f.height + 6, width: width, height: 34)
             if c.label.superlayer == nil { c.root.addSublayer(c.label) }
             Self.titles.async {
@@ -552,6 +579,7 @@ final class MapSurface: NSView {
             builtMosaic = nil
         }
         groupOutlines.isHidden = detail > .middle
+        changedGroupOutlines.isHidden = detail > .middle
         for t in groupTitles { t.isHidden = detail > .middle }
         if far {
             for i in Array(live.keys) { release(i) }
@@ -567,6 +595,7 @@ final class MapSurface: NSView {
         guard detail <= .middle else { return }
         let k = max(1, 1 / m)
         groupOutlines.lineWidth = k
+        changedGroupOutlines.lineWidth = 1.5 * k
         for (t, g) in zip(groupTitles, groups) {
             // A title wider than its group would run into the next one's.
             t.isHidden = t.bounds.width * k > g.frame.width + 120
@@ -789,13 +818,22 @@ final class MapSurface: NSView {
         c.root.addSublayer(c.words)
     }
 
+    private func activeCaptures(for i: Int) -> [String: String] {
+        (showingBase ? screens[i].baseCaptures : nil) ?? screens[i].captures
+    }
+
+    private func activeTitle(for i: Int) -> String {
+        (showingBase ? screens[i].baseTitle : nil) ?? screens[i].title
+    }
+
     /// Asks for the card's picture at `tier`, showing the best one already in memory until it comes.
     private func want(_ c: Card, _ i: Int, _ tier: MapPyramid.Tier) {
         guard c.wanted != tier else { return }
         c.ticket?.cancel()
         c.ticket = nil
         c.wanted = tier
-        guard let blob = screens[i].captures[combo] ?? screens[i].captures.values.sorted().first else {
+        let caps = activeCaptures(for: i)
+        guard let blob = caps[combo] ?? caps.values.sorted().first else {
             c.root.contents = nil
             return
         }
@@ -916,11 +954,12 @@ final class MapSurface: NSView {
         var scale = min(m * (window?.backingScaleFactor ?? 2), MapMosaic.finest)
         let pixels = region.width * region.height * scale * scale
         if pixels > MapMosaic.pixelBudget { scale *= (MapMosaic.pixelBudget / pixels).squareRoot() }
-        if let b = builtMosaic, b.focus == focus, b.combo == combo, b.version == mosaicVersion, b.region.insetBy(dx: -1, dy: -1).contains(seen),
+        if let b = builtMosaic, b.focus == focus, b.combo == combo, b.showingBase == showingBase, b.version == mosaicVersion, b.region.insetBy(dx: -1, dy: -1).contains(seen),
            scale <= b.scale * 1.3, scale >= b.scale * 0.6 { return }
         var items: [MapMosaic.Item] = []
         cards(in: region) { i in
-            guard screens[i].tile == nil, let blob = screens[i].captures[combo] ?? screens[i].captures.values.sorted().first else { return }
+            let caps = activeCaptures(for: i)
+            guard screens[i].tile == nil, let blob = caps[combo] ?? caps.values.sorted().first else { return }
             let color: NSColor? = switch status[i] {
             case .added?: Design.accent
             case .removed?: Design.record
@@ -928,9 +967,10 @@ final class MapSurface: NSView {
             case .notCompared?: Design.mute
             default: nil
             }
-            items.append(MapMosaic.Item(frame: captureFrames[i], blob: blob, border: color?.cgColor, lit: isLit(i, focus)))
+            let absentOnSide = (showingBase && status[i] == .added) || (!showingBase && status[i] == .removed)
+            items.append(MapMosaic.Item(frame: captureFrames[i], blob: blob, border: color?.cgColor, lit: isLit(i, focus) && !absentOnSide))
         }
-        let key = MosaicKey(region: region, scale: scale, focus: focus, combo: combo, version: mosaicVersion)
+        let key = MosaicKey(region: region, scale: scale, focus: focus, combo: combo, showingBase: showingBase, version: mosaicVersion)
         askedMosaic = key
         let map = mosaicMap
         mosaic.render(items, region: region, scale: scale) { [weak self] picture in
@@ -997,10 +1037,11 @@ final class MapSurface: NSView {
         }
         if detail == .far {
             if let focus { for k in routesOut[focus] + routesIn[focus] { add(routes[k], style(of: routes[k], focus: focus)) } }
-            for r in routes where r.change != nil && r.from != focus && r.to != focus { add(r, style(of: r, focus: focus)) }
+            for r in routes where r.change != nil && r.from != focus && r.to != focus && (focus != nil || showAllEdges || r.sameGroup) { add(r, style(of: r, focus: focus)) }
         } else {
             for r in routes where r.box.intersects(region) {
                 let s = style(of: r, focus: focus)
+                if focus == nil && !showAllEdges && !r.sameGroup { continue }
                 if s == .dim && !showAllEdges && !(treeNear && r.tree && live[r.from] != nil && live[r.to] != nil) { continue }
                 add(r, s)
             }
@@ -1160,7 +1201,8 @@ final class MapSurface: NSView {
     private func style(_ c: Card, _ i: Int) {
         let focus = focusIndex
         let on = selected.flatMap { indexOf[$0] } == i
-        c.root.opacity = isLit(i, focus) ? 1 : (focus == nil ? 0.34 : 0.38)
+        let absentOnSide = showingBase && status[i] == .added
+        c.root.opacity = absentOnSide ? 0.22 : (isLit(i, focus) ? 1 : (focus == nil ? 0.34 : 0.38))
         c.badge.opacity = c.root.opacity
         c.root.transform = i == hovered && !on && detail >= .middle ? CATransform3DMakeScale(1.035, 1.035, 1) : CATransform3DIdentity
     }

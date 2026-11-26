@@ -242,13 +242,19 @@ extension AgentTools {
             setLastChanges(set, for: s.worktree.path)
             return AgentChanges.describe(set, header: header)
         }
-        // From history: both builds have a stored map, so nothing is walked.
+        // From history: both builds have a stored map, so nothing is walked. Try the session's walk profiles (signed in
+        // first, matching the GUI's Changes sheet) before falling back to the unsigned comparison profile.
         if baseOption.isEmpty {
-            let profile = evidence.changesProfile(start: start), root = evidence.store.root
+            let root = evidence.store.root
+            let profiles = candidateProfiles(for: s, start: start, wb: wb)
             let found: (MapSnapshot, MapSnapshot)? = blocking {
-                guard let h = await History.snapshot(of: head, workspace: ws.root, profile: profile, stateRoot: root),
-                      let b = await History.snapshot(of: base, workspace: ws.root, profile: profile, stateRoot: root) else { return nil }
-                return (h, b)
+                for profile in profiles {
+                    if let h = await History.snapshot(of: head, workspace: ws.root, profile: profile, stateRoot: root),
+                       let b = await History.snapshot(of: base, workspace: ws.root, profile: profile, stateRoot: root) {
+                        return (h, b)
+                    }
+                }
+                return nil
             }
             if let (h, b) = found {
                 let named = (args["base"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? ws.baseRef
@@ -296,7 +302,7 @@ extension AgentTools {
     /// session's own when it is clean). Nothing is built or walked.
     private func changesFromSnapshots(_ ref: String, _ s: Session, _ ws: Workspace, _ wb: Workbench) throws -> String {
         guard !ref.isEmpty, !ref.hasPrefix("-") else { throw Failure(message: "base snapshot: takes a commit, branch or tag with a stored map (history lists them)") }
-        let ctx = historyContext(ws, wb)
+        let ctx = historyContext(s, ws, wb)
         guard let (commit, _) = blocking({ await History.resolve(ref, in: ws.root) }) else { throw Failure(message: "\(ref) is not a commit of this repository") }
         guard let base = ctx.store.snapshot(profile: ctx.profile.id, commit: commit) else {
             throw Failure(message: "no stored map of \(commit.prefix(7)) for this workspace and profile: history lists the commits that have one")
@@ -317,12 +323,34 @@ extension AgentTools {
         return AgentChanges.describe(set, header: "changes from history, no walk started: \(label(s)) \(head.commit.prefix(7)) (stored map) against \(base.commit.prefix(7)) (stored map)")
     }
 
-    private func historyContext(_ ws: Workspace, _ wb: Workbench) -> (store: MapStore, profile: MapProfile, root: URL) {
+    /// Profiles to check when reading stored snapshots for a session: the session's walk profiles (signed in first) plus
+    /// the plain comparison profile as fallback, deduplicated in order.
+    private func candidateProfiles(for s: Session, start: String?, wb: Workbench) -> [MapProfile] {
+        mainSync {
+            let evidence = wb.sessions.evidence
+            var out: [MapProfile] = []
+            func add(_ p: MapProfile) {
+                var p = p
+                if let start, !start.isEmpty { p.starts = [start] }
+                if !out.contains(where: { $0.id == p.id }) { out.append(p) }
+            }
+            for p in evidence.walkProfiles(worktree: s.worktree.path, withData: wb.sessions.walksWithData(s)) { add(p) }
+            add(evidence.changesProfile(start: start))
+            return out
+        }
+    }
+
+    private func historyContext(_ s: Session, _ ws: Workspace, _ wb: Workbench) -> (store: MapStore, profile: MapProfile, root: URL) {
         let evidence = mainSync { wb.sessions.evidence }
         let root = evidence.store.root
         let store = History.store(stateRoot: root, workspace: ws.root)
-        let profile = evidence.changesProfile(start: nil)
-        if Engine.agentCheck { AgentCheckHooks.seedHistory(store: store, profile: profile, workspace: ws.root) }
+        if Engine.agentCheck {
+            let profile = evidence.changesProfile(start: nil)
+            AgentCheckHooks.seedHistory(store: store, profile: profile, workspace: ws.root)
+            return (store, profile, root)
+        }
+        let candidates = candidateProfiles(for: s, start: nil, wb: wb)
+        let profile = candidates.first { !store.commits(profile: $0.id).isEmpty } ?? candidates.first ?? evidence.changesProfile(start: nil)
         return (store, profile, root)
     }
 
@@ -336,7 +364,7 @@ extension AgentTools {
     func historyTool(_ args: [String: Any], _ connection: Connection) throws -> String {
         let (s, ws) = try tied(connection)
         guard let wb = workbench else { throw Failure(message: Self.noSession) }
-        let ctx = historyContext(ws, wb)
+        let ctx = historyContext(s, ws, wb)
         let snaps = storedSnapshots(ctx)
         let name = ws.root.lastPathComponent
         guard !snaps.isEmpty else {
@@ -409,9 +437,9 @@ extension AgentTools {
 
     /// `screenshot` with `screen` and `commit`: the stored capture of a screen at that commit.
     func historyPicture(_ args: [String: Any], _ connection: Connection) throws -> [[String: Any]] {
-        let (_, ws) = try tied(connection)
+        let (s, ws) = try tied(connection)
         guard let wb = workbench else { throw Failure(message: Self.noSession) }
-        let ctx = historyContext(ws, wb)
+        let ctx = historyContext(s, ws, wb)
         let commit = (args["commit"] as? String ?? "").lowercased(), query = (args["screen"] as? String) ?? ""
         guard commit.count >= 4, commit.allSatisfy({ $0.isHexDigit }) else { throw Failure(message: "commit is a commit's hash (7 digits or more) from history") }
         let matches = storedSnapshots(ctx).filter { $0.commit.hasPrefix(commit) }

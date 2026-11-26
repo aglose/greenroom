@@ -236,7 +236,11 @@ final class PullRows {
         guard let wb = sessions?.workbench else { return }
         if let sim = simulator(of: p) { wb.select(sim); return }
         guard let b = build(of: p), FileManager.default.fileExists(atPath: b.apk.path) else { fetch(p, thenOpen: true); return }
-        _ = wb.open(b.apk, remember: false, options: ["--data-slots", slot(of: p)])
+        let s = slot(of: p)
+        let extra = sessions?.signInLaunchOptions(forWorkspace: URL(fileURLWithPath: p.workspace), targetSlot: s) ?? []
+        let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra)
+        sim?.displayLabel = "#\(p.number) \(p.headRef.isEmpty ? p.title : p.headRef) · \(String(p.headSha.prefix(7)))"
+        wb.refreshCaptions()
     }
 
     func remove(_ p: PullRequest) {

@@ -153,6 +153,10 @@ extension SessionsController {
     func buildMenuItems(for s: Session) -> [NSMenuItem] {
         guard let ws = workspace(of: s) else { return [] }
         var items: [NSMenuItem] = []
+        if let pr = s.githubPR, let url = pr.url {
+            items.append(ClosureMenuItem("Open PR #\(pr.number)\(pr.isDraft ? " (Draft)" : "") on GitHub") { NSWorkspace.shared.open(url) })
+            items.append(.separator())
+        }
         let active = buildQueue.job(for: s)?.isActive ?? false
         if active {
             items.append(ClosureMenuItem("Cancel Build") { [weak self] in self?.cancelBuild(s) })

@@ -101,7 +101,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     var onSay: ((String, Bool) -> Void)?
     var onToggle: (() -> Void)?
     /// Opens a screen of the head on the session's live simulator (Workbench.goThere).
-    var onGo: ((MapScreen, ScreenMapData) -> Void)?
+    var onGo: ((MapScreen, ScreenMapData, Session?) -> Void)?
     /// Opens both builds side by side with mirrored input (Workbench.compare(with:)).
     var onLive: ((Session, Build) -> Void)?
     weak var controller: SessionsController?
@@ -1188,17 +1188,20 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
 
     /// Opens a screen of the head on the session's simulator: the route as the map's "Go there" replays it.
     func go(_ id: String) {
-        guard let set = changeSet, let c = set.screen(id), let hid = c.headID, let screen = set.headMap.screen(hid), let session else { return }
-        guard let sim = controller?.simulator(for: session), sim.state == .running else {
-            onSay?("Open the session first (click its row): the route is replayed on its simulator", true)
+        guard let set = changeSet,
+              let c = set.screen(id) ?? set.screens.first(where: { $0.headID == id }),
+              let hid = c.headID,
+              let screen = set.headMap.screen(hid),
+              let session else {
+            onSay?("This screen has no route to replay on the head build", true)
             return
         }
-        // The walk's APK is the stored copy of the build; the session's simulator may run the same file from Gradle's outputs.
         let m = set.headMap
+        let apk = controller?.simulator(for: session)?.apk ?? run?.head?.apk ?? m.apk
         let adjusted = ScreenMapData(folder: m.folder, apkName: m.apkName, screens: m.screens, edges: m.edges, findings: m.findings, combos: m.combos,
-                                     incomplete: m.incomplete, seconds: m.seconds, apk: sim.apk)
+                                     incomplete: m.incomplete, seconds: m.seconds, apk: apk)
         close()
-        onGo?(screen, adjusted)
+        onGo?(screen, adjusted, session)
     }
 
     // MARK: Map tab
@@ -1209,6 +1212,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         mapGeneration += 1
         let mine = mapGeneration
         mapHost.clear()
+        let baseTitle = baseName ?? session.flatMap { controller?.workspace(of: $0) }.map { MainBuilds.shortName($0.baseRef) } ?? "main"
+        mapHost.navigator.baseLabel = baseTitle
         Task { @MainActor [weak self] in
             let src = await Task.detached { set.mapSource ?? History.pairSource(folder: set.folder) }.value
             guard let self, self.mapGeneration == mine, let src else { return }
@@ -1231,15 +1236,37 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     // MARK: Live tab
 
     @objc private func livePressed() {
-        guard let s = session, let b = run?.base else { return }
-        close()
-        onLive?(s, b)
+        guard let s = session, let run else { return }
+        if let b = run.base, FileManager.default.fileExists(atPath: b.apk.path) {
+            close()
+            onLive?(s, b)
+            return
+        }
+        onSay?("Finding the base build…", false)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let b = await run.resolveBaseBuild() {
+                self.refreshHeader()
+                self.fillLive()
+                self.close()
+                self.onLive?(s, b)
+            } else {
+                self.onSay?("No local APK for the base build yet — build main first, then open both live", true)
+            }
+        }
     }
 
     // MARK: Video tab: the change tour
 
+    private func tourSignInSlot(for set: ChangeSet) -> String? {
+        guard let s = session, let c = controller else { return nil }
+        let signedIn = set.mapSource?.head.profile.signIn != nil || c.evidence.keptSignIn(s.worktree.path) != nil
+        guard signedIn else { return nil }
+        return c.evidence.keptSignIn(s.worktree.path)?.slot ?? (c.walksWithData(s) ? s.slot : nil)
+    }
+
     private func startTour() {
-        guard let set = changeSet, let head = run?.head, let base = run?.base, tourRunner == nil else { return }
+        guard let set = changeSet, let run, let head = run.head, tourRunner == nil else { return }
         if let cached = ChangeTour.Result.read(set.folder) {
             tour = cached
             tourStatus = cached.skipped.map { "Change tour skipped: " + $0 } ?? "Change tour: \(cached.stops.count) screen\(cached.stops.count == 1 ? "" : "s") recorded."
@@ -1247,12 +1274,34 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             return
         }
         if set.isUnchanged { tourStatus = "No change tour: nothing differs."; refreshVideo(); return }
+        if let base = run.base, FileManager.default.fileExists(atPath: base.apk.path) {
+            launchTour(set: set, head: head, base: base)
+            return
+        }
+        tourStatus = "Finding the base build for the change tour…"
+        refreshVideo()
+        Task { @MainActor [weak self] in
+            guard let self, self.changeSet?.folder == set.folder, self.tourRunner == nil else { return }
+            if let base = await run.resolveBaseBuild() {
+                self.refreshHeader()
+                self.fillLive()
+                self.launchTour(set: set, head: head, base: base)
+            } else {
+                self.tourStatus = "No local APK for the base build yet — build main first, then record the tour."
+                self.refreshVideo()
+            }
+        }
+    }
+
+    private func launchTour(set: ChangeSet, head: Build, base: Build) {
+        guard tourRunner == nil else { return }
         let runner = ChangeTour()
         tourRunner = runner
         tourStatus = "Recording the change tour…"
         refreshVideo()
         let options = baseOption.isEmpty ? [] : baseOption.split(separator: " ").map(String.init)
-        runner.start(set: set, head: head, base: base, baseOptions: options, progress: { [weak self] line in
+        let signIn = tourSignInSlot(for: set)
+        runner.start(set: set, head: head, base: base, baseOptions: options, signInSlot: signIn, progress: { [weak self] line in
             self?.tourStatus = line
             self?.refreshVideo()
         }, completion: { [weak self] outcome in
@@ -1285,7 +1334,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     /// The engine processes of the tour recording now (checks).
     var tourProcessIDs: [Int32] { tourRunner?.processIDs ?? [] }
 
-    @objc private func recordTourPressed() { tourRunner = nil; startTour() }
+    @objc private func recordTourPressed() { recordTour(force: tour?.skipped != nil) }
     @objc private func stopTourPressed() { cancelTour() }
 
     private func unloadVideo() {
