@@ -38,6 +38,9 @@ final class Simulator {
     /// Posted (main thread) when `permissionRequest` changes; the object is the simulator.
     static let permissionChanged = Notification.Name("GreenroomSimulatorPermissionChanged")
     private var partialLine = ""
+    /// Whether the engine said the app needs `--move-shared-data` (a 4 KB-aligned native library whose writable data
+    /// shares a 16 KB page with its code): set before the process ends, so the exit handler can relaunch with it.
+    private(set) var asksToMoveSharedData = false
     /// Every input a person makes on this simulator, as it is sent ("Sign In Once" records it).
     var onPerform: ((SimulatorInput) -> Void)?
     var onSize: ((CGSize) -> Void)?
@@ -151,8 +154,9 @@ final class Simulator {
         partialLine = lines.removeLast()
         if partialLine.count > 4096 { partialLine = "" }
         var change: [String]??
-        for line in lines where line.hasPrefix("[apksim] permission ") {
-            change = Self.permissionChange(line) ?? change
+        for line in lines {
+            if line.hasPrefix("[apksim] permission ") { change = Self.permissionChange(line) ?? change }
+            else if Self.asksToMoveSharedData(line) { DispatchQueue.main.async { [weak self] in self?.asksToMoveSharedData = true } }
         }
         guard let change else { return }
         DispatchQueue.main.async { [weak self] in self?.permissionRequest = change }
@@ -167,6 +171,12 @@ final class Simulator {
         }
         if line.hasPrefix("[apksim] permission allowed:") || line.hasPrefix("[apksim] permission denied:") { return .some(nil) }
         return nil
+    }
+
+    /// Whether a log line is the engine's advice to launch with `--move-shared-data` (an UnsatisfiedLinkError for a
+    /// 4 KB-aligned library it could not map without it).
+    static func asksToMoveSharedData(_ line: String) -> Bool {
+        line.contains("launch with \(LaunchSettings.moveSharedData)") && line.contains("4 KB aligned")
     }
 
     /// What a person reads for the permissions asked: "location", "camera and microphone".

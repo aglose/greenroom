@@ -136,7 +136,10 @@ final class Engine {
         let sim = Simulator(apk: apk, log: log)
         // The network inspector reads the app's own connections as they pass (no proxy, nothing changed), so the
         // network pane and timeline have the requests from the first one on.
-        let inspect = options.contains("--network-inspect") ? options : options + ["--network-inspect"]
+        var inspect = options.contains("--network-inspect") ? options : options + ["--network-inspect"]
+        // A loose APK that crashed for want of it before (LaunchSettings.movesSharedData); a repository's keeps it in
+        // its launch options instead.
+        if !inspect.contains(LaunchSettings.moveSharedData), LaunchSettings.movesSharedData(apk) { inspect.append(LaunchSettings.moveSharedData) }
         try sim.start(launcher: launcher, stateDir: engineState, options: inspect, controlToken: supportsControlToken)
         simulators.append(sim)
         onChange?()

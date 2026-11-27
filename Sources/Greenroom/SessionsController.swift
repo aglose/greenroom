@@ -935,6 +935,25 @@ final class SessionsController {
         return nil
     }
 
+    /// The same for a simulator that has ended (found by its data slot, as the live lookups above want it alive).
+    func workspaceRoot(ofEnded sim: Simulator) -> URL? {
+        if let s = session(forSimulator: sim) { return s.workspace }
+        guard let slot = Self.slot(of: sim) else { return nil }
+        if let ws = workspaces.first(where: { mainBuilds.slot(of: $0.root) == slot }) { return ws.root }
+        if let p = pulls.all.first(where: { pulls.slot(of: $0) == slot }) { return URL(fileURLWithPath: p.workspace) }
+        return nil
+    }
+
+    /// Adds one apksim option to the repository's own (unless it has it), for every later launch of its simulators.
+    func addLaunchOption(_ option: String, for root: URL) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == root.path }),
+              !LaunchSettings.tokens(workspaces[i].launchOptions).contains(option) else { return }
+        let line = workspaces[i].launchOptions.trimmingCharacters(in: .whitespaces)
+        workspaces[i].launchOptions = line.isEmpty ? option : line + " " + option
+        store.saveWorkspaces(workspaces)
+        onChange?()
+    }
+
     /// The skin and launch options sheet for `root` (its + menu, and once when the repository is first added).
     func editLaunchSettings(for root: URL, firstTime: Bool = false) {
         guard let ws = workspace(at: root), let window = workbench?.window else { return }

@@ -21,6 +21,28 @@ enum LaunchSettings {
         "--headless": 0, "--window": 1, "--control": 1, "--control-token-file": 1, "--data-slots": 1, "--instrument": 1,
     ]
 
+    // MARK: Moving shared data
+
+    /// The engine's option for APKs with a 4 KB-aligned native library whose writable data shares a 16 KB page with its
+    /// code (Flipper's libevent, for one): it moves the data so macOS can map the library. Experimental in the engine,
+    /// so it is only added once an app has crashed for want of it (Workbench.retryMovingSharedData).
+    static let moveSharedData = "--move-shared-data"
+    private static let moveSharedDataKey = "MoveSharedDataAPKs"
+
+    /// Whether a loose APK (one no repository launches) crashed for want of `--move-shared-data` before.
+    static func movesSharedData(_ apk: URL) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: moveSharedDataKey) ?? []).contains(apk.resolvingSymlinksInPath().path)
+    }
+
+    /// Remembers that a loose APK needs `--move-shared-data`, for its later launches.
+    static func rememberMovesSharedData(_ apk: URL) {
+        var paths = UserDefaults.standard.stringArray(forKey: moveSharedDataKey) ?? []
+        let path = apk.resolvingSymlinksInPath().path
+        guard !paths.contains(path) else { return }
+        paths.append(path)
+        UserDefaults.standard.set(Array(paths.suffix(200)), forKey: moveSharedDataKey)
+    }
+
     // MARK: Options
 
     /// Splits a line as a shell would into words: spaces separate, single and double quotes group, a backslash

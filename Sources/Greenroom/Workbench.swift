@@ -306,7 +306,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 case .starting: break
                 case .running: self.grid.view(for: sim)?.setMessage("")
                 case .ended(let code):
-                    self.grid.view(for: sim)?.setMessage(Self.ended(sim, code))
+                    if code != 0, sim.asksToMoveSharedData, !sim.options.contains(LaunchSettings.moveSharedData) {
+                        self.retryMovingSharedData(sim)
+                    } else {
+                        self.grid.view(for: sim)?.setMessage(Self.ended(sim, code))
+                    }
                     DeviceData.release(sim)   // a clone or fresh slot goes once nothing uses it
                 }
                 self.reload()
@@ -321,6 +325,25 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         } catch {
             if !fromAgent { NSAlert(error: error).beginSheetModal(for: window) }
             return nil
+        }
+    }
+
+    /// The app crashed because one of its native libraries is 4 KB aligned with writable data on a code page, which
+    /// macOS cannot map, and the engine said `--move-shared-data` would fix it: relaunches once with it, in the same
+    /// place and on the same data, and remembers it (in the repository's launch options, or for this APK).
+    private func retryMovingSharedData(_ sim: Simulator) {
+        let flag = LaunchSettings.moveSharedData
+        let root = sessions.workspaceRoot(ofEnded: sim)
+        if let root { sessions.addLaunchOption(flag, for: root) } else { LaunchSettings.rememberMovesSharedData(sim.apk) }
+        grid.view(for: sim)?.setMessage("\(sim.name) needs \(flag): relaunching with it…")
+        let label = sim.displayLabel
+        let whose = root.map { "\($0.lastPathComponent)'s launch options" } ?? "this APK"
+        DevHooks.shared.relaunch(sim, options: sim.options + [flag]) { [weak self] new in
+            guard let self else { return }
+            guard let new else { self.toast.show("\(sim.name) could not be relaunched with \(flag)", problem: true); return }
+            if new.displayLabel == nil { new.displayLabel = label }
+            self.refreshCaptions()
+            self.toast.show("\(sim.name) has a 4 KB-aligned native library: relaunched with \(flag) (kept in \(whose))")
         }
     }
 
