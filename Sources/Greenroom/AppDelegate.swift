@@ -714,6 +714,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.addItem(to(workbench: #selector(Workbench.toggleLog(_:)), "Log", "L", [.command, .shift]))
 
         let help = NSMenu(title: "Help")
+        help.addItem(item("Report Feedback…", #selector(showFeedback(_:)), ""))
+        help.addItem(.separator())
         help.addItem(item("Show Simulator Logs", #selector(showLogs(_:)), ""))
         main.addItem(submenu(help, title: "Help"))
 
@@ -743,6 +745,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings(_ sender: Any?) { SettingsWindow.shared.show() }
+
+    @objc private func showFeedback(_ sender: Any?) { FeedbackWindow.shared.show(workbench: workbench) }
 
 
     /// Asked once, a few seconds after the first ordinary launch; dismissed, everything stays off.

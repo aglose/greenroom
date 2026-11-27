@@ -1439,6 +1439,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             }
         }
         add("pane.library", "Show or hide the library", "Panes", "sidebar.left") { [weak self] in self?.toggleLibrary(nil) }
+        add("help.feedback", "Report feedback…", "Help", "exclamationmark.bubble", keywords: "bug issue problem crash stacktrace screenshot github") { [weak self] in
+            FeedbackWindow.shared.show(workbench: self)
+        }
         // Recordings saved before.
         let files = (try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         let newest = files.filter { $0.pathExtension == "apkrec" }
