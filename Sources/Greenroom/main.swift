@@ -50,6 +50,8 @@ if let i = arguments.firstIndex(of: "--map-walks"), i + 3 < arguments.count {
 if let i = arguments.firstIndex(of: "--sign-in-check"), i + 1 < arguments.count { SignInCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --walk-defaults-check DIR`: a walk's defaults (the whole app, devices at once), its events, and what is kept (WalkDefaultsCheck).
 if let i = arguments.firstIndex(of: "--walk-defaults-check"), i + 1 < arguments.count { WalkDefaultsCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --feedback-check`: Report Feedback formatting, URL truncation, and screenshot staging (FeedbackCheck).
+if arguments.contains("--feedback-check") { FeedbackCheck.run() }
 if let i = arguments.firstIndex(of: "--smoke"), i + 1 < arguments.count {
     let apk = URL(fileURLWithPath: arguments[i + 1])
     do {
