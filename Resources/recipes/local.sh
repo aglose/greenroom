@@ -21,36 +21,79 @@ trap 'rm -f "$stamp"' EXIT
 
 # The application module: a build file that applies the Android application plugin, spelled any of the usual
 # ways ('com.android.application', alias(libs.plugins.android.application), libs.plugins.androidApplication).
+# Supports standard Gradle modules (":app", ":samples:demo") and composite sub-projects ("consumer/:app").
+project_dir="."
 if [ -z "$module" ]; then
   found=()
   while IFS= read -r f; do
-    dir=$(dirname "$f")
-    [ "$dir" = "." ] && continue
-    found+=("${dir#./}")
-  done < <(find . -maxdepth 3 \( -name build.gradle -o -name build.gradle.kts \) -not -path '*/build/*' -not -path '*/node_modules/*' \
-             -exec grep -lE 'android[._-]?[Aa]pplication' {} + 2>/dev/null | sort)
+    if grep -vE 'apply[[:space:]]+false' "$f" | grep -qE 'android[._-]?[Aa]pplication|applicationId[[:space:]]*(=|[[:space:]]+["'"'"'])'; then
+      dir=$(dirname "$f")
+      found+=("${dir#./}")
+    fi
+  done < <(find . -maxdepth 4 \( -name build.gradle -o -name build.gradle.kts \) \
+             -not -path '*/build/*' -not -path '*/build-logic/*' -not -path '*/buildSrc/*' \
+             -not -path '*/node_modules/*' -not -path '*/src/*' \
+             -not -path '*/.git/*' -not -path '*/.gradle/*' -not -path '*/Pods/*' 2>/dev/null | sort)
   if [ "${#found[@]}" -eq 0 ]; then
-    echo "error: no Android application module found (no build file applies the Android application plugin). Set the module in the workspace's settings (module)." >&2
+    echo "error: no Android application module found (no build file applies the Android application plugin). Choose an Android app in the repository header or Settings > Build Recipes." >&2
     exit 2
   fi
   if [ "${#found[@]}" -gt 1 ]; then
-    echo "error: several application modules found: ${found[*]}. Set the module in the workspace's settings (module) to one of them." >&2
+    echo "error: several application modules found: ${found[*]}. Choose which Android app to build from the repository header or Settings > Build Recipes." >&2
     exit 2
   fi
   module="${found[0]}"
   echo "application module: $module"
 fi
-path="${module//:/\/}"        # ":app" or "app" or ":feature:app" -> folder
-path="${path#/}"
-gradle_path=":${module#:}"
-gradle_path="${gradle_path//\//:}"
+
+# Split composite spec "subproject/:app" into project_dir="subproject" and module=":app".
+case "$module" in
+  */:*)
+    project_dir="${module%%/:*}"
+    module=":${module#*/:}"
+    ;;
+esac
+
+if [ "$project_dir" != "." ]; then
+  [ -d "$project_dir" ] || { echo "error: project directory '$project_dir' does not exist in $GREENROOM_WORKTREE" >&2; exit 2; }
+  cd "$project_dir"
+fi
+
+if [ "$module" = "." ] || [ "$module" = ":" ]; then
+  path="."
+  gradle_prefix=""
+else
+  path="$(printf '%s' "$module" | tr ':' '/')"        # ":app" or "app" or ":feature:app" -> folder
+  path="${path#/}"
+  # If ./gradlew is not at the current directory, walk up from $path to find the nearest composite gradlew.
+  if [ ! -x ./gradlew ] && [ -d "$path" ]; then
+    probe="$path"
+    while [ "$probe" != "." ] && [ -n "$probe" ]; do
+      if [ -x "$probe/gradlew" ]; then
+        rel="${path#"$probe"}"
+        rel="${rel#/}"
+        cd "$probe"
+        path="${rel:-.}"
+        break
+      fi
+      next="$(dirname "$probe")"
+      [ "$next" = "$probe" ] && break
+      probe="$next"
+    done
+  fi
+  if [ "$path" = "." ]; then
+    gradle_prefix=""
+  else
+    gradle_prefix=":$(printf '%s' "$path" | tr '/' ':')"
+  fi
+fi
 
 # assembleDebug, assembleRelease, or assemble<Flavor><Type>: the first letter capitalised.
 task="assemble$(printf '%s' "${variant:0:1}" | tr '[:lower:]' '[:upper:]')${variant:1}"
-[ -x ./gradlew ] || { echo "error: no executable ./gradlew in $GREENROOM_WORKTREE" >&2; exit 2; }
-echo "+ ./gradlew ${gradle_path}:${task}"
+[ -x ./gradlew ] || { echo "error: no executable ./gradlew in $(pwd)" >&2; exit 2; }
+echo "+ ./gradlew ${gradle_prefix}:${task}"
 touch "$stamp"                  # APKs not newer than this were not written by this run
-./gradlew "${gradle_path}:${task}" --console=plain
+./gradlew "${gradle_prefix}:${task}" --console=plain
 
 apks="$path/build/outputs/apk"
 lower="$(printf '%s' "$variant" | tr '[:upper:]' '[:lower:]')"

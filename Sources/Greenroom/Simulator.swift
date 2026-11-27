@@ -216,5 +216,26 @@ final class Simulator {
         DispatchQueue.global().asyncAfter(deadline: .now() + 3) { if p.isRunning { p.terminate() } }
     }
 
+    /// Asks the simulator to exit immediately during app shutdown / update relaunch: sends `quit` if connected and
+    /// `SIGTERM` right away (the 3 s `asyncAfter` fallback in `quit()` never fires before `exit()`).
+    func terminateNow() {
+        guard process.isRunning else { return }
+        if control != nil { send("quit") }
+        process.terminate()
+    }
+
+    var isProcessRunning: Bool { process.isRunning }
+
     func waitUntilExit() { process.waitUntilExit() }
+
+    /// Waits up to `timeout` seconds for the simulator process to exit, sending `SIGKILL` if it does not.
+    func waitUntilExit(timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline { usleep(25_000) }
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
+
+    func killNow() {
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
 }

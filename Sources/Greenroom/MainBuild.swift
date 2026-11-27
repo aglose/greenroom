@@ -9,64 +9,219 @@ import AppKit
 // slot of its own and reloads, data kept, when a newer main lands. "Keep main built" in the repository's + menu
 // turns it off.
 
-/// Whether a folder looks like an Android app project: a Gradle wrapper (at the top or in a composite build) and a
-/// build file (at the top, in a module, or nested inside composite builds) that applies the Android application plugin
-/// or sets `applicationId`. Cached per path.
+/// One Android application target inside a repository (either at the repo root or inside a composite build).
+struct AndroidAppTarget: Equatable, Hashable {
+    /// Directory relative to the repository root that holds this app's `gradlew` (`""` when at repo root).
+    let projectDir: String
+    /// Gradle module path inside `projectDir` (e.g. `":app"`, `":samples:demo"`, or `":"` for a root-level app).
+    let gradleModule: String
+
+    /// Canonical identifier stored in `Workspace.module` and passed as `GREENROOM_MODULE`.
+    /// Single-project repos use `":app"` (backwards-compatible); composite sub-projects use `"<projectDir>/:app"`.
+    var id: String { projectDir.isEmpty ? gradleModule : "\(projectDir)/\(gradleModule)" }
+
+    /// Relative directory of this module inside the repository (e.g. `"app"`, `"consumer/app"`, `"samples/demo"`).
+    var moduleDir: String { Self.moduleDirectory(for: id) }
+
+    /// Short human-readable label for sidebar pills and menus (e.g. `"app"`, `"consumer"`, `"mobile / wear"`).
+    var displayName: String {
+        let cleanMod = gradleModule.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+        if projectDir.isEmpty { return cleanMod.isEmpty ? "app" : cleanMod }
+        if cleanMod.isEmpty || cleanMod == "app" { return projectDir }
+        return "\(projectDir) / \(cleanMod)"
+    }
+
+    /// Resolves any `Workspace.module` spec (`":app"`, `"app"`, `":samples:demo"`, `"consumer/:app"`) to a relative
+    /// directory path inside the repository.
+    static func moduleDirectory(for moduleSpec: String) -> String {
+        let trimmed = moduleSpec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if let range = trimmed.range(of: "/:") {
+            let proj = String(trimmed[..<range.lowerBound]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let mod = String(trimmed[range.upperBound...]).replacingOccurrences(of: ":", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if proj.isEmpty { return mod }
+            if mod.isEmpty { return proj }
+            return "\(proj)/\(mod)"
+        }
+        return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: ":/")).replacingOccurrences(of: ":", with: "/")
+    }
+}
+
+/// Whether a folder looks like an Android app project and which Android application targets live inside it
+/// (root or composite builds). Cached per path; UI callers use `cachedIsApp` / `cachedApps` + `probe` so the
+/// main thread never blocks on filesystem walks.
 enum AndroidProject {
     private static var cache: [String: Bool] = [:]
+    private static var appsCache: [String: [AndroidAppTarget]] = [:]
+    private static var probing: Set<String> = []
+    private static var waiters: [String: [@MainActor () -> Void]] = [:]
     private static let lock = NSLock()
     /// Directories that never hold Gradle build files or wrappers.
-    static let skipDirectories: Set<String> = ["build", "src", "node_modules", "Pods", "DerivedData", "target", "dist", "out", "vendor"]
+    static let skipDirectories: Set<String> = [
+        "build", "build-logic", "buildSrc", "src", "node_modules", "Pods", "DerivedData", "target", "dist", "out", "vendor",
+        "docs", "scripts", "fastlane", "ios", "web", "macos", "linux", "windows"
+    ]
 
+    /// Synchronous check (for background tasks and tests). Prefer `cachedIsApp` + `probe` on the main thread.
     static func isApp(_ root: URL) -> Bool {
         let key = root.resolvingSymlinksInPath().path
         lock.lock()
         if let known = cache[key] { lock.unlock(); return known }
         lock.unlock()
-        let found = look(root)
-        lock.lock(); cache[key] = found; lock.unlock()
+        let foundApps = discoverApps(in: root)
+        let found = !foundApps.isEmpty || SessionStore.newestAPK(in: root) != nil
+        lock.lock()
+        appsCache[key] = foundApps
+        cache[key] = found
+        lock.unlock()
         return found
     }
 
-    /// Forgets what was found (a check makes and removes projects).
-    static func forget() { lock.lock(); cache = [:]; lock.unlock() }
+    /// Synchronous discovery of all Android app targets in `root` (for background tasks and tests).
+    static func apps(in root: URL) -> [AndroidAppTarget] {
+        let key = root.resolvingSymlinksInPath().path
+        lock.lock()
+        if let known = appsCache[key] { lock.unlock(); return known }
+        lock.unlock()
+        let foundApps = discoverApps(in: root)
+        let found = !foundApps.isEmpty || SessionStore.newestAPK(in: root) != nil
+        lock.lock()
+        appsCache[key] = foundApps
+        cache[key] = found
+        lock.unlock()
+        return foundApps
+    }
 
-    private static func look(_ root: URL) -> Bool {
+    /// Instant O(1) cache lookup (never touches disk). Nil until probed.
+    static func cachedIsApp(_ root: URL) -> Bool? {
+        let key = root.resolvingSymlinksInPath().path
+        lock.lock(); defer { lock.unlock() }
+        return cache[key]
+    }
+
+    /// Instant O(1) cache lookup of discovered Android app targets (never touches disk). Nil until probed.
+    static func cachedApps(in root: URL) -> [AndroidAppTarget]? {
+        let key = root.resolvingSymlinksInPath().path
+        lock.lock(); defer { lock.unlock() }
+        return appsCache[key]
+    }
+
+    /// Probes `root` off the main thread if not already cached, then invokes `onReady` on `@MainActor`.
+    static func probe(_ root: URL, onReady: @escaping @MainActor () -> Void) {
+        let key = root.resolvingSymlinksInPath().path
+        lock.lock()
+        if cache[key] != nil {
+            lock.unlock()
+            return
+        }
+        waiters[key, default: []].append(onReady)
+        if probing.contains(key) {
+            lock.unlock()
+            return
+        }
+        probing.insert(key)
+        lock.unlock()
+        Task.detached(priority: .utility) {
+            _ = AndroidProject.isApp(root)
+            let callbacks = finishProbe(key)
+            await MainActor.run {
+                for cb in callbacks { cb() }
+            }
+        }
+    }
+
+    private static func finishProbe(_ key: String) -> [@MainActor () -> Void] {
+        lock.lock(); defer { lock.unlock() }
+        probing.remove(key)
+        return waiters.removeValue(forKey: key) ?? []
+    }
+
+    /// Forgets what was found (a check makes and removes projects).
+    static func forget() {
+        lock.lock()
+        cache = [:]
+        appsCache = [:]
+        probing = []
+        waiters = [:]
+        lock.unlock()
+    }
+
+    /// Reads up to 32 KB of a Gradle build file and checks whether it configures an Android application module.
+    /// Ignores root-level plugin declarations marked `apply false` (e.g. `alias(libs.plugins.android.application) apply false`).
+    private static func isAndroidAppBuildFile(_ url: URL) -> Bool {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? fh.close() }
+        let data = fh.readData(ofLength: 32_768)
+        guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return false }
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("//") || line.hasPrefix("*") { continue }
+            if line.range(of: #"\bapply\s+false\b"#, options: .regularExpression) != nil { continue }
+            if line.range(of: #"android[._-]?[Aa]pplication"#, options: .regularExpression) != nil
+                || line.range(of: #"(?<![A-Za-z0-9_])applicationId\s*(=|\s+["'])"#, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func discoverApps(in root: URL) -> [AndroidAppTarget] {
         let fm = FileManager.default
-        var hasGradlew = false
-        var hasAppBuild = false
-        var queue: [(URL, Int)] = [(root, 0)]
+        let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+        var gradlewDirs: Set<String> = []
+        var appDirs: [String] = []
+        var queue: [(URL, Int, String)] = [(resolvedRoot, 0, "")]
         var index = 0
         let maxDepth = 4
-        let maxDirs = 500
+        let maxDirs = 300
         while index < queue.count && index < maxDirs {
-            let (dir, depth) = queue[index]
+            let (dir, depth, rel) = queue[index]
             index += 1
-            if !hasGradlew && depth <= 2 && fm.fileExists(atPath: dir.appendingPathComponent("gradlew").path) {
-                hasGradlew = true
+            if depth <= 2 && fm.fileExists(atPath: dir.appendingPathComponent("gradlew").path) {
+                gradlewDirs.insert(rel)
             }
-            if !hasAppBuild {
-                for name in ["build.gradle.kts", "build.gradle"] {
-                    guard let text = try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8) else { continue }
-                    if text.range(of: #"android[._-]?[Aa]pplication"#, options: .regularExpression) != nil
-                        || text.range(of: #"(?<![A-Za-z0-9_])applicationId\s*(=|\s+["'])"#, options: .regularExpression) != nil {
-                        hasAppBuild = true
-                        break
-                    }
+            for name in ["build.gradle.kts", "build.gradle"] {
+                let candidate = dir.appendingPathComponent(name)
+                if fm.fileExists(atPath: candidate.path), isAndroidAppBuildFile(candidate) {
+                    appDirs.append(rel)
+                    break
                 }
             }
-            if hasGradlew && hasAppBuild { return true }
             if depth < maxDepth,
                let children = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) {
                 for child in children where queue.count < maxDirs {
+                    let childName = child.lastPathComponent
                     guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
                           vals.isDirectory == true, vals.isSymbolicLink != true,
-                          !skipDirectories.contains(child.lastPathComponent) else { continue }
-                    queue.append((child, depth + 1))
+                          !skipDirectories.contains(childName) else { continue }
+                    let childRel = rel.isEmpty ? childName : "\(rel)/\(childName)"
+                    queue.append((child, depth + 1, childRel))
                 }
             }
         }
-        return SessionStore.newestAPK(in: root) != nil
+        guard !gradlewDirs.isEmpty, !appDirs.isEmpty else { return [] }
+        var targets: [AndroidAppTarget] = []
+        for appRel in appDirs {
+            // Pair each app module with its nearest enclosing `gradlew` directory (falling back to root if present).
+            var probeRel = appRel
+            var matchedGradlew: String?
+            while true {
+                if gradlewDirs.contains(probeRel) { matchedGradlew = probeRel; break }
+                if probeRel.isEmpty { break }
+                if let slash = probeRel.lastIndex(of: "/") { probeRel = String(probeRel[..<slash]) }
+                else { probeRel = "" }
+            }
+            guard let projectDir = matchedGradlew else { continue }
+            let modRel: String
+            if projectDir.isEmpty { modRel = appRel }
+            else if appRel == projectDir { modRel = "" }
+            else if appRel.hasPrefix(projectDir + "/") { modRel = String(appRel.dropFirst(projectDir.count + 1)) }
+            else { continue }
+            let gradleMod = modRel.isEmpty ? ":" : ":" + modRel.replacingOccurrences(of: "/", with: ":")
+            let target = AndroidAppTarget(projectDir: projectDir, gradleModule: gradleMod)
+            if !targets.contains(target) { targets.append(target) }
+        }
+        return targets.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
 }
 
@@ -152,8 +307,32 @@ final class MainBuilds {
     /// The paths whose builds the store keeps (main's worktrees are not in `git worktree list` of the rows).
     var livePaths: [String] { (sessions?.workspaces ?? []).filter(\.keepMain).map { trunk(of: $0.root).path } }
 
-    /// Whether the repository gets a main row.
-    func applies(to ws: Workspace) -> Bool { ws.keepMain && AndroidProject.isApp(ws.root) }
+    /// Whether the repository gets a main row. Never blocks the main thread: if not yet probed, starts an
+    /// asynchronous probe and refreshes once known.
+    func applies(to ws: Workspace) -> Bool {
+        guard ws.keepMain else { return false }
+        if let known = AndroidProject.cachedIsApp(ws.root) { return known }
+        AndroidProject.probe(ws.root) { [weak self] in
+            guard let self, let current = self.sessions?.workspaces.first(where: { $0.root.path == ws.root.path }) else { return }
+            self.sessions?.reconcileAppTarget(for: current.root)
+            self.change()
+            self.ensure(current)
+        }
+        return false
+    }
+
+    /// Clears cached main-branch build state for `ws` (e.g. after switching the selected Android app in a monorepo).
+    func reset(_ ws: Workspace) {
+        let key = ws.root.path
+        shas[key] = nil
+        names[key] = nil
+        states[key] = nil
+        lastCheck[key] = nil
+        attempted[key] = nil
+        madeFor[key] = nil
+        close(ws)
+        change()
+    }
 
     // MARK: Rows
 

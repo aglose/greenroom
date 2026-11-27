@@ -560,6 +560,8 @@ struct SettingsView: View {
 struct WorkspaceRecipesSection: View {
     @Binding var selectedPath: String?
     @State private var workspaces: [Workspace] = []
+    @State private var moduleSpec = ""
+    @State private var discoveredApps: [AndroidAppTarget] = []
     @State private var ciArtifact = ""
     @State private var ciAPK = ""
     @State private var ciWorkflow = ""
@@ -585,6 +587,16 @@ struct WorkspaceRecipesSection: View {
 
     private func loadFields() {
         guard let ws = activeWorkspace else { return }
+        moduleSpec = ws.module ?? ""
+        discoveredApps = AndroidProject.cachedApps(in: ws.root) ?? []
+        let root = ws.root
+        if AndroidProject.cachedApps(in: root) == nil {
+            AndroidProject.probe(root) {
+                if activeWorkspace?.root.path == root.path {
+                    discoveredApps = AndroidProject.cachedApps(in: root) ?? []
+                }
+            }
+        }
         ciArtifact = ws.ci.artifact
         ciAPK = ws.ci.apk
         ciWorkflow = ws.ci.workflow
@@ -596,12 +608,16 @@ struct WorkspaceRecipesSection: View {
     private func save() {
         guard let c = controller, let ws = activeWorkspace,
               let i = c.workspaces.firstIndex(where: { $0.root.path == ws.root.path }) else { return }
+        let trimmedMod = moduleSpec.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newMod = trimmedMod.isEmpty ? nil : trimmedMod
+        let moduleChanged = c.workspaces[i].module != newMod
         c.workspaces[i].ci.artifact = ciArtifact.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].ci.apk = ciAPK.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].ci.workflow = ciWorkflow.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].remote.sandbox = remoteSandbox.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].remote.template = remoteTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
         c.store.saveWorkspaces(c.workspaces)
+        if moduleChanged { c.setAppModule(newMod, for: ws.root, silent: true) }
         workspaces = c.workspaces
         savedBanner = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { savedBanner = false }
@@ -640,6 +656,32 @@ struct WorkspaceRecipesSection: View {
                         .foregroundStyle(SettingsTheme.mute)
                 }
             } else {
+                SettingsCard {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Android App & Module")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(SettingsTheme.ink)
+                            Text(discoveredApps.count > 1
+                                 ? "This repository has \(discoveredApps.count) Android apps. Choose which one to build and run."
+                                 : "Leave blank to auto-detect, or set a Gradle module (e.g. :app or consumer/:app).")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(SettingsTheme.mute)
+                        }
+                        Spacer()
+                        if discoveredApps.count > 1 {
+                            Picker("", selection: $moduleSpec) {
+                                ForEach(discoveredApps, id: \.id) { target in
+                                    Text(target.displayName).tag(target.id)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: 200)
+                        }
+                    }
+                    field("Gradle module / composite target", text: $moduleSpec, placeholder: "Auto-detect (e.g. :app or consumer/:app)")
+                }
+
                 SettingsCard {
                     Text("GitHub Actions CI Recipe")
                         .font(.system(size: 12.5, weight: .semibold))

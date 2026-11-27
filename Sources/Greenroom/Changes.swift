@@ -855,9 +855,11 @@ final class ChangeTour {
         let all = sims, names = slots, files = logs, root = Engine.shared.engineState.appendingPathComponent("cache/data", isDirectory: true)
         sims = []; slots = []; logs = []
         Self.pendingLock.lock(); files.forEach { Self.pendingLogs.insert($0) }; Self.pendingLock.unlock()
-        for s in all { s.quit() }
+        if wait { for s in all { s.terminateNow() } } else { for s in all { s.quit() } }
         let finish = {
-            for s in all { s.waitUntilExit() }
+            for s in all {
+                if wait { s.waitUntilExit(timeout: 1.5) } else { s.waitUntilExit() }
+            }
             for n in names { SlotClone.remove(n, in: root) }
             for f in files { try? FileManager.default.removeItem(at: f) }
             Self.pendingLock.lock(); files.forEach { Self.pendingLogs.remove($0) }; Self.pendingLock.unlock()

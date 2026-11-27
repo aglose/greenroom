@@ -217,6 +217,35 @@ enum MainCheck {
             sessions.removeWorkspace(at: fresh)
             expect(!sessions.groups().contains { $0.workspace?.resolvingSymlinksInPath().path == fresh.resolvingSymlinksInPath().path },
                    "removing the repository takes it out of the sidebar")
+
+            // 8. Monorepo with multiple Android apps (shared repo + multiple composite builds):
+            //    discovers all apps, scopes APKs to the selected app, auto-selects when adding a subfolder, and switches cleanly.
+            let mono = base.appendingPathComponent("monorepo-multi", isDirectory: true)
+            try? fm.createDirectory(at: mono, withIntermediateDirectories: true)
+            write("#!/bin/sh\nexit 1\n", mono.appendingPathComponent("consumer/gradlew"), executable: true)
+            write("plugins { id(\"com.android.application\") }\n", mono.appendingPathComponent("consumer/app/build.gradle.kts"))
+            write("#!/bin/sh\nexit 1\n", mono.appendingPathComponent("driver/gradlew"), executable: true)
+            write("plugins { id(\"com.android.application\") }\n", mono.appendingPathComponent("driver/app/build.gradle.kts"))
+            let consumerApk = mono.appendingPathComponent("consumer/app/build/outputs/apk/debug/consumer-debug.apk")
+            let driverApk = mono.appendingPathComponent("driver/app/build/outputs/apk/debug/driver-debug.apk")
+            try? fm.createDirectory(at: consumerApk.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.createDirectory(at: driverApk.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.copyItem(at: apk, to: consumerApk)
+            try? fm.copyItem(at: apk, to: driverApk)
+            git(["init", "-q", "-b", "main"], in: mono)
+            let monoApps = AndroidProject.apps(in: mono)
+            expect(monoApps.map(\.id) == ["consumer/:app", "driver/:app"],
+                   "monorepo discovers both composite Android apps: \(monoApps.map(\.id))")
+            expect(SessionStore.newestAPK(in: mono, module: "consumer/:app")?.apk.lastPathComponent == "consumer-debug.apk"
+                   && SessionStore.newestAPK(in: mono, module: "driver/:app")?.apk.lastPathComponent == "driver-debug.apk",
+                   "newestAPK scopes outputs to the selected monorepo app")
+            let monoRoot = await sessions.addRepository(mono.appendingPathComponent("driver")).value
+            expect(monoRoot == mono.resolvingSymlinksInPath() && sessions.selectedApp(for: mono.resolvingSymlinksInPath())?.id == "driver/:app",
+                   "adding a subfolder inside a multi-app monorepo auto-selects that app")
+            sessions.setAppModule("consumer/:app", for: mono.resolvingSymlinksInPath(), silent: true)
+            expect(sessions.selectedApp(for: mono.resolvingSymlinksInPath())?.id == "consumer/:app",
+                   "switching the active monorepo app updates selection")
+            sessions.removeWorkspace(at: mono.resolvingSymlinksInPath())
             finish()
         }
     }
