@@ -825,6 +825,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             return self.devicePane.toAll ? Engine.shared.simulators.filter { $0.state == .running } : (self.live.map { [$0] } ?? [])
         }
         devicePane.onOverridesChange = { [weak self] in self?.refreshOverrides() }
+        NotificationCenter.default.addObserver(forName: Simulator.permissionChanged, object: nil, queue: .main) { [weak self] note in
+            guard let self, (note.object as AnyObject?) === self.selected else { return }
+            self.refreshOverrides()
+        }
         devicePane.onClose = { [weak self] in self?.setShowingDevice(false) }
         deviceLeading = devicePane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         inspectorLeading = inspectorView.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
@@ -887,6 +891,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             updateRailBadges(overrideCount: 0)
             return
         }
+        if let asked = sim.permissionRequest {
+            overrideBar.addArrangedSubview(makePermissionPrompt(asked, on: sim))
+        }
         let overrides = devicePane.activeOverrides(for: sim)
         for o in overrides {
             let pill = makeOverridePill(symbol: o.symbol, title: o.label, color: o.color) { [weak self] in
@@ -905,6 +912,41 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         overrideBar.isHidden = overrideBar.arrangedSubviews.isEmpty
         updateRailBadges(overrideCount: overrides.count)
+    }
+
+    /// The app is waiting on a permission prompt the headless engine cannot show: the question, with its two answers.
+    private func makePermissionPrompt(_ names: [String], on sim: Simulator) -> NSView {
+        let phrase = Simulator.permissionPhrase(names)
+        let question = NSTextField(labelWithString: "Allow \(phrase)?")
+        question.font = .systemFont(ofSize: 11, weight: .semibold)
+        question.textColor = Design.warning
+        question.toolTip = "The app asked for " + names.joined(separator: ", ")
+        let icon = NSImageView(image: NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: "Permission request") ?? NSImage())
+        icon.contentTintColor = Design.warning
+        icon.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        func answer(_ title: String, _ command: String, accent: Bool) -> GlassButton {
+            let b = GlassButton(symbol: nil, title: title, label: "\(title): \(phrase)", style: accent ? .accent : .well, target: nil, action: nil)
+            b.font = .systemFont(ofSize: 11, weight: .semibold)
+            b.heightAnchor.constraint(equalToConstant: 20).isActive = true
+            b.layer?.cornerRadius = 10
+            b.onPress = { [weak self] in
+                sim.send(command) { reply in
+                    if reply.hasPrefix("error") || reply.hasPrefix("no ") { self?.toast.show(reply, problem: true) }
+                }
+            }
+            return b
+        }
+        let row = NSStackView(views: [icon, question, answer("Don't allow", "permission deny", accent: false), answer("Allow", "permission allow", accent: true)])
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 3)
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 12
+        row.layer?.backgroundColor = Design.warning.withAlphaComponent(0.18).cgColor
+        row.layer?.borderWidth = 1
+        row.layer?.borderColor = Design.warning.withAlphaComponent(0.38).cgColor
+        row.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        row.setAccessibilityLabel("The app asks for \(phrase)")
+        return row
     }
 
     private func makeOverridePill(symbol: String, title: String, color: NSColor, onClear: @escaping () -> Void) -> NSView {

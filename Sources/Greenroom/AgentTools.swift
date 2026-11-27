@@ -62,9 +62,17 @@ final class AgentTools {
         "rotate": "^(left|right|portrait|landscape)$", "network": "^(online|offline|3g|lossy)$",
         "device": "^(phone|foldable|tablet|desktop|tv|watch|[0-9]{3,4}x[0-9]{3,4}(@[0-9.]+)?)$",
         "timezone": "^[A-Za-z_]+(/[A-Za-z_+-]+)*$", "animscale": "^[0-9.]{1,4}$",
-        "permission": "^(allow|deny|reset|(grant|revoke) [A-Za-z0-9_.]+)$", "home": "^$", "resume": "^$", "lock": "^$",
+        "permission": "^(allow|deny|reset|(grant|revoke) [A-Za-z0-9_.]+)$",
+        "location": "^(none|run|bike|drive|-?[0-9]{1,2}(\\.[0-9]+)? -?[0-9]{1,3}(\\.[0-9]+)?)$", "home": "^$", "resume": "^$", "lock": "^$",
         "unlock": "^$", "recreate": "^$", "restart": "^$", "process-death": "^$",
     ]
+
+    /// A location value is a route name, or a latitude and longitude on the globe.
+    static func validLocation(_ value: String) -> Bool {
+        let parts = value.split(separator: " ").compactMap { Double($0) }
+        guard parts.count == 2 else { return ["none", "run", "bike", "drive"].contains(value) }
+        return abs(parts[0]) <= 90 && abs(parts[1]) <= 180
+    }
 
     /// The tools that act on a simulator and so are recorded (launch is noted when it has made one).
     static let driving: Set<String> = ["tap", "type", "key", "swipe", "back", "open_url", "set", "screen", "check", "wait_for", "screenshot", "logs", "run_script"]
@@ -96,7 +104,8 @@ final class AgentTools {
         ("open_url", "Open a deep link in the app.", schema(["url": str], required: ["url"])),
         ("set", "Change the device or app state: appearance dark|light, locale fr-FR, fontscale 1.3, rotate left|right|portrait|"
             + "landscape, network online|offline|3g|lossy, device phone|tablet|..., timezone, animscale, permission allow|deny|"
-            + "grant NAME|revoke NAME|reset, and (no value) home, resume, lock, unlock, recreate, restart, process-death.",
+            + "grant NAME|revoke NAME|reset, "
+            + "location \"LAT LON\" (37.7749 -122.4194) or a moving route run|bike|drive, none clears it; and (no value) home, resume, lock, unlock, recreate, restart, process-death.",
          schema(["setting": ["type": "string", "enum": settings.keys.sorted()], "value": str], required: ["setting"])),
         ("screen", "The whole screen as compact lines: ref \"label\" click|field. text keeps lines containing it.",
          schema(["text": str, "bounds": bool])),
@@ -331,7 +340,11 @@ final class AgentTools {
         if !settled.hasPrefix("settled") { first += " (still animating)" }
         first += " | \(now)"
         if let before, before != now { first += " (was \(before))" }
-        let lines = change.lines()
+        var lines = change.lines()
+        if let asked = DispatchQueue.main.sync(execute: { sim.permissionRequest }) {
+            // The engine is headless: the app waits on a system prompt that is not on screen, and nothing else says so.
+            lines.insert("the app is waiting on a permission prompt for \(asked.joined(separator: ", ")): answer with set permission allow (or deny)", at: 0)
+        }
         // Only the nodes are compared: a change of colours, pictures or layout alone (dark mode, say) is not text, and
         // "no change" alone read as "it did not work" in a real agent session.
         return ([first] + (lines.isEmpty ? ["no change in the screen's text (colours and pictures are not compared: screenshot shows them)"] : lines)).joined(separator: "\n")
@@ -583,8 +596,11 @@ final class AgentTools {
         guard let setting = args["setting"] as? String, let pattern = AgentTools.settings[setting] else {
             throw Failure(message: "setting is one of \(AgentTools.settings.keys.sorted().joined(separator: ", "))")
         }
-        let value = (args["value"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-        guard value.range(of: pattern, options: .regularExpression) != nil else {
+        var value = (args["value"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        if setting == "location" {   // "37.7,-122.4" and "37.7, -122.4" mean the same place as "37.7 -122.4"
+            value = value.replacingOccurrences(of: ",", with: " ").split(separator: " ").joined(separator: " ")
+        }
+        guard value.range(of: pattern, options: .regularExpression) != nil, setting != "location" || AgentTools.validLocation(value) else {
             throw Failure(message: pattern == "^$" ? "\(setting) takes no value" : "\(setting): \(ScreenNode.quote(value)) is not a value it takes")
         }
         let line = value.isEmpty ? setting : "\(setting) \(value)"
