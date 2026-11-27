@@ -108,6 +108,8 @@ struct Session {
     var dirty: Bool
     var ahead: Int
     var claude: ClaudeSession?
+    /// All Claude Code / T3 Code sessions attached to this worktree, highest priority first.
+    var agentSessions: [ClaudeSession] = []
     /// The GitHub pull request for this worktree's branch (from `gh pr list`), if any.
     var githubPR: GH.BranchPull? = nil
     /// The newest build of this worktree, once one has been recorded in the store.
@@ -171,6 +173,29 @@ struct Session {
     }
     /// A Claude session at work in it now (running, or waiting for the person).
     var claudeActive: Bool { guard let c = claude, !c.archived else { return false }; return c.running || c.status == .waiting }
+    /// All active (running or waiting, non-archived, non-settled) T3 Code / Claude Code sessions in this worktree.
+    var activeAgentSessions: [ClaudeSession] {
+        let list = agentSessions.isEmpty ? [claude].compactMap { $0 } : agentSessions
+        return list.filter { !$0.archived && !$0.settled && ($0.running || $0.status == .waiting) }
+    }
+    /// The primary T3 Code / Claude Code session worth displaying in the sidebar card for this worktree.
+    /// Main checkouts only show active or recent unsettled sessions (avoiding stale archived threads);
+    /// feature worktrees also show their most recent finished session so the owner thread stays visible.
+    var displayAgent: ClaudeSession? {
+        if let active = activeAgentSessions.first { return active }
+        let list = agentSessions.isEmpty ? [claude].compactMap { $0 } : agentSessions
+        if isMain {
+            let cutoff = Date().addingTimeInterval(-3 * 86_400)
+            return list.first { !$0.archived && !$0.settled && ($0.title != nil || $0.summary != nil) && ($0.lastActivity ?? .distantPast) > cutoff }
+        }
+        return list.first { !$0.archived && ($0.title != nil || $0.summary != nil || $0.running || $0.status == .waiting) }
+    }
+    /// Pull request summary to show on the row when `githubPR` is absent (main checkouts ignore stale merged/closed PRs).
+    var fallbackPR: ClaudePR? {
+        if let open = pullRequests.first(where: { $0.state == .open }) { return open }
+        if isMain { return nil }
+        return pullRequests.first
+    }
     var isStale: Bool {
         guard let outputs, let sourcesDate else { return false }
         return outputs.date < sourcesDate

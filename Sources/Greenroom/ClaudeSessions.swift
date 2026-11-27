@@ -39,8 +39,27 @@ struct ClaudeSession: Equatable {
     var source: Source = .claude
     /// The T3 Code thread's id (nil for Claude Code's sessions).
     var id: String?
+    /// Whether a T3 Code thread has been settled (finished and put aside).
+    var settled = false
+    /// Model name when known (e.g. from T3 Code).
+    var model: String? = nil
+    /// Provider name when known (e.g. "antigravity", "claude", "codex").
+    var provider: String? = nil
+    /// Short single-line summary of the latest user request / what the session is working on.
+    var summary: String? = nil
+    /// Raw status string when known (e.g. "running", "waiting", "failed", "interrupted", "completed").
+    var rawStatus: String? = nil
+    /// Web/deep link to the thread when provided (T3 Code).
+    var link: URL? = nil
 
     var pullRequest: URL? { pullRequests.first }
+    /// Human-readable source name.
+    var sourceName: String { source == .t3 ? "T3 Code" : "Claude" }
+    /// Short readable model badge (trims verbose prefixes if present).
+    var shortModel: String? {
+        guard let m = model, !m.isEmpty else { return nil }
+        return m.replacingOccurrences(of: "claude-", with: "")
+    }
     /// What a row shows: the same session without the time of its last activity, which moves with every write.
     var shown: ClaudeSession { var c = self; c.lastActivity = nil; return c }
 }
@@ -107,6 +126,7 @@ enum ClaudeReader {
         var date: Date?
         var archived = false
         var fromDesktop = false
+        var summary: String?
     }
 
     /// What the reader keeps between reads: the parsed record of each file, by path, valid while the file's modified
@@ -201,7 +221,8 @@ enum ClaudeReader {
             if g.waiting && !g.archived { status = .waiting }
             let prs = g.prs.map { ClaudePR(url: $0, state: g.prInfo[$0]?.state, branch: g.prInfo[$0]?.branch) }
             return ClaudeSession(folder: res(folder), repository: g.repository.map(res), title: g.title ?? g.pidName, status: status,
-                                 branch: g.branch, pullRequests: g.prs, prs: prs, lastActivity: g.date, running: g.alive, archived: g.archived)
+                                 branch: g.branch, pullRequests: g.prs, prs: prs, lastActivity: g.date, running: g.alive, archived: g.archived,
+                                 summary: g.summary)
         }
     }
 
@@ -224,6 +245,7 @@ enum ClaudeReader {
         r.date = [a.date, b.date].compactMap { $0 }.max()
         r.archived = a.archived || b.archived
         r.fromDesktop = a.fromDesktop || b.fromDesktop
+        r.summary = a.summary ?? b.summary
         return r
     }
 
@@ -392,6 +414,17 @@ extension ClaudeReader.Record {
             switch o["type"] as? String {
             case "custom-title": if let t = ClaudeReader.string(o["customTitle"]) { title = t }
             case "pr-link": if let u = ClaudeReader.url(o["prUrl"] ?? o["url"] ?? o["pr"]), !prs.contains(u) { prs.append(u) }
+            case "user":
+                if (o["isMeta"] as? Bool) != true, let msg = o["message"] as? [String: Any] {
+                    let raw: String? = {
+                        if let s = ClaudeReader.string(msg["content"]) { return s }
+                        if let arr = msg["content"] as? [[String: Any]] {
+                            return arr.first(where: { ($0["type"] as? String) == "text" }).flatMap { ClaudeReader.string($0["text"]) }
+                        }
+                        return nil
+                    }()
+                    if let raw, let snippet = T3Reader.cleanSnippet(raw) { summary = snippet }
+                }
             default: break
             }
         }
@@ -495,7 +528,9 @@ final class ClaudeSessions {
     /// thread at every write Claude Code made.
     func attach(_ rows: [Session]) -> [Session] {
         let pool = (enabled ? sessions : []) + T3Sessions.shared.sessions   // T3 Code's threads, when its switch is on
-        guard !pool.isEmpty else { return rows.map { var r = $0; r.claude = nil; return r } }
+        guard !pool.isEmpty else {
+            return rows.map { var r = $0; r.claude = nil; r.agentSessions = []; return r }
+        }
         let paths = rows.map { $0.worktree.resolvingSymlinksInPath().path }
         var byOwner: [String: [ClaudeSession]] = [:]
         for s in pool {   // `folder` was resolved when read
@@ -503,9 +538,12 @@ final class ClaudeSessions {
         }
         return zip(rows, paths).map { row, path in
             var r = row
-            guard let mine = byOwner[path], var best = mine.max(by: { Self.rank($0) < Self.rank($1) }) else { r.claude = nil; return r }
-            for s in mine { for pr in s.prs where !best.prs.contains(where: { $0.url == pr.url }) { best.prs.append(pr) } }
+            guard let mine = byOwner[path], !mine.isEmpty else { r.claude = nil; r.agentSessions = []; return r }
+            let sorted = mine.sorted { Self.rank($0) > Self.rank($1) }
+            var best = sorted[0]
+            for s in sorted { for pr in s.prs where !best.prs.contains(where: { $0.url == pr.url }) { best.prs.append(pr) } }
             r.claude = best
+            r.agentSessions = sorted
             return r
         }
     }
@@ -534,7 +572,10 @@ final class ClaudeSessions {
         return list.filter { owner(path: $0.folder.path, among: paths) == path }.max { rank($0) < rank($1) }
     }
 
-    fileprivate static func rank(_ s: ClaudeSession) -> (Int, Int, Date) { (s.archived ? 0 : 1, s.running ? 1 : 0, s.lastActivity ?? .distantPast) }
+    fileprivate static func rank(_ s: ClaudeSession) -> (Int, Int, Int, Date) {
+        let liveTier = s.status == .waiting ? 3 : (s.running && s.status == .working ? 2 : (s.running ? 1 : 0))
+        return (s.archived ? 0 : 1, s.settled ? 0 : 1, liveTier, s.lastActivity ?? .distantPast)
+    }
 
     // MARK: Offers
 
@@ -701,24 +742,47 @@ enum ClaudeUI {
         return stack
     }
 
-    /// "3 Claude sessions in a repository you have not added", and the folder under it.
+    /// Clear, non-truncating offer row for a repository that has Claude sessions.
     static func offerCell(_ offer: ClaudeOffer) -> NSView {
-        let icon = NSImageView(image: NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil) ?? NSImage())
+        let icon = NSImageView(image: NSImage(systemSymbolName: "plus.circle.fill", accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = .controlAccentColor
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
         icon.setContentHuggingPriority(.required, for: .horizontal)
-        let name = NSTextField(labelWithString: "\(offer.count) Claude session\(offer.count == 1 ? "" : "s") in a repository you have not added")
-        name.font = .systemFont(ofSize: 12)
-        name.lineBreakMode = .byTruncatingTail
-        let sub = NSTextField(labelWithString: "Add \(offer.repository.lastPathComponent) to Sessions")
-        sub.font = .systemFont(ofSize: 10)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let repoName = NSTextField(labelWithString: offer.repository.lastPathComponent)
+        repoName.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        repoName.textColor = Design.ink
+        repoName.lineBreakMode = .byTruncatingTail
+        repoName.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let countPill = NSTextField(labelWithString: "\(offer.count) Claude session\(offer.count == 1 ? "" : "s")")
+        countPill.font = .systemFont(ofSize: 10, weight: .medium)
+        countPill.textColor = Design.mute
+        countPill.setContentHuggingPriority(.required, for: .horizontal)
+        countPill.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let topRow = NSStackView(views: [repoName, countPill])
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.spacing = 6
+
+        let sub = NSTextField(labelWithString: "Add repository to Sessions")
+        sub.font = .systemFont(ofSize: 10.5)
         sub.textColor = .secondaryLabelColor
-        let text = NSStackView(views: [name, sub])
+        sub.lineBreakMode = .byTruncatingTail
+
+        let text = NSStackView(views: [topRow, sub])
         text.orientation = .vertical
         text.alignment = .leading
-        text.spacing = 0
+        text.spacing = 1
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         let stack = NSStackView(views: [icon, text])
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
+        stack.toolTip = "\(offer.count) Claude session\(offer.count == 1 ? "" : "s") found in \((offer.repository.path as NSString).abbreviatingWithTildeInPath). Click to add."
         return stack
     }
 }

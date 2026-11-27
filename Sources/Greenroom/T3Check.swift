@@ -15,7 +15,8 @@ enum T3Check {
             let r = T3Reader.read(roots: [repo], cache: &cache)
             print("[greenroom] t3 live: \(r.sessions.count) thread(s)" + (r.note.map { ", note: \($0)" } ?? ""))
             for s in r.sessions {
-                print("  \(s.id ?? "?") \"\(s.title ?? "")\" \(s.status) running=\(s.running) archived=\(s.archived) branch=\(s.branch ?? "-") folder=\(s.folder.path) prs=\(s.prs.map { "\($0.url.absoluteString) \($0.state.map { "\($0)" } ?? "?")" })")
+                let extra = [s.model.map { "model=\($0)" }, s.settled ? "settled" : nil, s.summary.map { "summary=\"\($0)\"" }].compactMap { $0 }.joined(separator: " ")
+                print("  \(s.id ?? "?") \"\(s.title ?? "")\" \(s.status) running=\(s.running) archived=\(s.archived) branch=\(s.branch ?? "-") folder=\(s.folder.path) \(extra) prs=\(s.prs.map { "\($0.url.absoluteString) \($0.state.map { "\($0)" } ?? "?")" })")
             }
             exit(0)
         }
@@ -63,9 +64,9 @@ enum T3Check {
             cat "$D/list.json"; exit 0 ;;
           "thread show")
             case "$3" in
-              t-run) echo '{"threadId":"t-run","worktreePath":"\(wt.path)","branch":"fix-login","archived":false,"pendingRequestCount":0}' ;;
-              t-wait) echo '{"thread":{"threadId":"t-wait","worktreePath":null,"branch":"main","archived":false,"pendingRequestCount":1}}' ;;
-              t-done) echo '{"threadId":"t-done","worktreePath":"\(wt.path)","branch":"fix-login","archived":true}' ;;
+              t-run) echo '{"thread":{"threadId":"t-run","worktreePath":"\(wt.path)","branch":"fix-login","archived":false,"settled":false,"pendingRequestCount":0,"model":"gemini-4-neon","providerInstanceId":"antigravity"},"messages":[{"role":"user","text":"Fix the login button spacing on small screens"}]}' ;;
+              t-wait) echo '{"thread":{"threadId":"t-wait","worktreePath":null,"branch":"main","archived":false,"settled":false,"pendingRequestCount":1}}' ;;
+              t-done) echo '{"threadId":"t-done","worktreePath":"\(wt.path)","branch":"fix-login","archived":true,"settled":true}' ;;
               *) echo "no such thread" >&2; exit 1 ;;
             esac; exit 0 ;;
         esac
@@ -90,10 +91,12 @@ enum T3Check {
         let run = one("t-run"), wait = one("t-wait"), done = one("t-done")
         expect(run?.source == .t3 && run?.title == "Fix the login screen" && run?.status == .working && run?.running == true,
                "a running thread is working", "\(run as Any)")
+        expect(run?.model == "gemini-4-neon" && run?.provider == "antigravity" && run?.summary == "Fix the login button spacing on small screens",
+               "model, provider, and latest user prompt summary come from thread show", "\(run?.model ?? "-") / \(run?.summary ?? "-")")
         expect(run?.folder.path == wt.resolvingSymlinksInPath().path && run?.branch == "fix-login", "its worktree and branch come from thread show")
         expect(run?.prs.first?.state == .open && run?.prs.first?.number == 12 && run?.prs.first?.branch == "fix-login", "its pull request is open, from its branch")
         expect(wait?.status == .waiting && wait?.folder.path == repo.resolvingSymlinksInPath().path, "a pending request is waiting; no worktree means the main checkout (details under \"thread\" read)")
-        expect(done?.status == .idle && done?.running == false && done?.archived == true && done?.prs.first?.state == .merged, "a completed thread is idle, archived, its pull request merged")
+        expect(done?.status == .idle && done?.running == false && done?.archived == true && done?.settled == true && done?.prs.first?.state == .merged, "a completed thread is idle, archived, settled, its pull request merged")
 
         // Details are cached while a thread's update time stays the same.
         try? fm.removeItem(at: log)

@@ -18,9 +18,19 @@ enum T3Reader {
     /// Threads not updated for this long are not asked for their details (nor shown).
     static let window: TimeInterval = 30 * 86_400
     /// At most this many `thread show` calls in one read; the rest wait for the next read (details are cached).
-    static let showLimit = 12
+    static let showLimit = 24
 
-    struct Detail: Equatable { var worktree: String?; var branch: String?; var archived = false; var pending = 0 }
+    struct Detail: Equatable {
+        var worktree: String?
+        var branch: String?
+        var archived = false
+        var settled = false
+        var pending = 0
+        var summary: String?
+        var model: String?
+        var provider: String?
+        var link: URL?
+    }
 
     /// What one read gives, and why there is nothing when there is nothing.
     struct Result { var sessions: [ClaudeSession] = []; var note: String? }
@@ -87,7 +97,14 @@ enum T3Reader {
             if r.status != 0, r.error.contains("No T3 Code project matches") { reached = true; continue }
             guard r.status == 0, let items = parseList(r.output) else { continue }   // no server, or a shape not read
             reached = true
-            for item in items {
+            // Prioritize active / unsettled threads when calling `thread show` so running work never misses its worktree.
+            let prioritized = items.sorted { a, b in
+                let activeStatuses: Set = ["running", "waiting", "preparing", "queued", "starting"]
+                let sa = activeStatuses.contains(string(a["status"]) ?? "") ? 0 : (((a["settled"] as? Bool) == true) ? 2 : 1)
+                let sb = activeStatuses.contains(string(b["status"]) ?? "") ? 0 : (((b["settled"] as? Bool) == true) ? 2 : 1)
+                return sa < sb
+            }
+            for item in prioritized {
                 guard let id = string(item["threadId"]), !seen.contains(id) else { continue }
                 seen.insert(id)
                 let updated = string(item["updatedAt"]) ?? ""
@@ -99,7 +116,10 @@ enum T3Reader {
                     let s = run(exe, ["thread", "show", id, "--json"], in: root, env: env)
                     if s.status == 0, let d = parseDetail(s.output) { detail = d; cache[id] = (updated, d) }
                 }
-                if let session = session(item, detail: detail ?? cache[id]?.detail, root: root) { out.append(session) }
+                let effectiveDetail = detail ?? cache[id]?.detail
+                // Skip un-fetched overflow threads rather than mis-attributing a worktree thread to the main checkout.
+                if effectiveDetail == nil, shows >= showLimit { continue }
+                if let session = session(item, detail: effectiveDetail, root: root) { out.append(session) }
             }
         }
         cache = cache.filter { seen.contains($0.key) }
@@ -116,14 +136,42 @@ enum T3Reader {
         return nil
     }
 
-    /// `thread show --json`: the thread's object, at the top or under `thread`.
+    /// `thread show --json`: the thread's object, at the top or under `thread`, plus optional `messages`.
     static func parseDetail(_ text: String) -> Detail? {
-        guard var d = json(text) as? [String: Any] else { return nil }
-        if let inner = d["thread"] as? [String: Any] { d = inner }
+        guard let rootObj = json(text) as? [String: Any] else { return nil }
+        let d = (rootObj["thread"] as? [String: Any]) ?? rootObj
         let worktree = string(d["worktreePath"]) ?? string(d["cwd"])
         let branch = string(d["branch"])
         let pending = (d["pendingRequestCount"] as? NSNumber)?.intValue ?? 0
-        return Detail(worktree: worktree, branch: branch, archived: (d["archived"] as? Bool) ?? false, pending: pending)
+        let settled = (d["settled"] as? Bool) ?? false
+        let model = string(d["model"])
+        let provider = string(d["providerInstanceId"]) ?? string(d["provider"])
+        let link = string(d["link"]).flatMap(URL.init(string:))
+        var summary: String?
+        if let messages = rootObj["messages"] as? [[String: Any]] {
+            // Latest user message tells what the thread is currently working on.
+            for msg in messages.reversed() {
+                guard string(msg["role"])?.lowercased() == "user",
+                      let rawText = string(msg["text"]) else { continue }
+                if let clean = cleanSnippet(rawText) { summary = clean; break }
+            }
+        }
+        return Detail(worktree: worktree, branch: branch, archived: (d["archived"] as? Bool) ?? false,
+                      settled: settled, pending: pending, summary: summary, model: model, provider: provider, link: link)
+    }
+
+    /// Condenses a prompt into a clean single-line snippet for the sidebar card.
+    static func cleanSnippet(_ raw: String, limit: Int = 140) -> String? {
+        // Strip leading XML-like wrapper tags or attachment lines.
+        let lines = raw.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("<") && !$0.hasPrefix("[Attached") }
+        let joined = lines.joined(separator: " ")
+        let collapsed = joined.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty else { return nil }
+        if collapsed.count <= limit { return collapsed }
+        return String(collapsed.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…"
     }
 
     /// One list item (and its details, when known) as a session of the rows. A thread whose worktree is not known
@@ -143,12 +191,18 @@ enum T3Reader {
             prs.append(ClaudePR(url: u, state: state, branch: detail?.branch))
         }
         if let linked = item["linkedPullRequest"] as? [String: Any], let u = string(linked["url"]).flatMap(URL.init(string:)), !prs.contains(where: { $0.url == u }) {
-            prs.append(ClaudePR(url: u, state: nil, branch: detail?.branch))
+            let state = string(linked["state"]).flatMap { ClaudePR.State(rawValue: $0.uppercased()) }
+            prs.append(ClaudePR(url: u, state: state, branch: detail?.branch))
         }
         let folder = detail?.worktree.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() } ?? root.resolvingSymlinksInPath()
+        let settled = (item["settled"] as? Bool) ?? (detail?.settled ?? false)
+        let model = detail?.model ?? string(item["model"])
+        let provider = detail?.provider ?? string(item["providerInstanceId"])
+        let link = detail?.link ?? string(item["link"]).flatMap(URL.init(string:))
         return ClaudeSession(folder: folder, repository: root.resolvingSymlinksInPath(), title: string(item["title"]), status: status,
                              branch: detail?.branch, pullRequests: prs.map(\.url), prs: prs, lastActivity: date(string(item["updatedAt"]) ?? ""),
-                             running: status != .idle, archived: detail?.archived ?? false, source: .t3, id: id)
+                             running: status != .idle, archived: detail?.archived ?? false, source: .t3, id: id,
+                             settled: settled, model: model, provider: provider, summary: detail?.summary, rawStatus: raw, link: link)
     }
 
     private static func json(_ text: String) -> Any? {

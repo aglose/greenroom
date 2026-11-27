@@ -185,8 +185,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let split = NSSplitViewController()
         splitController = split
         let side = NSSplitViewItem(sidebarWithViewController: sidebarController())
-        side.minimumThickness = 200
-        side.maximumThickness = 320
+        side.minimumThickness = 280
+        side.maximumThickness = 480
         side.isCollapsed = UserDefaults.standard.bool(forKey: Self.sidebarHiddenKey)   // open until the person folds it away
         split.addSplitViewItem(side)
         sidebarCollapseObserver = side.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
@@ -258,6 +258,16 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
         window.setFrameAutosaveName("Workbench3")   // the glass layout wants a larger first window
         if window.frame.origin == .zero { window.center() }
+        if !side.isCollapsed {
+            let saved = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+            let target = saved >= 280 && saved <= 480 ? CGFloat(saved) : 336
+            split.splitView.setPosition(target, ofDividerAt: 0)
+        }
+        NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: split.splitView, queue: .main) { [weak self] _ in
+            guard let self, let side = self.splitController?.splitViewItems.first, !side.isCollapsed else { return }
+            let w = side.viewController.view.frame.width
+            if w >= 280 && w <= 480 { UserDefaults.standard.set(Double(w), forKey: Self.sidebarWidthKey) }
+        }
         Engine.shared.onChange = { [weak self] in self?.reload() }
         reload()
         sessions.onChange = { [weak self] in self?.setNeedsSidebar() }   // the rows only: the stage did not change
@@ -483,9 +493,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         self.rowKeys = keys
         if !sameShape { table.reloadData() }
         else if !changed.isEmpty {
-            table.reloadData(forRowIndexes: changed, columnIndexes: [0])
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0
+                // New cells first, then their heights: inside one update block the fresh cell was framed at the
+                // row's old height and kept it, so a card switched to or from selected drew at the wrong size.
+                table.reloadData(forRowIndexes: changed, columnIndexes: [0])
                 table.noteHeightOfRows(withIndexesChanged: changed)
             }
         }
@@ -1665,6 +1677,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
 
     private static let sidebarHiddenKey = "sidebarHidden"
+    private static let sidebarWidthKey = "sidebarWidthV2"
 
     /// Shows the sidebar if it is folded away.
     func showLibrary() {
@@ -1733,11 +1746,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     // MARK: Sidebar
 
+    /// Group headers start in line with the session cards' left edge, not against the sidebar's.
+    private static let headerInset: CGFloat = 10
+
     private func sidebarController() -> NSViewController {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row"))
         table.addTableColumn(column)
         table.headerView = nil
         table.style = .sourceList
+        table.intercellSpacing = NSSize(width: 0, height: 0)
         table.dataSource = self
         table.delegate = self
         table.target = self
@@ -1782,6 +1799,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
+    /// Cards are measured at the sidebar's width, so a resize re-measures them.
+    func tableViewColumnDidResize(_ notification: Notification) {
+        guard !rows.isEmpty else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(rows.indices))
+        }
+    }
+
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
         if case .header = rows[row] { return true }
         if case .sessionsHeader = rows[row] { return true }
@@ -1808,13 +1834,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .header = rows[row] { return 24 }
+        if case .header = rows[row] { return 22 }
         if case .sessionsHeader = rows[row] { return 24 }
-        if case .suggestion = rows[row] { return 24 }
-        if case .addSession = rows[row] { return 28 }
-        if case .session(let s) = rows[row] { return sessions.rowHeight(for: s) }
-        if case .main = rows[row] { return 40 }
-        if case .pull = rows[row] { return 42 }
+        if case .suggestion = rows[row] { return 38 }
+        if case .addSession = rows[row] { return 34 }
+        if case .session(let s) = rows[row] { return sessions.rowHeight(for: s, width: tableView.rect(ofColumn: 0).width) }
+        if case .main = rows[row] { return 44 }
+        if case .pull = rows[row] { return 54 }
+        if case .claudeOffer = rows[row] { return 38 }
         return 36
     }
 
@@ -1824,7 +1851,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             let label = NSTextField(labelWithString: title)
             label.font = .systemFont(ofSize: 11, weight: .semibold)
             label.textColor = .secondaryLabelColor
-            return label
+            label.lineBreakMode = .byTruncatingTail
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            let inset = NSStackView(views: [label])
+            inset.edgeInsets = NSEdgeInsets(top: 0, left: Self.headerInset, bottom: 0, right: 6)
+            return inset
         case .sessionsHeader(let title, let ws, _):
             let label = NSTextField(labelWithString: title)
             label.font = .systemFont(ofSize: 11, weight: .semibold)
@@ -1870,7 +1901,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             views.append(add)
             let stack = NSStackView(views: views)
             stack.spacing = 4
-            stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 6)
+            stack.edgeInsets = NSEdgeInsets(top: 0, left: Self.headerInset, bottom: 0, right: 6)
             return stack
         case .addSession(_, let hidden):
             return cell(symbol: "plus.circle", tint: .controlAccentColor, title: "Add a session",
@@ -1964,7 +1995,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
         if let open = menu.items.first(where: { $0.action == #selector(openInClaudeClicked) }) {
-            if case .session(let s) = rows[row], s.claude?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
+            if case .session(let s) = rows[row], (s.displayAgent ?? s.claude)?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
         }
         // Main's row, headers and the empty placeholder are not worktrees: hide session-only actions on them.
         var isMain = false
@@ -1994,11 +2025,17 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     @objc private func openInClaudeClicked() {
         let row = table.clickedRow
         guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
-        if session.claude?.source == .t3 {
-            T3Sessions.open(session.worktree) { [weak self] why in if let why { self?.toast.show(why, problem: true) } }
+        let agent = session.displayAgent ?? session.claude
+        if agent?.source == .t3 {
+            T3Sessions.open(session.worktree) { [weak self] why in
+                if let why {
+                    if let link = agent?.link { NSWorkspace.shared.open(link) }
+                    else { self?.toast.show(why, problem: true) }
+                }
+            }
             return
         }
-        if !ClaudeSessions.openInClaude(session.claude) { toast.show("Claude is not installed on this Mac", problem: true) }
+        if !ClaudeSessions.openInClaude(agent) { toast.show("Claude is not installed on this Mac", problem: true) }
     }
 
     /// The session row under the pointer when the sidebar's context menu opened.
