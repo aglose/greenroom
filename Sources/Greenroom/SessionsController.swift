@@ -1410,6 +1410,9 @@ final class SessionsController {
         }
     }
 
+    // matchFont: an attributed label keeps the field's default 13pt font for its line height and baseline, so
+    // 10pt text in it draws about 3pt low next to its row's other items; each one sets its field font to its text's.
+
     /// An attributed label ignores the field's own line break mode, so the ellipsis has to be in the text's paragraph style.
     private static func truncateTail(_ text: NSMutableAttributedString) {
         let style = NSMutableParagraphStyle()
@@ -1441,6 +1444,7 @@ final class SessionsController {
         }
         Self.truncateTail(text)
         let label = NSTextField(labelWithAttributedString: text)
+        label.font = NSFont.systemFont(ofSize: 10.5, weight: .medium)   // see `matchFont`
         label.maximumNumberOfLines = 1
         label.lineBreakMode = .byTruncatingTail
         label.cell?.usesSingleLineMode = true
@@ -1637,6 +1641,7 @@ final class SessionsController {
                     attributes: [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium), .foregroundColor: Design.record.withAlphaComponent(0.85)]
                 ))
                 let diffLabel = NSTextField(labelWithAttributedString: diffText)
+                diffLabel.font = .monospacedSystemFont(ofSize: 10, weight: .medium)   // see `matchFont`
                 diffLabel.maximumNumberOfLines = 1
                 diffLabel.cell?.usesSingleLineMode = true
                 diffLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -1766,6 +1771,7 @@ final class SessionsController {
             }
             Self.truncateTail(attr)
             metaLabel = NSTextField(labelWithAttributedString: attr)
+            metaLabel.font = font   // see `matchFont`
         }
         metaLabel.alignment = .left
         metaLabel.maximumNumberOfLines = 1
