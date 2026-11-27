@@ -132,6 +132,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     let screenMap = ScreenMap(frame: .zero)
     /// The running walk in the top bar, while the map is closed as well as open.
     let walkChip = WalkProgressChip()
+    /// The job queue, in the top bar whichever session is shown (JobsUI.swift).
+    let jobsChip = JobsChip()
     // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
     let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
@@ -682,9 +684,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         walkChip.onOpen = { [weak self] in self?.showMap() }
+        jobsChip.workbench = self
         let deviceCluster = group([deviceButton, divider()] + deviceButtons)
         let captureCluster = group([shot, divider(), recordButton, saveRecordButton])
-        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, walkChip, exitMatrixButton, mirrorButton, group(layoutButtons), captureCluster, commands])
+        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, jobsChip, walkChip, exitMatrixButton, mirrorButton, group(layoutButtons), captureCluster, commands])
         bar.spacing = 8
         bar.setHuggingPriority(.init(1), for: .horizontal)
         bar.setHuggingPriority(.init(1), for: .vertical)
@@ -1282,6 +1285,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
 
     // MARK: Command palette
+
+    /// "Jobs" in the Window menu: the job queue's list, under its chip (or the top bar when nothing has run yet).
+    @objc func showJobs(_ sender: Any?) {
+        if jobsChip.isHidden || jobsChip.window == nil, let bar = headerBar { JobsPopover.toggle(from: bar, workbench: self) }
+        else { jobsChip.open() }
+    }
 
     @objc func showPalette(_ sender: Any?) {
         Reports.shared.count(.palette)

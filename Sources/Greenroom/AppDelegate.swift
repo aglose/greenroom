@@ -712,6 +712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.addItem(to(workbench: #selector(Workbench.showAgent(_:)), "Agent Activity", "A", [.command, .option]))
         win.addItem(to(workbench: #selector(Workbench.toggleInspector(_:)), "Inspector", "i", [.command, .option]))
         win.addItem(to(workbench: #selector(Workbench.toggleLog(_:)), "Log", "L", [.command, .shift]))
+        win.addItem(to(workbench: #selector(Workbench.showJobs(_:)), "Jobs", "j", [.command, .option]))
 
         let help = NSMenu(title: "Help")
         help.addItem(item("Report Feedback…", #selector(showFeedback(_:)), ""))

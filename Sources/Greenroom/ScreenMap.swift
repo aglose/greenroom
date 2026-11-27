@@ -601,6 +601,32 @@ final class ScreenMap: NSView {
 
     var isWalking: Bool { signIn != nil || starting || run?.isRunning == true }
 
+    /// This walk in the job queue (Jobs.swift): seen and acted on there from any session, while the sheet is closed too.
+    private var ticket: QueueJob?
+
+    /// Puts the walk that is starting in the job queue, or takes up the paused one it goes on from.
+    private func enterQueue(apk: URL, resuming: Bool) {
+        if resuming, let t = ticket, t.state == .paused { JobQueue.shared.resumed(t); return }
+        if let t = ticket { JobQueue.shared.finish(t, .cancelled) }
+        let t = QueueJob(kind: .map, title: "Map \(apk.deletingPathExtension().lastPathComponent)", owner: worktree()?.path, lane: nil, detail: "starting the walk")
+        t.pauseTip = "Stop here and keep what was found: resuming goes on from it"
+        t.onCancel = { [weak self, weak t] in
+            guard let self, let t, self.ticket === t else { return }
+            if self.isWalking { self.stop() } else { self.ticket = nil; JobQueue.shared.finish(t, .cancelled) }
+        }
+        t.onPause = { [weak self, weak t] in
+            guard let self, let t, self.ticket === t, self.run?.isRunning == true else { return "The walk can be paused once it is walking." }
+            self.pause()
+            return nil
+        }
+        t.onResume = { [weak self, weak t] in
+            guard let self, let t, self.ticket === t else { return }
+            if !self.walk(resume: true) { self.ticket = nil; JobQueue.shared.finish(t, .cancelled) }
+        }
+        ticket = t
+        JobQueue.shared.adopt(t)
+    }
+
     @objc private func chooseAPK() {
         let p = NSOpenPanel()
         p.message = "Choose the APK to walk"
@@ -710,6 +736,7 @@ final class ScreenMap: NSView {
         guard !isWalking else { return true }
         guard let apk = effectiveAPK, let python = pythonURL ?? SnapshotRun.python() else { refresh(); return false }
         let from = resume ? pausedHere : nil
+        enterQueue(apk: apk, resuming: from != nil)
         UserDefaults.standard.set(startField.stringValue, forKey: "mapStart")
         let base = Engine.shared.state.appendingPathComponent("maps", isDirectory: true)
         SnapshotRun.prune(base, keep: 5)
@@ -881,6 +908,7 @@ final class ScreenMap: NSView {
     private func report(_ p: WalkProgress?) {
         guard p != progress else { return }
         progress = p
+        if let p, let t = ticket { JobQueue.shared.update(t, detail: p.text, fraction: .some(p.fraction)) }
         onProgress?(p)
     }
 
@@ -928,11 +956,13 @@ final class ScreenMap: NSView {
                 present(part, animated: isOpen, live: false)
                 setSummary(Self.pausedWords(p))
                 onSay?("Walk paused: \(p.found) screens found", false)
+                if let t = ticket { JobQueue.shared.suspended(t, detail: "\(p.found) screen\(p.found == 1 ? "" : "s") found, \(p.toOpen) to open") }
             } else {
                 host.clear()
                 setSummary("Paused before the walk had found anything to keep: the next walk starts from the beginning.")
             }
         case .finished(let map):
+            if let t = ticket { JobQueue.shared.finish(t, .done, detail: "\(map.screens.count) screen\(map.screens.count == 1 ? "" : "s")" + (map.crashes.isEmpty ? "" : ", \(map.crashes.count) crash\(map.crashes.count == 1 ? "" : "es")")) }
             relaunchNote = RepoMapSettings.relaunchNote(map.folder)
             if resumedFrom != nil { try? Data().write(to: map.folder.appendingPathComponent(Self.resumedMarker)) }
             paused = nil
@@ -941,12 +971,18 @@ final class ScreenMap: NSView {
             let crashes = map.crashes.count
             onSay?("Screen map: \(map.screens.count) screens" + (crashes > 0 ? ", \(crashes) crash\(crashes == 1 ? "" : "es")" : ""), crashes > 0)
         case .failed(let why):
+            if let t = ticket { JobQueue.shared.finish(t, .failed(why)) }
             host.clear()
             setSummary("The walk failed: " + why, problem: true)
             onSay?("The walk failed", true)
         case .cancelled:
             host.clear()
             setSummary("Walk stopped.")
+        }
+        // Whatever did not end paused, done or failed above was stopped.
+        if let t = ticket, t.state != .paused {
+            if t.isActive { JobQueue.shared.finish(t, .cancelled) }
+            ticket = nil
         }
         run = nil
         resumedFrom = nil
