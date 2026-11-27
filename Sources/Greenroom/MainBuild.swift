@@ -494,7 +494,8 @@ final class MainBuilds {
         if let b = row.newest {
             let s = slot(of: ws.root)
             let extra = sessions?.signInLaunchOptions(forWorkspace: ws.root, targetSlot: s) ?? []
-            let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra)
+            let own = sessions?.launchOptions(forWorkspace: ws.root) ?? []
+            let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra + own)
             sim?.displayLabel = "\(row.name)" + (row.sha.map { " · \(String($0.prefix(7)))" } ?? "")
             wb.refreshCaptions()
             if row.current == nil, row.isBusy { wb.toast.show("Opened the previous \(row.name) build; it reloads on the newest when that is built") }

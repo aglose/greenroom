@@ -239,7 +239,8 @@ final class PullRows {
         guard let b = build(of: p), FileManager.default.fileExists(atPath: b.apk.path) else { fetch(p, thenOpen: true); return }
         let s = slot(of: p)
         let extra = sessions?.signInLaunchOptions(forWorkspace: URL(fileURLWithPath: p.workspace), targetSlot: s) ?? []
-        let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra)
+        let own = sessions?.launchOptions(forWorkspace: URL(fileURLWithPath: p.workspace)) ?? []
+        let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra + own)
         sim?.displayLabel = "#\(p.number) \(p.headRef.isEmpty ? p.title : p.headRef) · \(String(p.headSha.prefix(7)))"
         wb.refreshCaptions()
     }
