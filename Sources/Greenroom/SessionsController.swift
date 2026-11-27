@@ -774,6 +774,10 @@ final class SessionsController {
 
     @discardableResult
     private func start(_ session: Session, from apk: URL, options: [String] = [], fromAgent: Bool = false, remember: Bool = false) -> Simulator? {
+        // Asked for a skin before its first launch: a person's launch waits for the answer (an agent's does not).
+        if !fromAgent, deferUntilLaunchSetup(session.workspace, { [weak self] in self?.start(session, from: apk, options: options, remember: remember) }) {
+            return nil
+        }
         let signInOpts = options.contains("--biometrics") ? [] : signInLaunchOptions(forWorkspace: session.workspace, targetSlot: session.slot)
         let own = launchOptions(forWorkspace: session.workspace)
         guard let wb = workbench, let sim = wb.open(apk, remember: remember, options: ["--data-slots", session.slot] + signInOpts + own + options, fromAgent: fromAgent) else { return nil }
@@ -902,6 +906,15 @@ final class SessionsController {
 
     /// The repository's own skin and apksim options (LaunchSettings.swift), for a launch of one of its simulators.
     func launchOptions(forWorkspace root: URL) -> [String] { LaunchSettings.options(for: workspace(at: root)) }
+    /// The same for a walk's or a comparison's launches, and the profile part saying so, by the repository's root.
+    func walkLaunchOptions(forWorkspace root: URL?) -> [String] { LaunchSettings.walkOptions(for: root.flatMap { workspace(at: $0) }) }
+    func walkLaunchKey(forWorkspace root: URL?) -> String? { LaunchSettings.walkKey(for: root.flatMap { workspace(at: $0) }) }
+    /// The same by a walk's owner (a session's worktree, the trunk, or a pull request row) or any worktree path.
+    func walkLaunchOptions(forOwner owner: String?) -> [String] { walkLaunchOptions(forWorkspace: owner.flatMap { root(forOwner: $0) }) }
+    func walkLaunchKey(forOwner owner: String?) -> String? { walkLaunchKey(forWorkspace: owner.flatMap { root(forOwner: $0) }) }
+    private func root(forOwner owner: String) -> URL? {
+        workspaceRoot(ofOwner: owner) ?? workspaces.first { owner == $0.root.path || owner.hasPrefix($0.root.path + "/") }?.root
+    }
 
     /// Stores the repository's skin and launch options; a running simulator of it takes the skin now (the engine's
     /// `skin` command), the options when it next launches.
@@ -925,6 +938,16 @@ final class SessionsController {
                 : "Saved \(root.lastPathComponent)'s launch options")
         }
         onChange?()
+    }
+
+    /// Launches of a repository waiting for its first-time skin and options sheet to be answered, by root path.
+    private var launchSetupPending: [String: [() -> Void]] = [:]
+
+    /// True when `root`'s first-time sheet is up: `run` is then kept and runs once it is answered.
+    func deferUntilLaunchSetup(_ root: URL, _ run: @escaping () -> Void) -> Bool {
+        guard launchSetupPending[root.path] != nil else { return false }
+        launchSetupPending[root.path]?.append(run)
+        return true
     }
 
     /// The repository a simulator was started for: one of its sessions, its main row or one of its pull requests.
@@ -957,9 +980,14 @@ final class SessionsController {
     /// The skin and launch options sheet for `root` (its + menu, and once when the repository is first added).
     func editLaunchSettings(for root: URL, firstTime: Bool = false) {
         guard let ws = workspace(at: root), let window = workbench?.window else { return }
-        LaunchSettingsSheet.present(for: ws, firstTime: firstTime, on: window) { [weak self] skin, options in
+        if firstTime { launchSetupPending[root.path] = launchSetupPending[root.path] ?? [] }
+        LaunchSettingsSheet.present(for: ws, firstTime: firstTime, on: window, save: { [weak self] skin, options in
             self?.setLaunch(skin: skin, options: options, for: root)
-        }
+        }, finished: { [weak self] in
+            // Launches asked for while the sheet was up (a build that landed, "Open a project folder…") go now.
+            guard firstTime, let waiting = self?.launchSetupPending.removeValue(forKey: root.path) else { return }
+            waiting.forEach { $0() }
+        })
         if firstTime, let i = workspaces.firstIndex(where: { $0.root.path == root.path }) {
             workspaces[i].launchAsked = true   // asked once, whatever the answer
             store.saveWorkspaces(workspaces)

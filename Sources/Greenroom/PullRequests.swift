@@ -235,6 +235,7 @@ final class PullRows {
     /// A click: the running simulator, else the build in a simulator of its own data, else fetch it first.
     func open(_ p: PullRequest) {
         guard let wb = sessions?.workbench else { return }
+        if sessions?.deferUntilLaunchSetup(URL(fileURLWithPath: p.workspace), { [weak self] in self?.open(p) }) == true { return }
         if let sim = simulator(of: p) { wb.select(sim); return }
         guard let b = build(of: p), FileManager.default.fileExists(atPath: b.apk.path) else { fetch(p, thenOpen: true); return }
         let s = slot(of: p)

@@ -489,6 +489,7 @@ final class MainBuilds {
     /// else main is built first and opens when it lands.
     func open(_ ws: Workspace) {
         guard let wb = sessions?.workbench else { return }
+        if sessions?.deferUntilLaunchSetup(ws.root, { [weak self] in self?.open(ws) }) == true { return }
         if let sim = simulator(of: ws.root) { wb.select(sim); return }
         guard let row = row(for: ws) else { return }
         if let b = row.newest {

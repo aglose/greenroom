@@ -820,6 +820,10 @@ final class ScreenMap: NSView {
     /// The repository of the walked build (its `.greenroom/map.json`): the context's, else the session's worktree.
     private var repoRoot: URL?
 
+    /// The walked repository's own launch options (its skin...) and the profile part saying so (LaunchSettings).
+    private var sessionsController: SessionsController? { (NSApp.delegate as? AppDelegate)?.workbench.sessions }
+    private var launchKey: String? { sessionsController?.walkLaunchKey(forOwner: worktree()?.path) }
+
     private func startCrawl(python: URL, apk: URL, out: URL, settings: CrawlRun.Settings) {
         var settings = settings
         feedsNote = nil
@@ -855,6 +859,7 @@ final class ScreenMap: NSView {
                 // What each screen depends on is recorded, so this walk can be the map a later walk starts from and a
                 // pull request is compared with (without it, the next walk of the app is a full one again).
                 settings.recordDeps = support.recordDeps
+                settings.engineOptions += self.sessionsController?.walkLaunchOptions(forOwner: self.worktree()?.path) ?? []
                 let r = CrawlRun(python: python, apk: apk, out: out, settings: settings)
                 self.run = r
                 r.onEvent = { [weak self] e in self?.event(e) }
@@ -1001,7 +1006,7 @@ final class ScreenMap: NSView {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let ctx = apk != nil ? await self.context(apk!) : nil
-            let profile = Evidence.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start, signedIn: signedIn, offline: settings.offline)
+            let profile = Evidence.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start, signedIn: signedIn, offline: settings.offline, launch: self.launchKey)
             let engine = Engine.shared.version
             let made = await Task.detached { await ScreenMap.makeSource(map, context: ctx, profile: profile, engine: engine) }.value
             guard self.generation == mine, let made else {
@@ -1048,11 +1053,11 @@ final class ScreenMap: NSView {
             guard let self else { return }
             if let ctx = await self.context(apk) {
                 var preferred: [MapProfile] = [
-                    Evidence.profile(depth: s.depth, seconds: s.seconds, appearances: s.appearances, start: s.start, signedIn: signedIn, offline: s.offline),
-                    Evidence.profile(depth: 0, seconds: 0, appearances: ["light"], start: nil, signedIn: true, offline: false),
+                    Evidence.profile(depth: s.depth, seconds: s.seconds, appearances: s.appearances, start: s.start, signedIn: signedIn, offline: s.offline, launch: self.launchKey),
+                    Evidence.profile(depth: 0, seconds: 0, appearances: ["light"], start: nil, signedIn: true, offline: false, launch: self.launchKey),
                 ]
                 if ctx.unsignedCounts {
-                    preferred.append(Evidence.profile(depth: 0, seconds: 0, appearances: ["light"], start: nil, signedIn: false, offline: false))
+                    preferred.append(Evidence.profile(depth: 0, seconds: 0, appearances: ["light"], start: nil, signedIn: false, offline: false, launch: self.launchKey))
                 }
                 let loaded = await Task.detached { await ScreenMap.loadStoredMade(context: ctx, preferred: preferred, apk: apk) }.value
                 guard self.generation == mine, !self.isWalking else { return }

@@ -36,6 +36,9 @@ struct MapProfile: Codable, Equatable {
     /// The sign-in script's name, when the walk runs signed in.
     var signIn: String?
     var offline = false
+    /// The repository's own launch options for its walks (LaunchSettings.walkKey: a skin, a device...), nil when it
+    /// has none. Nil is left out of the encoding, so a profile without them keeps the id it always had.
+    var launch: String?
 
     /// Eight hex digits over the settings: the name of this history in the store and in git's refs.
     var id: String { String(MapJSON.sha256(MapJSON.encode(self)).prefix(8)) }

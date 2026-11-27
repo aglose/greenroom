@@ -111,6 +111,30 @@ enum LaunchSettings {
         return out + own
     }
 
+    /// What `ws` adds to a walk's launches and a comparison's: the same, less `--appearance` (a walk captures the
+    /// appearances its matrix names, a change tour is light).
+    static func walkOptions(for ws: Workspace?) -> [String] { withoutAppearance(options(for: ws)) }
+
+    /// The part of a map's profile (MapProfile.launch) that says how its walk launched, nil when plainly. Made from
+    /// the stored settings alone (not the skin's resolved device), so it stays the same from one walk to the next.
+    static func walkKey(for ws: Workspace?) -> String? {
+        guard let ws else { return nil }
+        let skin = ws.skin.trimmingCharacters(in: .whitespaces)
+        let words = (skin.isEmpty ? [] : ["--skin", skin]) + withoutAppearance(sanitized(tokens(ws.launchOptions)).kept)
+        return words.isEmpty ? nil : words.joined(separator: " ")
+    }
+
+    private static func withoutAppearance(_ words: [String]) -> [String] {
+        var out: [String] = []
+        var i = 0
+        while i < words.count {
+            if words[i] == "--appearance" { i += 2; continue }
+            if words[i].hasPrefix("--appearance=") { i += 1; continue }
+            out.append(words[i]); i += 1
+        }
+        return out
+    }
+
     // MARK: Skins
 
     /// The skins listed last (empty until `loadSkins` has run once).
@@ -201,14 +225,16 @@ final class LaunchSettingsSheet: NSObject {
     private var keepAlive: LaunchSettingsSheet?
 
     /// Shows the sheet for `ws` on `window`; `save` gets the chosen skin ("" for none) and options line.
-    static func present(for ws: Workspace, firstTime: Bool, on window: NSWindow, save: @escaping (_ skin: String, _ options: String) -> Void) {
+    /// `finished` runs after either button, once `save` (Save only) has.
+    static func present(for ws: Workspace, firstTime: Bool, on window: NSWindow, save: @escaping (_ skin: String, _ options: String) -> Void,
+                        finished: (() -> Void)? = nil) {
         let sheet = LaunchSettingsSheet()
         sheet.window = window
         sheet.keepAlive = sheet
-        sheet.run(ws, firstTime: firstTime, save: save)
+        sheet.run(ws, firstTime: firstTime, save: save, finished: finished)
     }
 
-    private func run(_ ws: Workspace, firstTime: Bool, save: @escaping (String, String) -> Void) {
+    private func run(_ ws: Workspace, firstTime: Bool, save: @escaping (String, String) -> Void, finished: (() -> Void)?) {
         let name = ws.root.lastPathComponent
         alert.messageText = firstTime ? "How should \(name) launch?" : "Launch Options for \(name)"
         alert.informativeText = firstTime
@@ -223,7 +249,7 @@ final class LaunchSettingsSheet: NSObject {
         LaunchSettings.loadSkins { [weak self] skins in self?.fillSkins(skins, selected: self?.selectedSkin ?? ws.skin) }
 
         optionsField.stringValue = ws.launchOptions
-        optionsField.placeholderString = "e.g. --appearance dark --locale de-DE --font-scale 1.3"
+        optionsField.placeholderString = "e.g. --appearance dark --locale de-DE --move-shared-data"
         optionsField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         optionsField.target = self
         optionsField.action = #selector(optionsEdited)
@@ -245,16 +271,16 @@ final class LaunchSettingsSheet: NSObject {
         alert.accessoryView = stack
         alert.window.initialFirstResponder = skinPopup
 
-        guard let window else { keepAlive = nil; return }
+        guard let window else { keepAlive = nil; finished?(); return }
         alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self else { return }
-            defer { self.keepAlive = nil }
+            guard let self else { finished?(); return }
+            defer { self.keepAlive = nil; finished?() }
             guard response == .alertFirstButtonReturn else { return }
             save(self.selectedSkin, self.optionsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 
-    private static let help = "Greenroom keeps --headless, --control, --window and --data-slots to itself; anything else apksim takes (--device, --appearance, --locale, --network-profile, --jvm…) is passed on."
+    private static let help = "Greenroom keeps --headless, --control, --window and --data-slots to itself; anything else apksim takes (--device, --appearance, --locale, --network-profile, --move-shared-data, --jvm…) is passed on."
     private static let addTag = "__add__"
 
     private var selectedSkin: String {

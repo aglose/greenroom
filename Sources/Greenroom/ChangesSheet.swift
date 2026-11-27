@@ -1383,7 +1383,8 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         refreshVideo()
         let options = baseOption.isEmpty ? [] : baseOption.split(separator: " ").map(String.init)
         let signIn = tourSignInSlot(for: set)
-        runner.start(set: set, head: head, base: base, baseOptions: options, signInSlot: signIn, progress: { [weak self] line in
+        let launch = controller?.walkLaunchOptions(forWorkspace: session?.workspace) ?? []
+        runner.start(set: set, head: head, base: base, baseOptions: options, launchOptions: launch, signInSlot: signIn, progress: { [weak self] line in
             self?.tourStatus = line
             self?.refreshVideo()
         }, completion: { [weak self] outcome in

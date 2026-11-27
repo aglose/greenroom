@@ -1231,7 +1231,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if let baseSim {
             baseSim.displayLabel = baseTitle
         } else {
-            var opts: [String] = []
+            // The repository's own skin and options, then the head's device, so the two are drawn alike.
+            var opts: [String] = sessions.launchOptions(forWorkspace: session.workspace)
             if let deviceIdx = headSim.options.firstIndex(of: "--device"), deviceIdx + 1 < headSim.options.count {
                 opts += ["--device", headSim.options[deviceIdx + 1]]
             }
