@@ -1349,13 +1349,23 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     @objc func showPalette(_ sender: Any?) {
         Reports.shared.count(.palette)
         if showingPalette { hidePalette(); return }
+        presentPalette { $0.open() }
+    }
+
+    /// The palette as a picker of `items` alone (the + menu's worktree search).
+    func showPalette(items: [PaletteItem], placeholder: String) {
+        if showingPalette { palette.open(items: items, placeholder: placeholder); return }
+        presentPalette { $0.open(items: items, placeholder: placeholder) }
+    }
+
+    private func presentPalette(_ open: (Palette) -> Void) {
         showingPalette = true
         scrim.isHidden = false
         palette.isHidden = false
         scrim.alphaValue = 0
         palette.alphaValue = 0
         palette.layer?.setAffineTransform(CGAffineTransform(translationX: 0, y: 8))
-        palette.open()
+        open(palette)
         Design.animate(Design.arrive, {
             self.scrim.animator().alphaValue = 1
             self.palette.animator().alphaValue = 1

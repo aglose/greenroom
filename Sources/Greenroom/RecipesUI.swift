@@ -139,6 +139,7 @@ extension SessionsController {
     func recipePaletteItems() -> [PaletteItem] {
         [
             PaletteItem(id: "session.pull.add", title: "Add pull request…", group: "Sessions", symbol: "arrow.triangle.pull", keywords: "review pr github ci") { [weak self] in self?.pulls.askAndAdd() },
+            PaletteItem(id: "session.pull.checkout", title: "Check out pull request as a session…", group: "Sessions", symbol: "arrow.triangle.pull", keywords: "pr github branch worktree fetch link") { [weak self] in self?.askAndCheckOutPull() },
             PaletteItem(id: "session.remote.prepare", title: "Prepare remote builder…", group: "Sessions", symbol: "server.rack", keywords: "boat sandbox template android sdk") { [weak self] in self?.showRemoteBuilderSheet() },
             PaletteItem(id: "session.settings", title: "Build settings for this session…", group: "Sessions", symbol: "slider.horizontal.3", keywords: "ci artifact apk workflow remote sandbox template") { [weak self] in
                 guard let self else { return }

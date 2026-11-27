@@ -414,7 +414,7 @@ enum RecipesCheck {
             _ = await wait("the pull request's build", 60) { pulls.rows().first?.state == .idle && pulls.rows().first?.build != nil }
             let prRow = pulls.rows().first
             expect(prRow?.pull.number == 42 && prRow?.build?.sha == prSha && prRow?.build?.source == .ci && sessions.pullRows().count == 1
-                   && ghCalls().contains("gh pr view 42 -R example/app --json headRefOid,headRefName,title") && ghCalls().contains { $0.hasPrefix("gh run list -R example/app --commit \(prSha)") } && prRow?.pull.slug == "example/app" && prRow?.pull.id == "example/app#42",
+                   && ghCalls().contains("gh pr view 42 -R example/app --json headRefOid,headRefName,title,isCrossRepository,state,isDraft,url") && ghCalls().contains { $0.hasPrefix("gh run list -R example/app --commit \(prSha)") } && prRow?.pull.slug == "example/app" && prRow?.pull.id == "example/app#42",
                    "the row appears in Review and its build is fetched by the ci recipe, no worktree involved")
             guard let pull = prRow?.pull else { say("FAIL no pull request row"); failures += 1; finish() }
             expect(PullStore(file: store.root.appendingPathComponent("sessions/pulls.json")).load().count == 1, "the pull request is kept in sessions/pulls.json")
@@ -442,6 +442,41 @@ enum RecipesCheck {
             expect(PullStore(file: junkFile).load().map(\.title) == ["Kept"], "a bad pull request record is skipped, not the file")
             write(junkFile, "[]")
 
+            // ===== 7b. A pull request checked out as a session =================================================
+            // Its head in origin as GitHub keeps it (refs/pull/N/head, and its branch); gh names it. upstream (the
+            // GitHub address) is pointed at origin meanwhile, so the fetch stays on this Mac.
+            _ = git(["remote", "set-url", "upstream", origin.path], in: repo)
+            _ = git(["checkout", "-q", "-b", "feature-pr", "main"], in: worktree("b"))
+            write(worktree("b").appendingPathComponent("pr.txt"), "from the pull request\n")
+            _ = git(["add", "pr.txt"], in: worktree("b")); _ = git(["commit", "-q", "-m", "pr work"], in: worktree("b"))
+            let prHead = gitOut(["rev-parse", "HEAD"], in: worktree("b"))
+            _ = git(["push", "-q", "origin", "HEAD:refs/heads/feature-pr", "HEAD:refs/pull/45/head", "HEAD:refs/pull/46/head"], in: worktree("b"))
+            _ = git(["checkout", "-q", "feat-b"], in: worktree("b")); _ = git(["branch", "-q", "-D", "feature-pr"], in: repo)
+            write(ghState.appendingPathComponent("pr-45.json"), #"{"headRefOid":"\#(prHead)","headRefName":"feature-pr","title":"PR work","isCrossRepository":false,"state":"OPEN","isDraft":false,"url":"https://github.com/example/app/pull/45"}"# + "\n")
+            write(ghState.appendingPathComponent("pr-46.json"), #"{"headRefOid":"\#(prHead)","headRefName":"main","title":"A fork's main","isCrossRepository":true,"state":"OPEN","isDraft":true}"# + "\n")
+            let (wt45, why45) = await sessions.checkOutPullRequest(number: 45, slug: "example/app", in: ws())
+            let wtPath = wt45?.path ?? "/nonexistent"
+            expect(wt45 != nil && gitOut(["rev-parse", "HEAD"], in: URL(fileURLWithPath: wtPath)) == prHead
+                   && gitOut(["symbolic-ref", "--short", "HEAD"], in: URL(fileURLWithPath: wtPath)) == "feature-pr"
+                   && gitOut(["rev-parse", "--abbrev-ref", "feature-pr@{upstream}"], in: repo) == "origin/feature-pr"
+                   && wtPath.hasPrefix(store.root.appendingPathComponent("worktrees").path),
+                   "a pull request is checked out on its own branch, tracking origin's, in a worktree under the store (\(why45))")
+            sessions.refresh()
+            _ = await wait("the pull request's session", 30) { sessions.session(atWorktree: URL(fileURLWithPath: wtPath))?.prNumber == 45 }
+            expect(sessions.session(atWorktree: URL(fileURLWithPath: wtPath))?.githubPR?.title == "PR work", "its session knows its pull request without gh pr list naming it")
+            let (again, againWhy) = await sessions.checkOutPullRequest(number: 45, slug: "example/app", in: ws())
+            expect(again?.resolvingSymlinksInPath().path == URL(fileURLWithPath: wtPath).resolvingSymlinksInPath().path && againWhy.contains("already"),
+                   "checking it out again gives the same worktree (\(againWhy))")
+            let (wt46, why46) = await sessions.checkOutPullRequest(number: 46, slug: "example/app", in: ws())
+            expect(wt46 != nil && gitOut(["symbolic-ref", "--short", "HEAD"], in: wt46 ?? repo) == "pr-46"
+                   && gitOut(["rev-parse", "main"], in: repo) == mainSha,
+                   "a fork's head named like the base branch gets pr-N, and main is left alone (\(why46))")
+            for w in [wt45, wt46].compactMap({ $0 }) { _ = git(["worktree", "remove", "--force", w.path], in: repo) }
+            _ = git(["branch", "-q", "-D", "feature-pr", "pr-46"], in: repo)
+            _ = git(["remote", "set-url", "upstream", "https://github.com/example/app.git"], in: repo)
+            sessions.refresh()
+            _ = await wait("the checked-out pull requests' sessions to go", 30) { !sessions.sessions.contains { $0.worktree.lastPathComponent.hasPrefix("repo-pr-") } }
+
             // ===== 8. Base resolution ============================================================================
             setenv("CHECK_GH_APK", ciApk.path, 1)
             ghReset()
@@ -468,7 +503,7 @@ enum RecipesCheck {
             let r6 = await Bases.resolve(base: .pullRequest(44), in: wsNow, sessions: known, store: store)
             var r6Key: String?
             if case .build(let b) = r6 { r6Key = b.key }
-            expect(r6Key == ciKey && ghCalls().contains("gh pr view 44 -R example/app --json headRefOid,headRefName,title"), "a pull request number resolves through gh pr view, then to its commit's stored build")
+            expect(r6Key == ciKey && ghCalls().contains("gh pr view 44 -R example/app --json headRefOid,headRefName,title,isCrossRepository,state,isDraft,url"), "a pull request number resolves through gh pr view, then to its commit's stored build")
             // A commit nobody has built: CI says no (unpushed), the worktree's APK is older than it: an offer, nothing started.
             let sessionsBefore = Set(known.map(\.worktree.path))
             let r7 = await Bases.resolve(base: .ref("feat-a"), in: wsNow, sessions: known, store: store)
