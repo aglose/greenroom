@@ -16,6 +16,11 @@ final class SessionsController {
     private(set) var builds: [String: Build] = [:]
     /// Open/closed GitHub PRs per workspace root, keyed by `headRefName`.
     private var branchPRs: [String: [String: GH.BranchPull]] = [:]
+    /// Pull requests checked out as sessions here (PullSessions.swift), by workspace and local branch: how a session
+    /// keeps its pull request when `gh pr list` does not name it (an older one, or a fork's head under another name).
+    var checkedOutPRs: [String: [String: GH.BranchPull]] = [:] {
+        didSet { sessions = attachPulls(sessions) }
+    }
     private var lastPRFetch: [String: Date] = [:]
     private var watchers: [String: WorktreeWatcher] = [:]
     private var buildWatcher: BuildWatcher?
@@ -121,7 +126,7 @@ final class SessionsController {
     private func attachPulls(_ list: [Session]) -> [Session] {
         list.map { s in
             var s = s
-            s.githubPR = s.branch.flatMap { branchPRs[s.workspace.path]?[$0] }
+            s.githubPR = s.branch.flatMap { branchPRs[s.workspace.path]?[$0] ?? checkedOutPRs[s.workspace.path]?[$0] }
             return s
         }
     }
@@ -441,19 +446,7 @@ final class SessionsController {
         let rest = sessions.filter { $0.workspace.path == workspace.path && !isShown($0) }
         let archived = Set(self.workspace(at: workspace)?.archived ?? [])
         func item(_ s: Session) -> NSMenuItem {
-            var bits: [String] = []
-            if let pr = s.githubPR {
-                bits.append("#\(pr.number) \(pr.statusBadge.lowercased())")
-            } else if let n = s.pullRequests.first(where: { $0.state == .open })?.number {
-                bits.append("#\(n) open")
-            } else if let n = s.pullRequests.first?.number {
-                bits.append("#\(n)")
-            }
-            if let agent = s.displayAgent ?? s.claude {
-                if agent.status == .waiting { bits.append("\(agent.sourceName) waiting for you") }
-                else if agent.status == .working && agent.running { bits.append("\(agent.sourceName) working") }
-            }
-            if self.newestAPK(for: s) == nil { bits.append("no build: click it to build") }
+            let bits = addDetails(s)
             let i = ClosureMenuItem(s.title + (bits.isEmpty ? "" : "  ·  " + bits.joined(separator: " · "))) { [weak self] in self?.show(s) }
             i.toolTip = (s.worktree.path as NSString).abbreviatingWithTildeInPath
             return i
@@ -461,16 +454,32 @@ final class SessionsController {
         let active = rest.filter { ($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
         let others = rest.filter { !($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
         let gone = rest.filter { archived.contains($0.worktree.path) }
+        if !rest.isEmpty {
+            let find = ClosureMenuItem("Find a Worktree…") { [weak self] in self?.findWorktree(in: workspace) }
+            find.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
+            find.toolTip = "Search the \(rest.count) worktree\(rest.count == 1 ? "" : "s") not in the sidebar by name, branch, folder or pull request"
+            menu.addItem(find)
+        }
+        let checkOut = ClosureMenuItem("Check Out Pull Request…") { [weak self] in self?.askAndCheckOutPull(in: workspace) }
+        checkOut.image = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil)
+        checkOut.toolTip = "Fetch a pull request's branch into a worktree of its own and open it as a session"
+        menu.addItem(checkOut)
+        // A long list is cut short: the search has every one.
+        let cap = 15
         func section(_ title: String, _ list: [Session]) {
             guard !list.isEmpty else { return }
-            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            menu.addItem(.separator())
             if #available(macOS 14.0, *) { menu.addItem(.sectionHeader(title: title)) } else { menu.addItem(withTitle: title, action: nil, keyEquivalent: "").isEnabled = false }
-            list.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }.forEach { menu.addItem(item($0)) }
+            let sorted = list.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            sorted.prefix(cap).forEach { menu.addItem(item($0)) }
+            if sorted.count > cap {
+                menu.addItem(ClosureMenuItem("\(sorted.count - cap) More…") { [weak self] in self?.findWorktree(in: workspace) })
+            }
         }
         section("Active or with an open pull request", active)
         section("Other worktrees", others)
         section("Archived", gone)
-        if menu.items.isEmpty { menu.addItem(withTitle: "Every worktree is in the sidebar", action: nil, keyEquivalent: "").isEnabled = false }
+        if rest.isEmpty { menu.addItem(withTitle: "Every worktree is in the sidebar", action: nil, keyEquivalent: "").isEnabled = false }
         menu.addItem(.separator())
         if rest.count > 1 { menu.addItem(ClosureMenuItem("Show All \(rest.count)") { [weak self] in self?.showAll(in: workspace) }) }
         let discoveredApps = apps(for: workspace)
@@ -509,6 +518,46 @@ final class SessionsController {
         menu.addItem(ClosureMenuItem("Add Repository…") { [weak self] in self?.chooseRepository() })
         menu.addItem(ClosureMenuItem("Remove \(workspace.lastPathComponent) from Sessions") { [weak self] in self?.removeWorkspace(at: workspace) })
         return menu
+    }
+
+    /// What the + menu and the worktree search say about a session it does not show: its pull request, its agent,
+    /// whether it has a build.
+    func addDetails(_ s: Session) -> [String] {
+        var bits: [String] = []
+        if let pr = s.githubPR {
+            bits.append("#\(pr.number) \(pr.statusBadge.lowercased())")
+        } else if let n = s.pullRequests.first(where: { $0.state == .open })?.number {
+            bits.append("#\(n) open")
+        } else if let n = s.pullRequests.first?.number {
+            bits.append("#\(n)")
+        }
+        if let agent = s.displayAgent ?? s.claude {
+            if agent.status == .waiting { bits.append("\(agent.sourceName) waiting for you") }
+            else if agent.status == .working && agent.running { bits.append("\(agent.sourceName) working") }
+        }
+        if newestAPK(for: s) == nil { bits.append("no build: click it to build") }
+        return bits
+    }
+
+    /// The + menu's "Find a Worktree…": the command palette, with only the worktrees `workspace` does not show.
+    func findWorktree(in workspace: URL) {
+        let archived = Set(self.workspace(at: workspace)?.archived ?? [])
+        let rest = sessions.filter { $0.workspace.path == workspace.path && !isShown($0) }
+            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        let items = rest.map { s -> PaletteItem in
+            var bits = addDetails(s)
+            if let branch = s.branch, branch != s.title { bits.insert(branch, at: 0) }
+            if archived.contains(s.worktree.path) { bits.append("archived") }
+            let pr = s.prNumber.map { "\($0) #\($0) pr" } ?? ""
+            return PaletteItem(id: "worktree." + s.worktree.path, title: s.title + (bits.isEmpty ? "" : "  ·  " + bits.joined(separator: " · ")),
+                               group: "Worktrees", symbol: s.prNumber != nil ? "arrow.triangle.pull" : "arrow.triangle.branch",
+                               keywords: [s.branch ?? "", s.worktree.lastPathComponent, s.shortHead, pr, s.prTitle ?? ""].joined(separator: " ")) { [weak self] in
+                self?.show(s)
+            }
+        }
+        let checkOut = PaletteItem(id: "worktree.checkout." + workspace.path, title: "Check out a pull request…", group: "Worktrees",
+                                   symbol: "plus.circle", keywords: "pr pull request github fetch branch") { [weak self] in self?.askAndCheckOutPull(in: workspace) }
+        workbench?.showPalette(items: items + [checkOut], placeholder: "Search \(rest.count) worktree\(rest.count == 1 ? "" : "s") of \(workspace.lastPathComponent)")
     }
 
     private func workspace(at root: URL) -> Workspace? { workspaces.first { $0.root.path == root.path } }

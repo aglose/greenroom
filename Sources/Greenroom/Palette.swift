@@ -42,7 +42,7 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
         let icon = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 16, weight: .medium)) ?? NSImage())
         icon.contentTintColor = Design.accent
-        field.placeholderString = "Search commands, devices, apps and recordings"
+        field.placeholderString = Self.placeholder
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
@@ -133,9 +133,16 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// Opens with an empty search (the commands used lately first) and the cursor in the field.
-    func open() {
-        items = source()
+    private static let placeholder = "Search commands, devices, apps and recordings"
+    /// Open as a picker of given items: what is picked is not one of the commands used lately.
+    private var isPicker = false
+
+    /// Opens with an empty search (the commands used lately first) and the cursor in the field. With `items`, only
+    /// those are searched (a picker, such as the + menu's worktree search), under `placeholder`.
+    func open(items scoped: [PaletteItem]? = nil, placeholder: String? = nil) {
+        items = scoped ?? source()
+        isPicker = scoped != nil
+        field.placeholderString = placeholder ?? Self.placeholder
         field.stringValue = ""
         filter()
         window?.makeFirstResponder(field)
@@ -174,7 +181,7 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
 
     private func filter() {
         let q = field.stringValue.trimmingCharacters(in: .whitespaces)
-        let recent = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
+        let recent = isPicker ? [] : UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
         if q.isEmpty {
             let used = recent.compactMap { id in items.first { $0.id == id } }
             shown = used + items.filter { i in !used.contains { $0.id == i.id } }
@@ -226,10 +233,12 @@ final class Palette: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTable
         let row = table.selectedRow
         guard row >= 0, row < shown.count else { return }
         let item = shown[row]
-        var recent = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
-        recent.removeAll { $0 == item.id }
-        recent.insert(item.id, at: 0)
-        UserDefaults.standard.set(Array(recent.prefix(8)), forKey: Self.recentKey)
+        if !isPicker {
+            var recent = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
+            recent.removeAll { $0 == item.id }
+            recent.insert(item.id, at: 0)
+            UserDefaults.standard.set(Array(recent.prefix(8)), forKey: Self.recentKey)
+        }
         onClose?()
         DispatchQueue.main.async { item.run() }
     }

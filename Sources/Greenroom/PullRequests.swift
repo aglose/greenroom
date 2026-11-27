@@ -207,14 +207,18 @@ final class PullRows {
     static func fetchHead(of p: PullRequest, in root: URL) async {
         guard !p.headSha.isEmpty, !p.headSha.hasPrefix("-") else { return }
         if await Git.run(["cat-file", "-e", p.headSha + "^{commit}"], in: root) != nil { return }
-        var remote = "origin"
-        if !p.slug.isEmpty, let list = await Git.run(["remote", "-v"], in: root) {
-            for line in list.split(whereSeparator: \.isNewline) {
-                let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-                if parts.count >= 2, GitHubRemote.slug(of: parts[1])?.caseInsensitiveCompare(p.slug) == .orderedSame { remote = parts[0]; break }
-            }
-        }
+        let remote = await remote(for: p.slug, in: root)
         _ = await Git.run(["fetch", "--quiet", "--no-tags", remote, "+refs/pull/\(p.number)/head:" + headRef(of: p)], in: root, timeout: 120)
+    }
+
+    /// The name of the remote whose address is the GitHub repository `slug` (`origin` when none is, or no slug).
+    static func remote(for slug: String, in root: URL) async -> String {
+        guard !slug.isEmpty, let list = await Git.run(["remote", "-v"], in: root) else { return "origin" }
+        for line in list.split(whereSeparator: \.isNewline) {
+            let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            if parts.count >= 2, GitHubRemote.slug(of: parts[1])?.caseInsensitiveCompare(slug) == .orderedSame { return parts[0] }
+        }
+        return "origin"
     }
 
     /// Re-reads the pull request from GitHub (a push moves its head) and fetches the build of the new head.
@@ -462,6 +466,10 @@ extension SessionsController {
     func pullMenuItems(for row: PullRow) -> [NSMenuItem] {
         [ClosureMenuItem("Open #\(row.pull.number)") { [weak self] in self?.pulls.open(row.pull) },
          ClosureMenuItem("Link Local APK to #\(row.pull.number)…") { [weak self] in self?.pulls.chooseLocalAPK(for: row.pull) },
+         ClosureMenuItem("Check Out #\(row.pull.number) as a Session") { [weak self] in
+             guard let self, let ws = self.workspaces.first(where: { $0.root.path == row.pull.workspace }) else { return }
+             self.checkOutPull(number: row.pull.number, slug: row.pull.slug.isEmpty ? nil : row.pull.slug, in: ws)
+         },
          ClosureMenuItem("Look for a Newer Head") { [weak self] in self?.pulls.refresh(row.pull) },
          ClosureMenuItem("Remove Pull Request") { [weak self] in self?.pulls.remove(row.pull) }]
     }
