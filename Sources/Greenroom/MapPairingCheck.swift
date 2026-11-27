@@ -101,6 +101,30 @@ enum MapPairingCheck {
             expect(false, "tie: the fixture has no control back to a screen")
         }
 
+        // Two controls of one screen led to one screen in the base (two cities of a list, one forecast screen); in the head
+        // that screen is restructured and the control that sorts first opens a screen of its own. The control both walks
+        // reached the screen by keeps its lineage, whatever the commands' order.
+        if let target = MapFixtures.leaves(of: map).first(where: { $0.parent != nil && $0.steps.last != nil }), let parent = map.screen(target.parent!) {
+            let first = " earlier"   // sorts before every "tap-text ..." command of the fixture
+            var base = map
+            base.edges.append(.init(from: parent.id, order: 999, action: first, cmd: first, to: target.id, note: nil))
+            base = base.canonical()
+            var head = MapFixtures.apply([.restructure(target.lineage)], to: base, commit: commit("siblings"))
+            let moved = head.screens.first { $0.lineage == target.lineage }!
+            var rival = moved
+            rival.id = "SiblingActivity-" + String(MapJSON.sha256("siblings").prefix(8))
+            rival.lineage = rival.id + "@" + String(head.commit.prefix(7))
+            rival.steps = parent.steps + [first]
+            head.screens.append(rival)
+            if let j = head.edges.firstIndex(where: { $0.from == parent.id && $0.cmd == first }) { head.edges[j].to = rival.id }
+            head = head.canonical()
+            let (paired, how) = MapPairing.pair(head: blank(head), base: base)
+            expect(lineage(paired, moved.id) == target.lineage && how[target.lineage] == .position && lineage(paired, rival.id) == rival.lineage,
+                   "siblings: two controls of one parent reach one base screen; the head screen behind the control both routes end with takes it, the other is new")
+        } else {
+            expect(false, "siblings: the fixture has no leaf under a parent")
+        }
+
         // The same input gives the same bytes: twice, and with its screens and edges in another order.
         let mixed = MapFixtures.golden().first { $0.name == "mixed" }!
         let once = MapPairing.pair(head: blank(mixed.head), base: mixed.base), twice = MapPairing.pair(head: blank(mixed.head), base: mixed.base)

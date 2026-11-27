@@ -15,10 +15,11 @@ import Foundation
 // 4. Otherwise it is new: `<id>@<the head commit's first seven digits>`. A base screen left over was removed.
 //
 // A base screen pairs with at most one head screen, and a head screen with one base screen. Ties are settled by order,
-// never by a dictionary's: within a round of positions the candidates are taken in (the control is the head screen's
-// parent's and the base screen's parent's (a link in the tree beats a link back), the from-screen's lineage, the
-// command, the head id, the base id) order, the first to claim a screen keeps it. Routes are tried in (depth, head id)
-// order against base screens in id order.
+// never by a dictionary's: within a round of positions the candidates are taken in (the control is the one both walks
+// first reached the screens by (the last step of each route: of two cities a list opens the same screen for, the one
+// both walks tapped first), the control is the head screen's parent's and the base screen's parent's (a link in the
+// tree beats a link back), the from-screen's lineage, the command, the head id, the base id) order, the first to claim
+// a screen keeps it. Routes are tried in (depth, head id) order against base screens in id order.
 enum MapPairing {
     /// A base made outside the app has no lineages: each empty one becomes `<id>@<its commit's first seven digits>`.
     static func seeded(_ base: MapSnapshot) -> MapSnapshot {
@@ -71,17 +72,19 @@ enum MapPairing {
         func follow(_ start: [String]) {
             var frontier = start.sorted()
             while !frontier.isEmpty {
-                struct Candidate { let tree: Bool; let from: String; let cmd: String; let head: String; let base: String }
+                /// `rank`: 0 the control both routes end with, 1 another control in the tree, 2 a link back.
+                struct Candidate { let rank: Int; let from: String; let cmd: String; let head: String; let base: String }
                 var candidates: [Candidate] = []
                 for h in frontier {
                     guard let b = baseOf[h], let theirs = baseControls[b], let from = baseByID[b] else { continue }
                     for c in headControls[h] ?? [] {
                         guard baseOf[c.to] == nil, let bt = theirs[c.cmd], !taken.contains(bt) else { continue }
                         let tree = headByID[c.to]?.parent == h && baseByID[bt]?.parent == b
-                        candidates.append(Candidate(tree: tree, from: from.lineage, cmd: c.cmd, head: c.to, base: bt))
+                        let own = tree && headByID[c.to]?.steps.last == c.cmd && baseByID[bt]?.steps.last == c.cmd
+                        candidates.append(Candidate(rank: own ? 0 : tree ? 1 : 2, from: from.lineage, cmd: c.cmd, head: c.to, base: bt))
                     }
                 }
-                candidates.sort { ($0.tree ? 0 : 1, $0.from, $0.cmd, $0.head, $0.base) < ($1.tree ? 0 : 1, $1.from, $1.cmd, $1.head, $1.base) }
+                candidates.sort { ($0.rank, $0.from, $0.cmd, $0.head, $0.base) < ($1.rank, $1.from, $1.cmd, $1.head, $1.base) }
                 var next: [String] = []
                 for c in candidates where baseOf[c.head] == nil && !taken.contains(c.base) {
                     join(c.head, c.base, .position)
