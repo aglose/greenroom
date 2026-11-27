@@ -15,6 +15,8 @@ struct NetEvent {
     let http: String?
     let error: String?
     let mocked: Bool
+    /// When Greenroom heard of it: for a connect that timed out, a minute or more after `start` (whose `ms` is 0).
+    let received: Date
 
     var end: Date { start.addingTimeInterval(Double(ms) / 1000) }
     var failed: Bool { status == 0 || status >= 400 || error != nil }
@@ -39,6 +41,7 @@ struct NetEvent {
         http = json["http"] as? String
         error = json["error"] as? String
         mocked = json["rule"] != nil || json["patched"] as? Bool == true
+        self.received = received
         // `t`: when the request began, in epoch milliseconds. Without one, it ended as it arrived.
         if let t = json["t"] as? Double, t > 0 { start = Date(timeIntervalSince1970: t / 1000) }
         else { start = received.addingTimeInterval(-Double(ms) / 1000) }
@@ -56,8 +59,10 @@ final class Activity {
     private var _requests: [NetEvent] = []
     private var _logs: [LogMark] = []
     private static let keep: TimeInterval = 600
-    /// Called on the main thread after new requests arrive.
+    /// Called on the main thread after new requests arrive (the network pane's, while it follows this simulator).
     var onRequests: (() -> Void)?
+    /// Posted on the main thread after new requests arrive, with the Activity as its object, for any other listener.
+    static let requestsArrived = Notification.Name("GreenroomActivityRequestsArrived")
 
     var touches: [Date] { lock.withLock { _touches } }
     var frames: [Date] { lock.withLock { _frames } }
@@ -126,6 +131,7 @@ final class NetFeed {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         pending.withLock { scheduled = false }
                         activity.onRequests?()
+                        NotificationCenter.default.post(name: Activity.requestsArrived, object: activity)
                     }
                 }
             }

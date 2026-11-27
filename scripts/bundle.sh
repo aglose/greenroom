@@ -143,6 +143,8 @@ if [[ -n "$CHECK" ]]; then
   # Connect Claude Code, against a stand-in claude (the real one is never run).
   CONNECT_DIR=$(mktemp -d /tmp/grconnect.XXXXXX)
   "$C/MacOS/Greenroom" --connect-check "$CONNECT_DIR" | tail -3
+  # The stage's "Can't reach" notice: which addresses it names and why, from made-up network rows.
+  "$C/MacOS/Greenroom" --unreachable-check | tail -1
   # The agent tied to its worktree's session: two worktrees, a state folder of its own.
   "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk" --sessions
   # The Claude Code plugin: its manifests, and its launcher script serving MCP through this app.
