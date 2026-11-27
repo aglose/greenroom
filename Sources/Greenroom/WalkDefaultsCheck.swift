@@ -21,6 +21,11 @@ enum WalkDefaultsCheck {
         expect(!plain.contains("--max-depth"), "a walk with nothing chosen has no depth limit: the whole app")
         expect(value(plain, "--max-seconds") == String(CrawlRun.ceiling) && CrawlRun.ceiling == 14_400, "... and stops only at the four-hour ceiling (\(value(plain, "--max-seconds") ?? "none"))")
         expect((2...6).contains(CrawlRun.parallel) && value(plain, "-j") == String(CrawlRun.parallel), "... on \(CrawlRun.parallel) devices at once (2 to 6, by the Mac's cores and memory)")
+        expect(CrawlRun.share(requested: 6, openSimulators: 0, otherWalks: 0, parallel: 6) == 6, "a walk on an idle Mac keeps every device it asked for")
+        expect(CrawlRun.share(requested: 6, openSimulators: 1, otherWalks: 0, parallel: 6) == 3, "... half of them while a simulator the person uses is open")
+        expect(CrawlRun.share(requested: 6, openSimulators: 1, otherWalks: 1, parallel: 6) == 1, "... and that half split with a walk already running")
+        expect(CrawlRun.share(requested: 2, openSimulators: 0, otherWalks: 0, parallel: 6) == 2, "a smaller request is kept as it is")
+        expect(CrawlRun.share(requested: 6, openSimulators: 3, otherWalks: 5, parallel: 2) == 1, "a walk always has one device")
         expect(!plain.contains("--events"), "--events is passed only when asked for")
         let chosen = args { $0.depth = 3; $0.seconds = 300; $0.jobs = 1; $0.events = true; $0.engineOptions = ["--data-slots", "x"] }
         expect(value(chosen, "--max-depth") == "3" && value(chosen, "--max-seconds") == "300" && value(chosen, "-j") == "1", "a chosen depth, time and device count are passed as they are")
