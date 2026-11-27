@@ -176,7 +176,9 @@ extension SessionsController {
             spin.setContentHuggingPriority(.required, for: .horizontal)
             views.append(spin)
             views.append(ClosureButton(symbol: "xmark.circle", tip: "Cancel build (a Gradle daemon may finish its current task)") { [weak self] in self?.cancelBuild(s) })
-            detail = job.state == .queued ? "build queued: another build of this repository is running" : "building: " + (job.lastLine ?? job.recipeName)
+            // Why a queued build waits is the job queue's to say (another build of the repository, the person's hold, the limit).
+            if job.state == .queued { detail = job.ticket?.held == true ? "build paused: resume it in Jobs" : "build queued: " + (job.ticket?.waiting ?? "waiting for its turn") }
+            else { detail = "building: " + (job.lastLine ?? job.recipeName) }
         } else {
             if let job, let why = job.failure {
                 detail = "build failed: " + (why.split(separator: "\n").last.map(String.init) ?? why)

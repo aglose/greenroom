@@ -212,10 +212,29 @@ enum Bases {
                             variant: workspace.variant, out: scratch.appendingPathComponent("app.apk"),
                             prNumber: prNumber, prTitle: prTitle, prURL: prURL, extra: extra)
         let run = RecipeRun(recipe: recipe, job: job)
-        run.onLine = onLine
+        // In the job queue while it runs: seen from any session, and cancelled there.
+        let what = prNumber.map { "pull request #\($0)" } ?? "\(workspace.root.lastPathComponent) at \(sha.prefix(7))"
+        let ticket = await MainActor.run { () -> QueueJob in
+            let t = QueueJob(kind: .fetch, title: "Fetch the build of \(what)", owner: nil, lane: nil, detail: "looking for a build (\(recipeName))")
+            t.onCancel = { run.cancel() }
+            JobQueue.shared.adopt(t)
+            return t
+        }
+        run.onLine = { line in
+            onLine?(line)
+            JobQueue.shared.update(ticket, detail: line)
+        }
         track(run, true)
         let outcome: RecipeOutcome = await withCheckedContinuation { c in run.start { c.resume(returning: $0) } }
         track(run, false)
+        await MainActor.run {
+            switch outcome {
+            case .cancelled: JobQueue.shared.finish(ticket, .cancelled)
+            // Finding no build is an answer, not a failure of the app: the row that asked says what to do next.
+            case .failed(let why): JobQueue.shared.finish(ticket, .done, detail: "no build: " + (why.split(separator: "\n").last.map(String.init) ?? why))
+            case .built: JobQueue.shared.finish(ticket, .done, detail: "fetched")
+            }
+        }
         switch outcome {
         case .cancelled: return (nil, "cancelled")
         case .failed(let why): return (nil, why)

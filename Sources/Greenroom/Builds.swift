@@ -22,6 +22,10 @@ final class BuildJob {
     let started = Date()
     var run: RecipeRun?
     fileprivate var cancelRequested = false
+    /// The person paused it while it ran: its recipe is ended, and the job goes back to the queue, held.
+    fileprivate var pauseRequested = false
+    /// Its place in the job queue (Jobs.swift).
+    fileprivate(set) var ticket: QueueJob?
     /// The recipe is done and its APK is being filed: a cancel now is honoured before the hand-off.
     fileprivate var handingOff = false
     fileprivate var recipe: Recipe
@@ -69,14 +73,15 @@ final class BuildJob {
     }
 }
 
-/// The build queue: one build at a time per workspace (Gradle's daemon and caches are shared by its worktrees),
-/// builds of different workspaces may overlap. A finished recipe becomes a `Build` in the store, handed to the
-/// session, whose simulator then reloads through `SessionsController.adopt`. A failure keeps the last good build.
+/// The builds: one build at a time per workspace (Gradle's daemon and caches are shared by its worktrees),
+/// builds of different workspaces may overlap. When each one starts is the job queue's decision (`JobQueue`, a lane
+/// per workspace): the person can hold, reorder and cancel them there. A finished recipe becomes a `Build` in the
+/// store, handed to the session, whose simulator then reloads through `SessionsController.adopt`. A failure keeps
+/// the last good build.
 final class Builds {
     private weak var sessions: SessionsController?
     /// The newest job of each session (by worktree path): active, or finished with its log.
     private(set) var jobs: [String: BuildJob] = [:]
-    private var queued: [BuildJob] = []
     private var running: [String: BuildJob] = [:]   // by workspace path
 
     /// Told on the main thread when a job's state changed (not for each line: see `onLine`).
@@ -105,10 +110,24 @@ final class Builds {
         if let why = workspace.refusal(forRecipe: name) { error(why); return nil }   // the remote recipe needs the person's yes
         let job = BuildJob(session: session, workspace: workspace, recipeName: name, recipe: recipe, store: store, environment: environment)
         jobs[job.session] = job
-        queued.append(job)
         job.append("queued: \(name) for \(session.title)")
+        let ticket = QueueJob(kind: .build, title: "Build \(session.title)", owner: job.session, lane: "build:" + job.workspace.path, detail: "\(name) recipe")
+        ticket.pauseTip = "Stop the build and keep it in the queue. Resuming builds again; Gradle reuses what it had finished."
+        ticket.begin = { [weak self, weak job] in
+            guard let self, let job else { return }
+            self.launch(job, store: store, session: session)
+        }
+        ticket.onCancel = { [weak self, weak job] in
+            guard let self, let job, self.jobs[job.session] === job else { return }
+            self.cancel(job.session)
+        }
+        ticket.onPause = { [weak self, weak job] in
+            guard let self, let job, self.jobs[job.session] === job else { return "That build is over." }
+            return self.pause(job)
+        }
+        job.ticket = ticket
         onChange?()
-        pump(store: store, session: session)
+        JobQueue.shared.submit(ticket)
         return job
     }
 
@@ -122,27 +141,33 @@ final class Builds {
     func cancel(_ worktree: String) {
         guard let job = jobs[worktree], job.isActive else { return }
         if job.state == .queued {
-            queued.removeAll { $0 === job }
             job.set(.cancelled)
             onChange?()
+            if let t = job.ticket { JobQueue.shared.finish(t, .cancelled) }
         } else {
             job.cancelRequested = true
             if !job.handingOff { job.run?.cancel() }   // the run's completion does the rest
         }
     }
 
-    // MARK: Running
-
-    /// Starts the next queued job of every workspace with none running.
-    private func pump(store: SessionStore, session: Session? = nil) {
-        for job in queued where running[job.workspace.path] == nil {
-            queued.removeAll { $0 === job }
-            running[job.workspace.path] = job
-            launch(job, store: store, session: session)
-        }
+    /// Pauses a running build: its recipe is ended (a Gradle daemon would not stop for less) and the job goes back
+    /// to the queue, held, to be built again when the person resumes it. Gives why not, when it cannot be.
+    private func pause(_ job: BuildJob) -> String? {
+        guard job.state == .running, !job.cancelRequested else { return "\(job.title) is not building now." }
+        guard !job.handingOff else { return "\(job.title) is built already: its APK is being filed." }
+        guard !job.pauseRequested else { return nil }
+        job.pauseRequested = true
+        if let t = job.ticket { JobQueue.shared.update(t, detail: "pausing…") }
+        job.run?.cancel()   // the run's completion does the rest
+        return nil
     }
 
+    // MARK: Running
+
+    /// The queue's go-ahead for a job: its workspace's lane is free.
     private func launch(_ job: BuildJob, store: SessionStore, session: Session?) {
+        guard job.state == .queued else { return }
+        running[job.workspace.path] = job
         job.set(.running)
         onChange?()
         let hint = session
@@ -159,13 +184,14 @@ final class Builds {
                                prNumber: job.prNumber, prTitle: job.prTitle, prURL: job.prURL, prState: job.prState, extra: extra)
             let run = RecipeRun(recipe: job.recipe, job: rj)
             job.run = run
-            if job.cancelRequested {
+            if job.cancelRequested || job.pauseRequested {
                 self.finish(job, outcome: .cancelled, store: store, sha: sha, ref: ref, dirty: dirty)
                 return
             }
             run.onLine = { [weak self, weak job] line in
                 guard let self, let job else { return }
                 job.append(line)
+                if let t = job.ticket, !job.pauseRequested { JobQueue.shared.update(t, detail: line) }
                 if line.hasPrefix("greenroom: sandbox-created ") { job.createdSandbox = String(line.dropFirst(27)).trimmingCharacters(in: .whitespaces) }
                 self.onLine?(job, line)
             }
@@ -181,11 +207,27 @@ final class Builds {
         // The remote recipe made a sandbox from a template: keep its id in the workspace's settings, so the next build resumes it.
         if let made = job.createdSandbox { sessions?.noteCreatedSandbox(made, workspaceRoot: job.workspace.path) }
         let release = { [self] in
-            running[job.workspace.path] = nil
+            if running[job.workspace.path] === job { running[job.workspace.path] = nil }
             onChange?()
-            pump(store: store)
+            guard let t = job.ticket else { return }
+            switch job.state {
+            case .built: JobQueue.shared.finish(t, .done, detail: "built with the \(job.recipeName) recipe")
+            case .failed(let why): JobQueue.shared.finish(t, .failed(why))
+            default: JobQueue.shared.finish(t, .cancelled)
+            }
         }
         switch outcome {
+        case .cancelled where job.pauseRequested && !job.cancelRequested:
+            // Paused, not cancelled: back to the queue, held. Nothing of the build so far is filed.
+            let note = "paused: the build was stopped and waits in the queue. Resuming builds again; Gradle reuses what it had finished."
+            job.append(note)
+            onLine?(job, note)
+            job.pauseRequested = false
+            job.run = nil
+            job.set(.queued)
+            if running[job.workspace.path] === job { running[job.workspace.path] = nil }
+            onChange?()
+            if let t = job.ticket { JobQueue.shared.requeue(t, held: true, detail: "stopped; resuming builds again") }
         case .cancelled:
             let note = "cancelled. A Gradle daemon the recipe started may finish its current task."
             job.append(note)

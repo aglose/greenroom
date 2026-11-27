@@ -114,6 +114,13 @@ version of it and adds the workbench.
   files could touch and carries the rest, falling back to a full walk for build files, the manifest, app start-up
   code and release builds whose classes name no source file (docs/MAP-IMPACT.md). docs/MAP-HISTORY-PLAN.md has the
   design.
+- **Jobs** (⌥⌘J, or the chip in the top bar): every build, walk of an app, comparison and fetched build the app is
+  making, for all sessions at once, in the order they run. Nothing is lost by switching sessions: what runs, what
+  waits and why, and what ended lately (with its reason when it failed) are in one list. Each job can be cancelled;
+  one that waits can be held in its place or moved to the front; a running walk can be paused where it is (its
+  hidden simulators are frozen and use no processor) and a running build is stopped and built again when resumed.
+  "At once" sets how many jobs run at the same time across the app; one build per repository and one walk at a time
+  hold whatever it says.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
 - **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.

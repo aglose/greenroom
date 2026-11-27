@@ -7,7 +7,9 @@ import AppKit
 ///     evidence/<build key>/map/              crawl.py's output (crawl.json, screens/...); its presence is the cache
 ///     changes/<head key>-<base key>/         crawl.py --base output (`changes(head:base:...)`)
 ///
-/// - One walk at a time across the app. A newer build of a session cancels that session's running or queued walk.
+/// - One walk at a time across the app: each is a job of the job queue (`JobQueue`, the "walk" lane), which decides
+///   when it starts and is where the person holds, reorders, pauses and cancels them. A newer build of a session
+///   cancels that session's running or queued walk.
 /// - A walk runs on a clone of the session's data slot, never the slot itself (`SlotClone`), so it starts where the
 ///   person is signed in and changes nothing of theirs; a session with no data yet, or a clone that cannot be made,
 ///   is walked fresh, and the row's detail says so.
@@ -59,6 +61,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var changed: Int? = nil
         /// The same in words, for the tooltip: "2 added, 1 changed against main at 53ffe80".
         var changedWords: String? = nil
+        /// While walking: the person paused it in the job queue.
+        var paused = false
     }
 
     /// A walk's plan and what came of it (packages I1, I2), kept beside its map as `greenroom-impact.json`. Absent for a
@@ -113,7 +117,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         didSet {
             guard oldValue.root != store.root else { return }
             // Another store (a check's own): nothing queued or shown belongs to it.
-            queue.removeAll()
+            unqueue { _ in true }
             entries = [:]
             if let job = current { job.forgotten = true; cancel(job) }
         }
@@ -146,7 +150,6 @@ final class Evidence: NSObject, NSMenuItemValidation {
     private var fullWhy: [String: String] = [:]
     private var queue: [Job] = []
     private var current: Job?
-    private var retry: Timer?
     private var swept = false
     private let fm = FileManager.default
     private var quitObserver: NSObjectProtocol?
@@ -185,6 +188,11 @@ final class Evidence: NSObject, NSMenuItemValidation {
         var fullWhy: String?
         /// The session or repository went: the walk's folder goes with it.
         var forgotten = false
+        /// Its place in the job queue (Jobs.swift).
+        var ticket: QueueJob?
+        /// While walking: screens found and screens finished with, for the queue's progress.
+        var known = 0
+        var explored = 0
         struct Waiter {
             let id = UUID()
             let completion: (Result<ChangesResult, Failure>) -> Void
@@ -259,8 +267,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     /// "Stop walking": the session's running or queued walk ends and the row says so.
     func stop(worktree: String) {
-        var was = false
-        queue.removeAll { if $0.owner == worktree { was = true; return true } else { return false } }
+        var was = unqueue(silent: false) { $0.owner == worktree }
         if let job = current, job.owner == worktree, !job.isChanges {
             job.stopped = true
             cancel(job)
@@ -273,7 +280,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     /// folder of a walk that was running goes with it. Its finished evidence goes with its builds, when the store
     /// prunes them.
     func forget(worktree: String) {
-        queue.removeAll { $0.owner == worktree }
+        unqueue { $0.owner == worktree }
         if let job = current, job.owner == worktree { job.forgotten = true; cancel(job) }
         if entries[worktree] != nil { entries[worktree] = nil; onChange?() }
     }
@@ -336,9 +343,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         job.force = force
         job.forceFull = fullNext.remove(worktree) != nil
         job.fullWhy = fullWhy.removeValue(forKey: worktree)
-        queue.append(job)
+        enqueue(job)
         onChange?()
-        pump()
     }
 
     static func done(_ data: ScreenMapData) -> Status {
@@ -347,7 +353,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     /// Removes the owner's queued jobs and cancels its running one (a newer build has come).
     private func drop(_ owner: String) {
-        queue.removeAll { $0.owner == owner }
+        unqueue { $0.owner == owner }
         if let job = current, job.owner == owner { cancel(job) }
     }
 
@@ -531,9 +537,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         job.force = true
         job.verifyOf = worktree
         job.engineCheck = afterEngine
-        queue.append(job)
         updateImpact(owner: worktree, key: build.key, folder: mapFolder(for: build.key)) { $0.verify = "verifying carried screens…" }
-        pump()
+        enqueue(job)
         return true
     }
 
@@ -596,7 +601,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         else if let queued = queue.first(where: { $0.owner == owner }) { job = queued }
         else {
             job = walkJob(owner: owner, build: head, slot: nil)
-            queue.append(job)
+            enqueue(job, start: false)
         }
         let waiter = Job.Waiter(completion: completion, progress: progress)
         job.waiters.append(waiter)
@@ -604,9 +609,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
             guard let self, let job, let i = job.waiters.firstIndex(where: { $0.id == waiter.id }) else { return }
             job.waiters.remove(at: i).completion(.failure(Failure(message: "cancelled")))
             guard job.waiters.isEmpty else { return }
-            if self.current === job { self.cancel(job) } else { self.queue.removeAll { $0 === job } }
+            if self.current === job { self.cancel(job) } else { self.unqueue { $0 === job } }
         }
-        pump()
+        if let t = job.ticket { JobQueue.shared.submit(t) }   // a job that is there already stays where it is
         return token
     }
 
@@ -635,7 +640,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
                       part: changesFolder.appendingPathComponent(name + ".part", isDirectory: true), final: folder)
             job.start = start
             job.baseOption = baseOption
-            queue.append(job)
+            enqueue(job, start: false)
         }
         let waiter = Job.Waiter(completion: completion, progress: progress)
         job.waiters.append(waiter)
@@ -644,9 +649,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
             job.waiters.remove(at: i).completion(.failure(Failure(message: "cancelled")))
             // The run goes only when nobody is left waiting for it.
             guard job.waiters.isEmpty else { return }
-            if self.current === job { self.cancel(job) } else { self.queue.removeAll { $0 === job } }
+            if self.current === job { self.cancel(job) } else { self.unqueue { $0 === job } }
         }
-        pump()
+        if let t = job.ticket { JobQueue.shared.submit(t) }   // a job that is there already stays where it is
         return token
     }
 
@@ -669,29 +674,117 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     // MARK: The queue
 
-    private func pump() {
-        guard current == nil else { return }
-        while let next = queue.first {
-            // The same build in two sessions: the first walk made the map the second one wants.
-            if !next.isChanges, !next.force, hasCrawl(next.final), let data = ScreenMapData.read(next.final) {
-                queue.removeFirst()
-                if var e = entries[next.owner], e.key == next.build.key { e.status = Self.done(data); e.impact = Self.impactNote(next.final); entries[next.owner] = e; onChange?() }
-                let waiters = next.waiters
-                next.waiters.removeAll()
-                for w in waiters { w.completion(.success(ChangesResult(folder: next.final, map: data, summary: Self.summary(of: next.final)))) }
-                continue
+    /// Asks the job queue to start whatever can start now.
+    private func pump() { JobQueue.shared.pump() }
+
+    /// Puts a job in the queue: the job queue starts it (`start`) when no other walk runs and nothing holds it back.
+    /// `start` false when the caller still has to finish setting the job up (its waiters): it submits the ticket itself.
+    private func enqueue(_ job: Job, start: Bool = true) {
+        queue.append(job)
+        let ticket = QueueJob(kind: job.verifyOf != nil ? .verify : (job.isChanges ? .compare : .walk), title: title(of: job),
+                              owner: job.verifyOf ?? job.owner, lane: "walk")
+        ticket.pauseTip = "Freeze the walk and its hidden simulators where they are. A step that was timing out may be tried again."
+        ticket.gate = { [weak self, weak job] in
+            guard let self, let job, self.shouldPause?(job.owner) == true else { return nil }
+            return "waiting until this repository's build is done and the simulators are left alone"
+        }
+        ticket.begin = { [weak self, weak job] in
+            guard let self, let job else { return }
+            self.start(job)
+        }
+        ticket.onCancel = { [weak self, weak job] in
+            guard let self, let job else { return }
+            self.cancelByPerson(job)
+        }
+        ticket.onPause = { [weak self, weak job] in
+            guard let self, let job, self.current === job, !job.cancelled, let run = job.run, run.isRunning else {
+                return "This walk is still getting ready. It can be paused once it is walking."
             }
-            if shouldPause?(next.owner) == true {
-                guard retry == nil else { return }
-                retry = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in self?.retry = nil; self?.pump() }
-                return
-            }
-            queue.removeFirst()
-            current = next
-            started += 1
-            begin(next)
+            run.suspend()
+            if let t = job.ticket { JobQueue.shared.suspended(t) }
+            self.notePaused(job, true)
+            return nil
+        }
+        ticket.onResume = { [weak self, weak job] in
+            guard let job else { return }
+            job.run?.resume()
+            self?.notePaused(job, false)
+        }
+        job.ticket = ticket
+        if start { JobQueue.shared.submit(ticket) }   // which may start the job in this same call
+    }
+
+    /// A session's own walk was paused or resumed: its row says so.
+    private func notePaused(_ job: Job, _ paused: Bool) {
+        guard !job.forwardsProgress, job.verifyOf == nil, var e = entries[job.owner], e.key == job.build.key, e.paused != paused else { return }
+        e.paused = paused
+        entries[job.owner] = e
+        onChange?()
+    }
+
+    /// "Map fix-login", "Compare main with fix-login": what the job queue calls a job.
+    private func title(of job: Job) -> String {
+        func name(_ owner: String) -> String {
+            if owner.hasPrefix("pr:") { return "a pull request's build" }
+            if let s = controller?.sessions.first(where: { $0.worktree.path == owner }) { return s.title }
+            return URL(fileURLWithPath: owner).lastPathComponent
+        }
+        func label(_ b: Build) -> String { b.ref.flatMap { $0.isEmpty ? nil : $0 } ?? b.sha.map { String($0.prefix(7)) } ?? String(b.key.prefix(7)) }
+        if let worktree = job.verifyOf { return "Verify the map of \(name(worktree))" }
+        if case .changes(let base) = job.kind { return "Compare \(label(job.build)) with \(label(base))" }
+        if job.owner.hasPrefix("map:") { return "Map \(label(job.build)) to compare" }
+        return "Map \(name(job.owner))"
+    }
+
+    /// Takes jobs out of the queue, and out of the job queue with them: silently (a newer build replaced them), or
+    /// said as cancelled (the person stopped them). True when there was one.
+    @discardableResult
+    private func unqueue(silent: Bool = true, _ match: (Job) -> Bool) -> Bool {
+        var gone: [Job] = []
+        queue.removeAll { if match($0) { gone.append($0); return true } else { return false } }
+        for job in gone {
+            guard let t = job.ticket else { continue }
+            if silent { JobQueue.shared.forget(t) } else { JobQueue.shared.finish(t, .cancelled) }
+        }
+        return !gone.isEmpty
+    }
+
+    /// Cancel in the job queue's list: a session's own walk is stopped as "Stop walking" does (its row says so); a
+    /// comparison or a verification ends, and whoever waited for it hears "cancelled".
+    private func cancelByPerson(_ job: Job) {
+        if job.verifyOf == nil, !job.isChanges, !job.owner.hasPrefix("map:") { stop(worktree: job.owner); return }
+        if current === job { job.stopped = true; cancel(job); return }
+        guard unqueue(silent: false, { $0 === job }) else { return }
+        let waiters = job.waiters
+        job.waiters.removeAll()
+        for w in waiters { w.completion(.failure(Failure(message: "cancelled"))) }
+        if let worktree = job.verifyOf { updateImpact(owner: worktree, key: job.build.key, folder: mapFolder(for: job.build.key)) { $0.verify = nil } }
+    }
+
+    /// The job queue's go-ahead for a queued job: no other walk runs.
+    private func start(_ next: Job) {
+        guard let i = queue.firstIndex(where: { $0 === next }) else {
+            if let t = next.ticket { JobQueue.shared.forget(t) }
             return
         }
+        guard current == nil else {
+            // Another Evidence's walk shares the lane, never this one's: asked again shortly rather than run two.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if let t = next.ticket { JobQueue.shared.requeue(t, held: false) } }
+            return
+        }
+        queue.remove(at: i)
+        // The same build in two sessions: the first walk made the map the second one wants.
+        if !next.isChanges, !next.force, hasCrawl(next.final), let data = ScreenMapData.read(next.final) {
+            if var e = entries[next.owner], e.key == next.build.key { e.status = Self.done(data); e.impact = Self.impactNote(next.final); entries[next.owner] = e; onChange?() }
+            let waiters = next.waiters
+            next.waiters.removeAll()
+            for w in waiters { w.completion(.success(ChangesResult(folder: next.final, map: data, summary: Self.summary(of: next.final)))) }
+            if let t = next.ticket { JobQueue.shared.forget(t) }
+            return
+        }
+        current = next
+        started += 1
+        begin(next)
     }
 
     private func begin(_ job: Job) {
@@ -817,6 +910,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
     }
 
     private func event(_ e: CrawlRun.Event, _ job: Job) {
+        progress(e, job)
         if job.forwardsProgress { job.waiters.forEach { $0.progress?(e) }; return }
         guard var entry = entries[job.owner], entry.key == job.build.key else { return }
         switch e {
@@ -829,6 +923,25 @@ final class Evidence: NSObject, NSMenuItemValidation {
         }
         entries[job.owner] = entry
         onChange?()
+    }
+
+    /// A walk's progress, for the job queue: screens found, and the share of them it has finished with.
+    private func progress(_ e: CrawlRun.Event, _ job: Job) {
+        guard let t = job.ticket else { return }
+        switch e {
+        case .level(_, _, let known): job.known = max(job.known, known)
+        case .capturing(let screens, _):
+            JobQueue.shared.update(t, detail: "capturing \(screens) screen\(screens == 1 ? "" : "s")")
+            return
+        case .screen(_, _, _, let explored):
+            guard explored else { return }
+            job.explored += 1
+        case .line: return
+        }
+        guard job.known > 0 else { return }
+        let left = job.explored > 0 && job.explored < job.known ? ", \(job.known - job.explored) to open" : ""
+        JobQueue.shared.update(t, detail: "\(job.known) screen\(job.known == 1 ? "" : "s") found" + left,
+                               fraction: .some(job.explored > 0 ? min(1, Double(job.explored) / Double(job.known)) : nil))
     }
 
     private func cancel(_ job: Job) {
@@ -858,6 +971,16 @@ final class Evidence: NSObject, NSMenuItemValidation {
             return
         }
         current = nil
+        // The job queue hears last, once the map is in its place: the next walk may start in that same call.
+        let release = {
+            guard let t = job.ticket else { return }
+            switch end {
+            case .finished where job.forgotten || job.cancelled: JobQueue.shared.finish(t, .cancelled)
+            case .finished: JobQueue.shared.finish(t, .done, detail: job.adopted ? "this commit's map was there already" : (job.known > 0 ? "\(job.known) screen\(job.known == 1 ? "" : "s")" : nil))
+            case .failed(let why): JobQueue.shared.finish(t, .failed(why))
+            case .cancelled: if job.forgotten { JobQueue.shared.forget(t) } else { JobQueue.shared.finish(t, .cancelled) }
+            }
+        }
         switch end {
         case .finished: break
         case .failed(let why): NSLog("Greenroom: a walk of \(job.build.key) failed: \(why)")
@@ -866,7 +989,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         if job.verifyOf != nil {
             finishVerify(job, end)
             onChange?()
-            pump()
+            release()
             return
         }
         if let work = job.workDir { try? fm.removeItem(at: work) }
@@ -921,7 +1044,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         for w in waiters { w.completion(result) }
         onChange?()
         pruneToCap(force: true)
-        pump()
+        release()
     }
 
     /// What a finished walk's plan came to: walked and carried screens are counted in its crawl.json.
@@ -935,8 +1058,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
 
     /// Kills the walk's processes and removes its clone (app quit).
     func shutdown() {
-        queue.removeAll()
-        retry?.invalidate()
+        unqueue { _ in true }
         if let job = current {
             job.cancelled = true
             job.run?.cancel(wait: true)
@@ -1054,6 +1176,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         switch e.status {
         case .queued: return "walk queued"
         case .walking(let depth, let known):
+            if e.paused { return known > 0 ? "walk paused at \(known) screen\(known == 1 ? "" : "s")" : "walk paused" }
             // "mapping": the whole app, the first time or when asked; "walking": only what a change could touch.
             let verb = e.whole ? "mapping" : "walking"
             guard known > 0 else { return verb + "…" }

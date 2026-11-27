@@ -441,6 +441,36 @@ final class CrawlRun {
         onFinish?(.failed(last ?? "The walk ended with status \(code) and no map."))
     }
 
+    /// Whether the walk is frozen (`suspend`).
+    private(set) var isSuspended = false
+    /// Signals to the walk's processes go out in the order they were asked for.
+    private let signals = DispatchQueue(label: "greenroom-crawl-signals")
+
+    /// Freezes the walk where it is: the crawler first, so it starts nothing more, then every simulator it started
+    /// (SIGSTOP; nothing of theirs runs or uses the processor until `resume`). What the walk found stays as it is.
+    /// The crawler's own clocks go on meanwhile: a step that was waiting with a deadline may be tried again after.
+    func suspend() {
+        guard isRunning, process.isRunning, !isSuspended, !cancelled else { return }
+        isSuspended = true
+        let pid = process.processIdentifier
+        signals.async {
+            kill(pid, SIGSTOP)
+            for p in SnapshotRun.descendants(of: pid) { kill(p, SIGSTOP) }
+        }
+    }
+
+    /// Lets a frozen walk go on: the simulators first, then the crawler.
+    func resume() {
+        guard isSuspended else { return }
+        isSuspended = false
+        guard isRunning, process.isRunning else { return }
+        let pid = process.processIdentifier
+        signals.async {
+            for p in SnapshotRun.descendants(of: pid).reversed() { kill(p, SIGCONT) }
+            kill(pid, SIGCONT)
+        }
+    }
+
     /// Stops the walk and the simulators it started (only processes that descend from it). The crawler is told first,
     /// so it can end its own simulators; the tree is read before that (children of a dead crawler belong to no one),
     /// and what is left after 4 s is killed. Off the calling thread (reading the tree runs `pgrep`) unless `wait`.
@@ -448,10 +478,14 @@ final class CrawlRun {
         guard isRunning, process.isRunning else { return }
         cancelled = true
         let pid = process.processIdentifier
-        let stop = { [process] in
+        let stop = { [process, signals] in
+            signals.sync {}   // a freeze still on its way lands first
             let tree = SnapshotRun.descendants(of: pid)
             kill(pid, SIGTERM)
             for p in tree.reversed() { kill(p, SIGTERM) }
+            // A frozen process hears nothing until it is let go on.
+            for p in tree.reversed() { kill(p, SIGCONT) }
+            kill(pid, SIGCONT)
             let deadline = Date().addingTimeInterval(4)
             while process.isRunning, Date() < deadline { usleep(50_000) }
             for p in tree where kill(p, 0) == 0 { kill(p, SIGKILL) }
