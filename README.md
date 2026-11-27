@@ -150,6 +150,20 @@ Mac a day before they are sent, so you can read or discard each one; debug build
 
 An Apple Silicon Mac, macOS 14 or later.
 
+## Installing
+
+Download the disk image from the [latest release](https://github.com/aglose/greenroom/releases/latest), or with
+Homebrew:
+
+```bash
+brew tap aglose/apksim
+brew trust aglose/apksim      # once: Homebrew 7 loads casks only from taps you trust
+brew install --cask greenroom
+```
+
+Greenroom updates itself either way, so `brew upgrade` leaves it alone. `brew uninstall --zap greenroom` removes it
+along with its settings and state.
+
 ## Building
 
 Xcode 26 (or its command-line tools) is all that is needed.
