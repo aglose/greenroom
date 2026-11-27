@@ -9,11 +9,14 @@ import AppKit
 // slot of its own and reloads, data kept, when a newer main lands. "Keep main built" in the repository's + menu
 // turns it off.
 
-/// Whether a folder looks like an Android app project: a Gradle wrapper, and a build file (at the top or one folder
-/// down) that applies the Android application plugin, the way the local recipe finds the module. Cached per path.
+/// Whether a folder looks like an Android app project: a Gradle wrapper (at the top or in a composite build) and a
+/// build file (at the top, in a module, or nested inside composite builds) that applies the Android application plugin
+/// or sets `applicationId`. Cached per path.
 enum AndroidProject {
     private static var cache: [String: Bool] = [:]
     private static let lock = NSLock()
+    /// Directories that never hold Gradle build files or wrappers.
+    static let skipDirectories: Set<String> = ["build", "src", "node_modules", "Pods", "DerivedData", "target", "dist", "out", "vendor"]
 
     static func isApp(_ root: URL) -> Bool {
         let key = root.resolvingSymlinksInPath().path
@@ -30,15 +33,37 @@ enum AndroidProject {
 
     private static func look(_ root: URL) -> Bool {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: root.appendingPathComponent("gradlew").path) else { return SessionStore.newestAPK(in: root) != nil }
-        var dirs = [root]
-        if let top = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            dirs += top.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && $0.lastPathComponent != "build" }
-        }
-        for d in dirs {
-            for name in ["build.gradle.kts", "build.gradle"] {
-                guard let text = try? String(contentsOf: d.appendingPathComponent(name), encoding: .utf8) else { continue }
-                if text.range(of: #"android[._-]?[Aa]pplication"#, options: .regularExpression) != nil { return true }
+        var hasGradlew = false
+        var hasAppBuild = false
+        var queue: [(URL, Int)] = [(root, 0)]
+        var index = 0
+        let maxDepth = 4
+        let maxDirs = 500
+        while index < queue.count && index < maxDirs {
+            let (dir, depth) = queue[index]
+            index += 1
+            if !hasGradlew && depth <= 2 && fm.fileExists(atPath: dir.appendingPathComponent("gradlew").path) {
+                hasGradlew = true
+            }
+            if !hasAppBuild {
+                for name in ["build.gradle.kts", "build.gradle"] {
+                    guard let text = try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8) else { continue }
+                    if text.range(of: #"android[._-]?[Aa]pplication"#, options: .regularExpression) != nil
+                        || text.range(of: #"(?<![A-Za-z0-9_])applicationId\s*(=|\s+["'])"#, options: .regularExpression) != nil {
+                        hasAppBuild = true
+                        break
+                    }
+                }
+            }
+            if hasGradlew && hasAppBuild { return true }
+            if depth < maxDepth,
+               let children = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) {
+                for child in children where queue.count < maxDirs {
+                    guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                          vals.isDirectory == true, vals.isSymbolicLink != true,
+                          !skipDirectories.contains(child.lastPathComponent) else { continue }
+                    queue.append((child, depth + 1))
+                }
             }
         }
         return SessionStore.newestAPK(in: root) != nil

@@ -114,8 +114,27 @@ enum MainCheck {
             AndroidProject.forget()
             sessions.use(store: store)
 
-            // 1. Only an Android project gets main's row.
+            // 1. Only an Android project gets main's row (including multi-composite repos with nested modules or wrappers).
             expect(AndroidProject.isApp(root) && !AndroidProject.isApp(plain), "the Android repository is an app project, the plain one is not")
+            let compositeRoot = base.appendingPathComponent("composite-root", isDirectory: true)
+            write("#!/bin/sh\nexit 1\n", compositeRoot.appendingPathComponent("gradlew"), executable: true)
+            write("includeBuild(\"build-logic\")\nincludeBuild(\"mobile\")\n", compositeRoot.appendingPathComponent("settings.gradle.kts"))
+            write("plugins { id(\"com.android.application\") }\n", compositeRoot.appendingPathComponent("mobile/app/build.gradle.kts"))
+            let compositeNested = base.appendingPathComponent("composite-nested", isDirectory: true)
+            write("#!/bin/sh\nexit 1\n", compositeNested.appendingPathComponent("android/gradlew"), executable: true)
+            write("plugins { alias(libs.plugins.company.app) }\nandroid { defaultConfig { applicationId = \"com.example.app\" } }\n",
+                  compositeNested.appendingPathComponent("android/apps/consumer/build.gradle.kts"))
+            let compositeLibOnly = base.appendingPathComponent("composite-lib", isDirectory: true)
+            write("#!/bin/sh\nexit 1\n", compositeLibOnly.appendingPathComponent("gradlew"), executable: true)
+            write("plugins { id(\"com.android.library\") }\nandroid { defaultConfig { testApplicationId = \"com.example.test\" } }\n",
+                  compositeLibOnly.appendingPathComponent("core/lib/build.gradle.kts"))
+            expect(AndroidProject.isApp(compositeRoot) && AndroidProject.isApp(compositeNested) && !AndroidProject.isApp(compositeLibOnly),
+                   "multi-composite Android repositories are detected (root or nested gradlew, nested app module or applicationId), library-only is not")
+            let compositeApk = compositeNested.appendingPathComponent("android/apps/consumer/build/outputs/apk/debug/consumer-debug.apk")
+            try? fm.createDirectory(at: compositeApk.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.copyItem(at: apk, to: compositeApk)
+            expect(SessionStore.isBuildOutput(compositeApk, in: compositeNested) && SessionStore.newestAPK(in: compositeNested)?.apk.lastPathComponent == "consumer-debug.apk",
+                   "build outputs nested inside composite builds are found")
             expect(sessions.mainRow(for: plainWs.root) == nil, "the plain repository has no main row")
 
             // 2. Main's newest commit is built by itself, in a worktree of its own, with local.properties.
