@@ -170,8 +170,8 @@ final class SessionStore {
 
     // MARK: Gradle outputs
 
-    /// Whether `file` is an APK Gradle left in `build/outputs/apk` of the worktree or of a module one folder down:
-    /// not an intermediate, a test APK, a fixture or any other `.apk` in the tree.
+    /// Whether `file` is an APK Gradle left in `build/outputs/apk` of the worktree or of a module (including inside
+    /// composite builds): not an intermediate, a test APK, a fixture or any other `.apk` in the tree.
     static func isBuildOutput(_ file: URL, in worktree: URL) -> Bool {
         guard file.pathExtension.lowercased() == "apk" else { return false }
         let name = file.lastPathComponent
@@ -180,21 +180,37 @@ final class SessionStore {
         let parts = file.resolvingSymlinksInPath().pathComponents
         guard parts.count > root.count, Array(parts.prefix(root.count)) == root else { return false }
         let rel = Array(parts.dropFirst(root.count))
-        for at in 0...1 where rel.count > at + 3 && rel[at] == "build" && rel[at + 1] == "outputs" && rel[at + 2] == "apk" { return true }
+        let maxAt = min(4, rel.count - 4)
+        guard maxAt >= 0 else { return false }
+        for at in 0...maxAt where rel[at] == "build" && rel[at + 1] == "outputs" && rel[at + 2] == "apk" { return true }
         return false
     }
 
     /// The newest `.apk` under a worktree's Gradle outputs (`isBuildOutput`).
     static func newestAPK(in worktree: URL) -> Session.Outputs? {
         let fm = FileManager.default
-        var roots = [worktree.appendingPathComponent("build/outputs/apk", isDirectory: true)]
-        if let top = try? fm.contentsOfDirectory(at: worktree, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for d in top where (try? d.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-                roots.append(d.appendingPathComponent("build/outputs/apk", isDirectory: true))
+        var roots: [URL] = []
+        var queue: [(URL, Int)] = [(worktree, 0)]
+        var index = 0
+        let maxDepth = 4
+        let maxDirs = 500
+        while index < queue.count && index < maxDirs {
+            let (dir, depth) = queue[index]
+            index += 1
+            let apks = dir.appendingPathComponent("build/outputs/apk", isDirectory: true)
+            if fm.fileExists(atPath: apks.path) { roots.append(apks) }
+            if depth < maxDepth,
+               let children = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) {
+                for child in children where queue.count < maxDirs {
+                    guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                          vals.isDirectory == true, vals.isSymbolicLink != true,
+                          !AndroidProject.skipDirectories.contains(child.lastPathComponent) else { continue }
+                    queue.append((child, depth + 1))
+                }
             }
         }
         var best: Session.Outputs?
-        for r in roots where fm.fileExists(atPath: r.path) {
+        for r in roots {
             guard let walk = fm.enumerator(at: r, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey], options: []) else { continue }
             for case let f as URL in walk where isBuildOutput(f, in: worktree) {
                 guard let v = try? f.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]), v.isRegularFile == true,
