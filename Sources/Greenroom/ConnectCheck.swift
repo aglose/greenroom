@@ -195,6 +195,17 @@ enum ConnectCheck {
         func shape(_ tool: String, _ args: [String: Any]) -> String { AgentRecording.shape(tool: tool, args: args) }
         expect(shape("set", ["setting": "appearance", "value": "dark"]) == "set: appearance", "a known setting is named, never its value")
         expect(shape("set", ["setting": "hunter2-SECRET"]) == "set: a setting", "an unknown setting name is not stored")
+        expect(AgentTools.validLocation("37.7749 -122.4194") && AgentTools.validLocation("drive") && AgentTools.validLocation("none"),
+               "set location takes a latitude and longitude, a route, or none")
+        expect(!AgentTools.validLocation("91 0") && !AgentTools.validLocation("0 181") && !AgentTools.validLocation("walk"),
+               "set location refuses a place off the globe and an unknown route")
+        let asked = "[apksim] permission request waiting: ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION (answer with the control command `permission allow` or `permission deny`)"
+        expect(Simulator.permissionChange(asked) == .some(["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]), "a waiting permission request is read with its names")
+        expect(Simulator.permissionChange("[apksim] permission allowed: CAMERA") == .some(nil) && Simulator.permissionChange("[apksim] permission denied: CAMERA") == .some(nil),
+               "an answered permission request clears the prompt")
+        expect(Simulator.permissionChange("[apksim] permission  something else") == nil, "other engine lines leave the prompt as it is")
+        expect(Simulator.permissionPhrase(["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]) == "location"
+               && Simulator.permissionPhrase(["CAMERA", "RECORD_AUDIO"]) == "camera and microphone", "a permission request reads as what it is for")
         expect(shape("swipe", ["direction": "up"]) == "swipe: up" && shape("swipe", ["direction": "SECRET"]) == "swipe: by points", "a swipe stores only a real direction")
         expect(shape("open_url", ["url": "myapp://reset?token=SECRET#x"]) == "open_url: myapp", "an app's own link is stored as its scheme alone", shape("open_url", ["url": "myapp://reset?token=SECRET#x"]))
         let web = shape("open_url", ["url": "https://example.com/docs/0123456789abcdef0123456789abcdef/page?q=SECRET#frag"])

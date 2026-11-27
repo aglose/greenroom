@@ -68,7 +68,7 @@ The answers are built to be cheap to read:
 | `tap` | by `ref`, by `text`, or at `x`,`y` |
 | `type` | `text`, into the field named by `ref` or `tap_text`; `enter` |
 | `key`, `back`, `swipe`, `open_url` | keys, Back, a swipe by `direction` or coordinates, a deep link |
-| `set` | appearance, locale, font scale, rotation, network, device, time zone, animation scale, permissions; home, resume, lock, unlock, recreate, restart, process-death |
+| `set` | appearance, locale, font scale, rotation, network, device, time zone, animation scale, permissions, GPS location (`"LAT LON"` or a moving route `run`/`bike`/`drive`, `none` clears it); home, resume, lock, unlock, recreate, restart, process-death |
 | `screen`, `check`, `wait_for`, `screenshot`, `logs` | reading and verifying |
 | `session` | this worktree's session: branch and commit, clean or not, its build (age, source, current or stale), the default recipe, the base, whether its simulator runs, the Claude session's title when known |
 | `build` | run a recipe for the session and wait (`recipe`, `timeout_s`: 10 to 200 s, default 200): answers the build's key and age, or the log's last error lines |

@@ -30,6 +30,14 @@ final class Simulator {
     static let stateChanged = Notification.Name("GreenroomSimulatorStateChanged")
     /// Called on the main thread.
     var onState: ((State) -> Void)?
+    /// The permissions the app is waiting to be answered on (short names, ACCESS_FINE_LOCATION), or none. The engine
+    /// runs headless, so its own prompt never shows: Greenroom asks instead (Workbench), and `permission allow|deny` answers.
+    private(set) var permissionRequest: [String]? {
+        didSet { if permissionRequest != oldValue { NotificationCenter.default.post(name: Self.permissionChanged, object: self) } }
+    }
+    /// Posted (main thread) when `permissionRequest` changes; the object is the simulator.
+    static let permissionChanged = Notification.Name("GreenroomSimulatorPermissionChanged")
+    private var partialLine = ""
     /// Every input a person makes on this simulator, as it is sent ("Sign In Once" records it).
     var onPerform: ((SimulatorInput) -> Void)?
     var onSize: ((CGSize) -> Void)?
@@ -117,6 +125,7 @@ final class Simulator {
             self.logHandle?.write(data)
             self.activity.logged(data)
             self.scan(data)
+            self.watchPermissions(data)
         }
         process.terminationHandler = { [weak self] proc in
             pipe.fileHandleForReading.readabilityHandler = nil
@@ -132,6 +141,55 @@ final class Simulator {
             }
         }
         try process.run()
+    }
+
+    /// The engine says `[apksim] permission request waiting: A, B (…)` when an app asks, and `permission allowed|denied: …`
+    /// once it is answered (here, by an agent, or by a script).
+    private func watchPermissions(_ data: Data) {
+        guard let text = String(data: data, encoding: .utf8) else { return }
+        var lines = (partialLine + text).components(separatedBy: "\n")
+        partialLine = lines.removeLast()
+        if partialLine.count > 4096 { partialLine = "" }
+        var change: [String]??
+        for line in lines where line.hasPrefix("[apksim] permission ") {
+            change = Self.permissionChange(line) ?? change
+        }
+        guard let change else { return }
+        DispatchQueue.main.async { [weak self] in self?.permissionRequest = change }
+    }
+
+    /// What one engine line does to the waiting request: names it, clears it (.some(nil)), or nothing (nil).
+    static func permissionChange(_ line: String) -> [String]?? {
+        let waiting = "[apksim] permission request waiting: "
+        if line.hasPrefix(waiting) {
+            let names = line.dropFirst(waiting.count).prefix { $0 != "(" }
+            return .some(names.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+        }
+        if line.hasPrefix("[apksim] permission allowed:") || line.hasPrefix("[apksim] permission denied:") { return .some(nil) }
+        return nil
+    }
+
+    /// What a person reads for the permissions asked: "location", "camera and microphone".
+    static func permissionPhrase(_ names: [String]) -> String {
+        let words: [String] = names.map { name in
+            switch name {
+            case let n where n.contains("LOCATION"): return "location"
+            case "CAMERA": return "camera"
+            case "RECORD_AUDIO": return "microphone"
+            case "POST_NOTIFICATIONS": return "notifications"
+            case let n where n.contains("CONTACTS"): return "contacts"
+            case let n where n.contains("CALENDAR"): return "calendar"
+            case let n where n.hasPrefix("READ_MEDIA") || n.contains("EXTERNAL_STORAGE"): return "photos and files"
+            case let n where n.hasPrefix("BLUETOOTH"): return "nearby devices"
+            case "NEARBY_WIFI_DEVICES": return "nearby devices"
+            case let n where n.hasPrefix("BODY_SENSORS"): return "body sensors"
+            case "ACTIVITY_RECOGNITION": return "physical activity"
+            default: return name.lowercased().replacingOccurrences(of: "_", with: " ")
+            }
+        }
+        var seen = Set<String>()
+        let unique = words.filter { seen.insert($0).inserted }
+        return unique.count <= 1 ? (unique.first ?? "a permission") : unique.dropLast().joined(separator: ", ") + " and " + unique.last!
     }
 
     /// The engine prints `[apksim] control port N` on stderr once the channel is open.
