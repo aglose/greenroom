@@ -373,17 +373,21 @@ final class Evidence: NSObject, NSMenuItemValidation {
         // A map that was not walked signed in is none, unless the repository counts those.
         let unsigned = controller?.countsUnsigned(controller?.workspaceRoot(ofOwner: worktree)) ?? true
         return (signedInFirst ? [true, false] : [false, true]).filter { $0 || unsigned }.map {
-            Self.profile(depth: quick ? 2 : budget.depth, seconds: quick ? 120 : budget.seconds, appearances: ["light"], start: nil, signedIn: $0, offline: false)
+            Self.profile(depth: quick ? 2 : budget.depth, seconds: quick ? 120 : budget.seconds, appearances: ["light"], start: nil, signedIn: $0, offline: false,
+                         launch: controller?.walkLaunchKey(forOwner: worktree))
         }
     }
 
-    func changesProfile(start: String? = nil) -> MapProfile {
-        Self.profile(depth: budget.depth, seconds: budget.seconds, appearances: ["light"], start: start, signedIn: false, offline: false)
+    /// `workspace`: the repository compared, whose launch options are part of the profile.
+    func changesProfile(start: String? = nil, workspace: URL?) -> MapProfile {
+        Self.profile(depth: budget.depth, seconds: budget.seconds, appearances: ["light"], start: start, signedIn: false, offline: false,
+                     launch: controller?.walkLaunchKey(forWorkspace: workspace))
     }
 
-    static func profile(depth: Int, seconds: Int, appearances: [String], start: String?, signedIn: Bool, offline: Bool) -> MapProfile {
+    /// `launch`: the repository's launch options for walks (LaunchSettings.walkKey), nil when it has none.
+    static func profile(depth: Int, seconds: Int, appearances: [String], start: String?, signedIn: Bool, offline: Bool, launch: String? = nil) -> MapProfile {
         MapProfile(depth: depth, seconds: seconds, starts: (start?.isEmpty == false) ? [start!] : [], combos: appearances,
-                   signIn: signedIn ? "session-data" : nil, offline: offline)
+                   signIn: signedIn ? "session-data" : nil, offline: offline, launch: launch)
     }
 
     /// A finished walk of a build that has a clean commit is filed in the history store, off the main thread.
@@ -403,7 +407,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         guard let meta = (try? JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("greenroom.json")))) as? [String: Any] else { return false }
         let profile = Self.profile(depth: meta["depth"] as? Int ?? budget.depth, seconds: meta["seconds"] as? Int ?? budget.seconds,
                                    appearances: meta["appearances"] as? [String] ?? ["light"], start: (meta["start"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                                   signedIn: meta["keptData"] as? Bool ?? false, offline: meta["offline"] as? Bool ?? false)
+                                   signedIn: meta["keptData"] as? Bool ?? false, offline: meta["offline"] as? Bool ?? false,
+                                   launch: controller?.walkLaunchKey(forOwner: worktree))
         History.accept(build.key)
         let all = controller?.workspaces ?? []
         let own = controller?.sessions.first { $0.worktree.path == worktree }?.workspace.path
@@ -844,7 +849,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
                 job.note = note
                 // A snapshot's profile is the walk's own settings: signed-in only when the data was really copied.
                 job.profile = Self.profile(depth: settings.depth, seconds: settings.seconds, appearances: settings.appearances, start: settings.start,
-                                           signedIn: settings.keepData && slotName != nil, offline: settings.offline)
+                                           signedIn: settings.keepData && slotName != nil, offline: settings.offline,
+                                           launch: self.controller?.walkLaunchKey(forOwner: job.verifyOf ?? job.owner))
                 if job.cancelled { self.finish(job, .cancelled); return }
                 self.planWalk(job, python: python) { [weak self] plan in
                     guard let self else { return }
@@ -885,6 +891,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
                         }
                         return
                     }
+                    // The repository's skin and launch options: its maps are of the device its simulators show.
+                    settings.engineOptions += self.controller?.walkLaunchOptions(forOwner: job.verifyOf ?? job.owner) ?? []
                     let run = CrawlRun(python: python, apk: job.build.apk, out: out, settings: settings)
                     job.run = run
                     run.onEvent = { [weak self] e in self?.event(e, job) }

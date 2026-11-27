@@ -65,6 +65,7 @@ final class AgentTools {
         "permission": "^(allow|deny|reset|(grant|revoke) [A-Za-z0-9_.]+)$",
         "location": "^(none|run|bike|drive|-?[0-9]{1,2}(\\.[0-9]+)? -?[0-9]{1,3}(\\.[0-9]+)?)$", "home": "^$", "resume": "^$", "lock": "^$",
         "unlock": "^$", "recreate": "^$", "restart": "^$", "process-death": "^$",
+        "skin": "^([a-z0-9-]{1,64}|off)$",
     ]
 
     /// A location value is a route name, or a latitude and longitude on the globe.
@@ -90,7 +91,15 @@ final class AgentTools {
             "appearance": ["type": "string", "enum": ["light", "dark"]],
             "locale": str, "font_scale": ["type": "number"],
             "fresh": ["type": "boolean", "description": "start with empty app data. In a worktree it runs beside the session's simulator on a separate data slot: the session's own data is never emptied"],
+            "skin": ["type": "string", "description": "a stored device skin for this launch (launch_settings lists them); in a worktree the repository's own skin is used without it"],
+            "options": ["type": "string", "description": "further apksim launch options for this launch, as one shell-style line (--network-profile 3g --timezone Europe/Berlin); added after the repository's own. --headless, --window, --control and --data-slots are Greenroom's and left out"],
         ], sim: false)),
+        ("launch_settings", "This worktree's repository's simulator skin and custom apksim launch options, which every simulator Greenroom starts "
+            + "for it uses (main, sessions, pull requests, agents), and its walks and comparisons (a walk with other options is another map history). "
+            + "Without arguments answers them and the stored skins. With skin and/or options it changes them for the repository: a running "
+            + "simulator takes a new skin now, new options when it next launches.",
+         schema(["skin": ["type": "string", "description": "a stored skin's name, or \"\" (or off) for none"],
+                 "options": ["type": "string", "description": "the whole options line, replacing the old one (\"\" for none): --appearance dark --locale de-DE ..."]], sim: false)),
         ("simulators", "List running simulators and recently opened APKs.", schema(sim: false)),
         ("close", "Stop a simulator.", schema()),
         ("tap", "Tap a node by ref (e3), by its text, or at x,y. Answers with what changed.", schema(["ref": str, "text": str, "x": int, "y": int])),
@@ -105,7 +114,8 @@ final class AgentTools {
         ("set", "Change the device or app state: appearance dark|light, locale fr-FR, fontscale 1.3, rotate left|right|portrait|"
             + "landscape, network online|offline|3g|lossy, device phone|tablet|..., timezone, animscale, permission allow|deny|"
             + "grant NAME|revoke NAME|reset, "
-            + "location \"LAT LON\" (37.7749 -122.4194) or a moving route run|bike|drive, none clears it; and (no value) home, resume, lock, unlock, recreate, restart, process-death.",
+            + "location \"LAT LON\" (37.7749 -122.4194) or a moving route run|bike|drive, none clears it; skin NAME|off (a stored device skin, "
+            + "this simulator only: launch_settings changes the repository's); and (no value) home, resume, lock, unlock, recreate, restart, process-death.",
          schema(["setting": ["type": "string", "enum": settings.keys.sorted()], "value": str], required: ["setting"])),
         ("screen", "The whole screen as compact lines: ref \"label\" click|field. text keeps lines containing it.",
          schema(["text": str, "bounds": bool])),
@@ -190,6 +200,7 @@ final class AgentTools {
             case "changes": content = text(try changesTool(args, connection))
             case "history": content = text(try historyTool(args, connection))
             case "launch": content = text(try launch(args, connection))
+            case "launch_settings": content = text(try launchSettingsTool(args, connection))
             case "simulators": content = text(simulators())
             case "close": content = text(try close(args))
             case "tap": content = text(try tap(args))
@@ -364,6 +375,7 @@ final class AgentTools {
 
     private func launch(_ args: [String: Any], _ connection: Connection) throws -> String {
         var options: [String] = []
+        var leftOut = ""
         if let d = args["device"] as? String {
             guard AgentTools.devices.contains(d) else { throw Failure(message: "device is one of \(AgentTools.devices.joined(separator: ", "))") }
             options += ["--device", d]
@@ -373,6 +385,15 @@ final class AgentTools {
         if let f = args["font_scale"] as? Double, f >= 0.5, f <= 3 { options += ["--font-scale", String(f)] }
         let fresh = args["fresh"] as? Bool == true
         if fresh { options.append("--fresh") }
+        if let skin = (args["skin"] as? String)?.trimmingCharacters(in: .whitespaces), !skin.isEmpty {
+            guard skin.range(of: "^[a-z0-9-]{1,64}$", options: .regularExpression) != nil else { throw Failure(message: "skin is a stored skin's name (launch_settings lists them)") }
+            options += ["--skin", skin]
+        }
+        if let line = args["options"] as? String, !line.isEmpty {
+            let (kept, dropped) = LaunchSettings.sanitized(LaunchSettings.tokens(line))
+            options += kept
+            if !dropped.isEmpty { leftOut = " (left out, Greenroom sets these itself: \(dropped.joined(separator: ", ")))" }
+        }
 
         // The session this connection is tied to, as it is now (its build may be newer than when it was tied).
         let session: Session? = connection.session.flatMap { s in DispatchQueue.main.sync { self.workbench?.sessions.session(atWorktree: s.worktree) } }
@@ -384,7 +405,10 @@ final class AgentTools {
         func throwaway(_ apk: URL) -> Simulator? {
             let slot = "grx" + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
             note = " (fresh data on a separate slot, beside the session's simulator; the session's own data is untouched)"
-            return DispatchQueue.main.sync { self.workbench?.open(apk, remember: true, options: ["--data-slots", slot] + options, fromAgent: true) }
+            return DispatchQueue.main.sync {
+                let own = session.flatMap { s in self.workbench?.sessions.launchOptions(forWorkspace: s.workspace) } ?? []
+                return self.workbench?.open(apk, remember: true, options: ["--data-slots", slot] + own + options, fromAgent: true)
+            }
         }
         /// The session's slot is held until an old simulator on it has exited.
         func waitForSlot(_ session: Session) {
@@ -456,7 +480,8 @@ final class AgentTools {
         sim.tree.update(nodes(sim))
         sim.logOffset = 0
         let size = DispatchQueue.main.sync { sim.deviceSize }
-        var head = "\(id(sim)) launched \(name)\(session.map { " for \($0.branch ?? $0.shortHead)" } ?? "") \(Int(size.width))x\(Int(size.height)) | \(activity(sim))\(note)"
+        let skinNote = DevHooks.value("--skin", in: DispatchQueue.main.sync { sim.options }).map { " | skin \($0)" } ?? ""
+        var head = "\(id(sim)) launched \(name)\(session.map { " for \($0.branch ?? $0.shortHead)" } ?? "") \(Int(size.width))x\(Int(size.height)) | \(activity(sim))\(skinNote)\(note)\(leftOut)"
         if !settled.hasPrefix("settled") { head += " (still animating)" }
         return ([head] + sim.tree.nodes.filter { !$0.label.isEmpty || $0.click }.map(\.line)).joined(separator: "\n")
     }

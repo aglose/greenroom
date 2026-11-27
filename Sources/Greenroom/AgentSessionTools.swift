@@ -94,11 +94,47 @@ extension AgentTools {
         let others = ws.recipeNames.filter { $0 != name }
         lines.append("default recipe: \(name)" + (others.isEmpty ? "" : " (others: \(others.joined(separator: ", ")))"))
         lines.append("base: \(ws.baseRef)")
+        lines.append("launch: skin \(ws.skin.isEmpty ? "none" : ws.skin), options \(ws.launchOptions.isEmpty ? "none" : ws.launchOptions) (launch_settings changes them)")
         let sim = mainSync { wb.sessions.simulator(for: s) }
         lines.append(sim.map { "simulator: \(id($0)) running" } ?? "simulator: none (launch starts it)")
         if let c = s.claude, let title = c.title { lines.append("claude session: \(ScreenNode.quote(title)) (\(c.status.rawValue))") }
         let taking = mainSync { recording.recording(for: s.worktree.path) }
         if let r = taking, r.live { lines.append("recording: your session is being recorded for the person (\(r.file.lastPathComponent))") }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: launch_settings
+
+    func launchSettingsTool(_ args: [String: Any], _ connection: Connection) throws -> String {
+        let (_, ws) = try tied(connection)
+        guard let wb = workbench else { throw Failure(message: Self.noSession) }
+        let skinArg = (args["skin"] as? String)?.trimmingCharacters(in: .whitespaces)
+        let optionsArg = (args["options"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let skins: [LaunchSettings.Skin] = {
+            let done = DispatchSemaphore(value: 0)
+            var listed: [LaunchSettings.Skin] = []
+            DispatchQueue.main.async { LaunchSettings.loadSkins { listed = $0; done.signal() } }
+            return done.wait(timeout: .now() + 20) == .success ? listed : mainSync { LaunchSettings.cachedSkins }
+        }()
+        var lines: [String] = []
+        if skinArg != nil || optionsArg != nil {
+            var skin = skinArg ?? ws.skin
+            if skin == "off" || skin == "none" { skin = "" }
+            if !skin.isEmpty, !skins.contains(where: { $0.name == skin }) {
+                throw Failure(message: "there is no stored skin called \(skin): the skins are \(skins.map(\.name).joined(separator: ", "))")
+            }
+            let options = optionsArg ?? ws.launchOptions
+            let dropped = LaunchSettings.sanitized(LaunchSettings.tokens(options)).dropped
+            mainSync { wb.sessions.setLaunch(skin: skin, options: options, for: ws.root) }
+            lines.append("saved for \(ws.root.lastPathComponent): a running simulator takes the skin now, the options when it next launches")
+            if !dropped.isEmpty { lines.append("left out (Greenroom sets these itself): \(dropped.joined(separator: ", "))") }
+        }
+        let now = mainSync { wb.sessions.workspaces.first { $0.root.path == ws.root.path } } ?? ws
+        lines.append("skin: \(now.skin.isEmpty ? "none" : now.skin)")
+        lines.append("options: \(now.launchOptions.isEmpty ? "none" : now.launchOptions)")
+        let effective = mainSync { LaunchSettings.options(for: now) }
+        if !effective.isEmpty { lines.append("added to each launch: \(effective.joined(separator: " "))") }
+        lines.append("stored skins: " + (skins.isEmpty ? "none" : skins.map { s in [s.name, s.device.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ") }.joined(separator: ", ")))
         return lines.joined(separator: "\n")
     }
 
@@ -378,7 +414,7 @@ extension AgentTools {
                 if !out.contains(where: { $0.id == p.id }) { out.append(p) }
             }
             for p in evidence.walkProfiles(worktree: s.worktree.path, withData: wb.sessions.walksWithData(s)) { add(p) }
-            add(evidence.changesProfile(start: start))
+            add(evidence.changesProfile(start: start, workspace: s.workspace))
             return out
         }
     }
@@ -388,12 +424,12 @@ extension AgentTools {
         let root = evidence.store.root
         let store = History.store(stateRoot: root, workspace: ws.root)
         if Engine.agentCheck {
-            let profile = evidence.changesProfile(start: nil)
+            let profile = evidence.changesProfile(start: nil, workspace: ws.root)
             AgentCheckHooks.seedHistory(store: store, profile: profile, workspace: ws.root)
             return (store, profile, root)
         }
         let candidates = candidateProfiles(for: s, start: nil, wb: wb)
-        let profile = candidates.first { !store.commits(profile: $0.id).isEmpty } ?? candidates.first ?? evidence.changesProfile(start: nil)
+        let profile = candidates.first { !store.commits(profile: $0.id).isEmpty } ?? candidates.first ?? evidence.changesProfile(start: nil, workspace: ws.root)
         return (store, profile, root)
     }
 

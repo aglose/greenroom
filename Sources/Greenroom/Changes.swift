@@ -507,7 +507,7 @@ final class ChangesRun {
     @MainActor
     private func fromHistory(head: Build, base: Build, workspace ws: Workspace, start: String?, gen: Int) async -> Bool {
         let evidence = controller.evidence
-        let profile = evidence.changesProfile(start: start)
+        let profile = evidence.changesProfile(start: start, workspace: ws.root)
         let root = evidence.store.root
         let folder = evidence.changesFolder(head: head.key, base: base.key)
         func attempt() async -> ChangeSet? {
@@ -696,7 +696,7 @@ final class ChangesRun {
     /// Files the heads and bases of a finished pair walk (each that has a commit and is not dirty).
     private func fileFromPair(folder: URL, head: Build, base: Build, workspace ws: Workspace, start: String?) {
         let evidence = controller.evidence
-        let profile = evidence.changesProfile(start: start), root = evidence.store.root, engine = Engine.shared.version
+        let profile = evidence.changesProfile(start: start, workspace: ws.root), root = evidence.store.root, engine = Engine.shared.version
         Task.detached {
             // The base first: the head's baseline is then the base when it is the merge base.
             await History.fileFromPair(folder: folder, build: base, side: .base, workspace: ws, profile: profile, stateRoot: root, engine: engine)
@@ -811,7 +811,8 @@ final class ChangeTour {
     /// `baseOptions` are the engine options of the base build's launches (as the comparison's own walk had).
     /// `signInSlot`: a kept sign-in data slot to clone onto both tour devices (plus `--biometrics auto`) when the
     /// comparison was walked signed in.
-    func start(set: ChangeSet, head: Build, base: Build, baseOptions: [String], signInSlot: String? = nil,
+    /// `launchOptions`: the repository's own (LaunchSettings.walkOptions), on both builds, as its walks had them.
+    func start(set: ChangeSet, head: Build, base: Build, baseOptions: [String], launchOptions: [String] = [], signInSlot: String? = nil,
                progress: @escaping (String) -> Void, completion: @escaping (Outcome) -> Void) {
         guard !isRunning else { return }
         isRunning = true
@@ -820,7 +821,7 @@ final class ChangeTour {
         Self.sweepLogs()
         Self.active.append(self)
         Task { @MainActor in
-            let outcome = await self.run(set: set, head: head, base: base, baseOptions: baseOptions, signInSlot: signInSlot, progress: progress)
+            let outcome = await self.run(set: set, head: head, base: base, baseOptions: baseOptions, launchOptions: launchOptions, signInSlot: signInSlot, progress: progress)
             self.isRunning = false
             Self.active.removeAll { $0 === self }
             completion(outcome)
@@ -889,7 +890,7 @@ final class ChangeTour {
     }
 
     @MainActor
-    private func run(set: ChangeSet, head: Build, base: Build, baseOptions: [String], signInSlot: String?, progress: @escaping (String) -> Void) async -> Outcome {
+    private func run(set: ChangeSet, head: Build, base: Build, baseOptions: [String], launchOptions: [String], signInSlot: String?, progress: @escaping (String) -> Void) async -> Outcome {
         let folder = set.folder
         let wanted = Self.stops(of: set)
         try? FileManager.default.removeItem(at: folder.appendingPathComponent("tour.json"))
@@ -933,8 +934,8 @@ final class ChangeTour {
         let hs: Simulator, bs: Simulator
         do {
             try Engine.shared.prepare()
-            hs = try sim(apk: head.apk, options: ["--data-slots", slotH, "--appearance", "light"] + signInFlags)
-            bs = try sim(apk: base.apk, options: ["--data-slots", slotB, "--appearance", "light"] + signInFlags + baseOptions)
+            hs = try sim(apk: head.apk, options: ["--data-slots", slotH, "--appearance", "light"] + signInFlags + launchOptions)
+            bs = try sim(apk: base.apk, options: ["--data-slots", slotB, "--appearance", "light"] + signInFlags + launchOptions + baseOptions)
         } catch {
             teardown()
             return skip(folder, "The tour could not start the two builds: \(error.localizedDescription)")

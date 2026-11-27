@@ -82,6 +82,7 @@ final class SessionsController {
     func install(workbench: Workbench) {
         self.workbench = workbench
         workspaces = store.loadWorkspaces()
+        if workspaces.contains(where: { !$0.skin.isEmpty }) { LaunchSettings.loadSkins() }   // each skin's device, for launches
         DevHooks.shared.owns = { [weak self] sim in self?.session(forSimulator: sim) != nil }   // reloaded here, once
         evidence.controller = self
         evidence.store = store
@@ -245,6 +246,7 @@ final class SessionsController {
             } else {
                 var ws = Workspace(root: root)
                 ws.shown = [worktreePath]
+                ws.launchAsked = false   // asked for a skin and launch options before its first simulator starts
                 if let defaultApp { ws.module = defaultApp.id }
                 self.workspaces.append(ws)
                 self.store.saveWorkspaces(self.workspaces)
@@ -268,6 +270,7 @@ final class SessionsController {
             self.workbench?.showLibrary()
             self.onChange?()
             self.refresh(supersede: true)
+            if self.workspace(at: root)?.launchAsked == false, !Engine.agentCheck, Self.unsignedForChecks == nil { self.editLaunchSettings(for: root, firstTime: true) }
             return root
         }
     }
@@ -509,6 +512,11 @@ final class SessionsController {
             noLocal.state = ws.disableLocalBuilds ? .on : .off
             noLocal.toolTip = "Never run ./gradlew locally for this repository (use a PR APK script, CI, or linked local APKs instead)"
             menu.addItem(noLocal)
+            let launch = ClosureMenuItem("Skin & Launch Options…") { [weak self] in self?.editLaunchSettings(for: workspace) }
+            launch.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
+            let bits = [ws.skin.isEmpty ? nil : "skin \(ws.skin)", ws.launchOptions.isEmpty ? nil : ws.launchOptions].compactMap { $0 }
+            launch.toolTip = bits.isEmpty ? "Pick a device skin and extra apksim options for this repository's simulators" : bits.joined(separator: " · ")
+            menu.addItem(launch)
             menu.addItem(ClosureMenuItem(ws.hasPRFetchScript ? "Edit PR APK Script Settings…" : "Configure PR APK Script…") { [weak self] in
                 guard self != nil else { return }
                 SettingsWindow.shared.show(tab: .recipes, workspacePath: workspace.path)
@@ -815,8 +823,13 @@ final class SessionsController {
 
     @discardableResult
     private func start(_ session: Session, from apk: URL, options: [String] = [], fromAgent: Bool = false, remember: Bool = false) -> Simulator? {
+        // Asked for a skin before its first launch: a person's launch waits for the answer (an agent's does not).
+        if !fromAgent, deferUntilLaunchSetup(session.workspace, { [weak self] in self?.start(session, from: apk, options: options, remember: remember) }) {
+            return nil
+        }
         let signInOpts = options.contains("--biometrics") ? [] : signInLaunchOptions(forWorkspace: session.workspace, targetSlot: session.slot)
-        guard let wb = workbench, let sim = wb.open(apk, remember: remember, options: ["--data-slots", session.slot] + signInOpts + options, fromAgent: fromAgent) else { return nil }
+        let own = launchOptions(forWorkspace: session.workspace)
+        guard let wb = workbench, let sim = wb.open(apk, remember: remember, options: ["--data-slots", session.slot] + signInOpts + own + options, fromAgent: fromAgent) else { return nil }
         sim.displayLabel = session.simLabel
         wb.refreshCaptions()
         launched[session.slot] = Self.modified(apk)
@@ -938,6 +951,96 @@ final class SessionsController {
         }
         onChange?()
         refresh(supersede: true)
+    }
+
+    /// The repository's own skin and apksim options (LaunchSettings.swift), for a launch of one of its simulators.
+    func launchOptions(forWorkspace root: URL) -> [String] { LaunchSettings.options(for: workspace(at: root)) }
+    /// The same for a walk's or a comparison's launches, and the profile part saying so, by the repository's root.
+    func walkLaunchOptions(forWorkspace root: URL?) -> [String] { LaunchSettings.walkOptions(for: root.flatMap { workspace(at: $0) }) }
+    func walkLaunchKey(forWorkspace root: URL?) -> String? { LaunchSettings.walkKey(for: root.flatMap { workspace(at: $0) }) }
+    /// The same by a walk's owner (a session's worktree, the trunk, or a pull request row) or any worktree path.
+    func walkLaunchOptions(forOwner owner: String?) -> [String] { walkLaunchOptions(forWorkspace: owner.flatMap { root(forOwner: $0) }) }
+    func walkLaunchKey(forOwner owner: String?) -> String? { walkLaunchKey(forWorkspace: owner.flatMap { root(forOwner: $0) }) }
+    private func root(forOwner owner: String) -> URL? {
+        workspaceRoot(ofOwner: owner) ?? workspaces.first { owner == $0.root.path || owner.hasPrefix($0.root.path + "/") }?.root
+    }
+
+    /// Stores the repository's skin and launch options; a running simulator of it takes the skin now (the engine's
+    /// `skin` command), the options when it next launches.
+    func setLaunch(skin: String, options: String, for root: URL) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == root.path }) else { return }
+        let skinChanged = workspaces[i].skin != skin
+        let optionsChanged = workspaces[i].launchOptions != options
+        workspaces[i].skin = skin
+        workspaces[i].launchOptions = options
+        workspaces[i].launchAsked = true
+        store.saveWorkspaces(workspaces)
+        if skinChanged {
+            for sim in Engine.shared.simulators where sim.isAlive && workspaceRoot(of: sim)?.path == root.path {
+                sim.send("skin \(skin.isEmpty ? "off" : skin)") { _ in }
+            }
+        }
+        if skinChanged || optionsChanged {
+            let running = Engine.shared.simulators.contains { $0.isAlive && workspaceRoot(of: $0)?.path == root.path }
+            workbench?.toast.show(optionsChanged && running
+                ? "Saved \(root.lastPathComponent)'s launch options: its simulators take them when they next launch"
+                : "Saved \(root.lastPathComponent)'s launch options")
+        }
+        onChange?()
+    }
+
+    /// Launches of a repository waiting for its first-time skin and options sheet to be answered, by root path.
+    private var launchSetupPending: [String: [() -> Void]] = [:]
+
+    /// True when `root`'s first-time sheet is up: `run` is then kept and runs once it is answered.
+    func deferUntilLaunchSetup(_ root: URL, _ run: @escaping () -> Void) -> Bool {
+        guard launchSetupPending[root.path] != nil else { return false }
+        launchSetupPending[root.path]?.append(run)
+        return true
+    }
+
+    /// The repository a simulator was started for: one of its sessions, its main row or one of its pull requests.
+    func workspaceRoot(of sim: Simulator) -> URL? {
+        if let s = session(forSimulator: sim) { return s.workspace }
+        if let ws = workspaces.first(where: { mainBuilds.simulator(of: $0.root) === sim }) { return ws.root }
+        if let p = pulls.all.first(where: { pulls.simulator(of: $0) === sim }) { return URL(fileURLWithPath: p.workspace) }
+        return nil
+    }
+
+    /// The same for a simulator that has ended (found by its data slot, as the live lookups above want it alive).
+    func workspaceRoot(ofEnded sim: Simulator) -> URL? {
+        if let s = session(forSimulator: sim) { return s.workspace }
+        guard let slot = Self.slot(of: sim) else { return nil }
+        if let ws = workspaces.first(where: { mainBuilds.slot(of: $0.root) == slot }) { return ws.root }
+        if let p = pulls.all.first(where: { pulls.slot(of: $0) == slot }) { return URL(fileURLWithPath: p.workspace) }
+        return nil
+    }
+
+    /// Adds one apksim option to the repository's own (unless it has it), for every later launch of its simulators.
+    func addLaunchOption(_ option: String, for root: URL) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == root.path }),
+              !LaunchSettings.tokens(workspaces[i].launchOptions).contains(option) else { return }
+        let line = workspaces[i].launchOptions.trimmingCharacters(in: .whitespaces)
+        workspaces[i].launchOptions = line.isEmpty ? option : line + " " + option
+        store.saveWorkspaces(workspaces)
+        onChange?()
+    }
+
+    /// The skin and launch options sheet for `root` (its + menu, and once when the repository is first added).
+    func editLaunchSettings(for root: URL, firstTime: Bool = false) {
+        guard let ws = workspace(at: root), let window = workbench?.window else { return }
+        if firstTime { launchSetupPending[root.path] = launchSetupPending[root.path] ?? [] }
+        LaunchSettingsSheet.present(for: ws, firstTime: firstTime, on: window, save: { [weak self] skin, options in
+            self?.setLaunch(skin: skin, options: options, for: root)
+        }, finished: { [weak self] in
+            // Launches asked for while the sheet was up (a build that landed, "Open a project folder…") go now.
+            guard firstTime, let waiting = self?.launchSetupPending.removeValue(forKey: root.path) else { return }
+            waiting.forEach { $0() }
+        })
+        if firstTime, let i = workspaces.firstIndex(where: { $0.root.path == root.path }) {
+            workspaces[i].launchAsked = true   // asked once, whatever the answer
+            store.saveWorkspaces(workspaces)
+        }
     }
 
     func setDisableLocalBuilds(_ on: Bool, for root: URL, silent: Bool = false) {

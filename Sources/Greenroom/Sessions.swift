@@ -52,6 +52,13 @@ struct Workspace: Codable, Equatable {
     var skipLocalAPKScan = false
     /// Never run the built-in `local` Gradle build recipe (including MainBuilds local fallback) for this repository.
     var disableLocalBuilds = false
+    /// The stored apksim device skin every simulator of this repository is drawn in ("" for none), set before the
+    /// first launch or later (LaunchSettings.swift).
+    var skin = ""
+    /// Further apksim launch options for this repository's simulators, as one shell-style line (LaunchSettings.swift).
+    var launchOptions = ""
+    /// Whether the person has been offered the skin and launch options once (the sheet when a repository is added).
+    var launchAsked = false
 
     static let unsignedExplanation = "The map of the base branch is walked signed in, so it has every screen, and walks that are not signed in are left out of pull request diffs. Turn this on for an app with no sign-in, or to compare only what is reachable without one."
     static let shareExplanation = "Stores each walk's map in this repository under refs/greenroom/maps and pushes it to origin, so teammates see a pull request's map without walking it. Captures of the app's screens are uploaded to your git remote."
@@ -60,7 +67,7 @@ struct Workspace: Codable, Equatable {
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain, unsignedBaseline, prFetchScript, skipLocalAPKScan, disableLocalBuilds }
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain, unsignedBaseline, prFetchScript, skipLocalAPKScan, disableLocalBuilds, skin, launchOptions, launchAsked }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -85,6 +92,10 @@ struct Workspace: Codable, Equatable {
         prFetchScript = (try? c.decodeIfPresent(String.self, forKey: .prFetchScript)) ?? prFetchScript
         skipLocalAPKScan = (try? c.decodeIfPresent(Bool.self, forKey: .skipLocalAPKScan)) ?? skipLocalAPKScan
         disableLocalBuilds = (try? c.decodeIfPresent(Bool.self, forKey: .disableLocalBuilds)) ?? disableLocalBuilds
+        skin = (try? c.decodeIfPresent(String.self, forKey: .skin)) ?? skin
+        launchOptions = (try? c.decodeIfPresent(String.self, forKey: .launchOptions)) ?? launchOptions
+        // A repository added before this existed has launched already: it is not asked.
+        launchAsked = (try? c.decodeIfPresent(Bool.self, forKey: .launchAsked)) ?? true
     }
 }
 

@@ -204,6 +204,9 @@ enum ConnectCheck {
         expect(Simulator.permissionChange("[apksim] permission allowed: CAMERA") == .some(nil) && Simulator.permissionChange("[apksim] permission denied: CAMERA") == .some(nil),
                "an answered permission request clears the prompt")
         expect(Simulator.permissionChange("[apksim] permission  something else") == nil, "other engine lines leave the prompt as it is")
+        let unmappable = "java.lang.UnsatisfiedLinkError: lib/arm64-v8a/libevent_extra-2.1.so is 4 KB aligned and its writable data at 0x1f000 shares a 16 KB page with its code, which macOS cannot map (no page is writable and executable at once). Rebuild it for 16 KB pages (NDK r27 or later, or -Wl,-z,max-page-size=16384), or launch with --move-shared-data to have apksim move the data (experimental)"
+        expect(Simulator.asksToMoveSharedData(unmappable) && !Simulator.asksToMoveSharedData("[apksim] exit 10: the app crashed (FATAL EXCEPTION above)"),
+               "the engine's advice to launch with --move-shared-data is recognised, other lines are not")
         expect(Simulator.permissionPhrase(["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]) == "location"
                && Simulator.permissionPhrase(["CAMERA", "RECORD_AUDIO"]) == "camera and microphone", "a permission request reads as what it is for")
         expect(shape("swipe", ["direction": "up"]) == "swipe: up" && shape("swipe", ["direction": "SECRET"]) == "swipe: by points", "a swipe stores only a real direction")

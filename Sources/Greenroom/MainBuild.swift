@@ -489,12 +489,14 @@ final class MainBuilds {
     /// else main is built first and opens when it lands.
     func open(_ ws: Workspace) {
         guard let wb = sessions?.workbench else { return }
+        if sessions?.deferUntilLaunchSetup(ws.root, { [weak self] in self?.open(ws) }) == true { return }
         if let sim = simulator(of: ws.root) { wb.select(sim); return }
         guard let row = row(for: ws) else { return }
         if let b = row.newest {
             let s = slot(of: ws.root)
             let extra = sessions?.signInLaunchOptions(forWorkspace: ws.root, targetSlot: s) ?? []
-            let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra)
+            let own = sessions?.launchOptions(forWorkspace: ws.root) ?? []
+            let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra + own)
             sim?.displayLabel = "\(row.name)" + (row.sha.map { " · \(String($0.prefix(7)))" } ?? "")
             wb.refreshCaptions()
             if row.current == nil, row.isBusy { wb.toast.show("Opened the previous \(row.name) build; it reloads on the newest when that is built") }

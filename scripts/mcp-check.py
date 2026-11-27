@@ -364,6 +364,27 @@ def session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, 
         expect(f"screenshot with that screen id returns the {side} capture", not r.get("isError") and len(images) == 1 and len(images[0]["data"]) > 1000, json.dumps(r)[:300])
     t, err = a.call("screenshot", screen="nonesuch")
     expect("an unknown screen id is an error", err and "no head capture" in t, t)
+    # The repository's skin and launch options (LaunchSettings): read, changed, shown by session, used by the next launch.
+    t, err = a.call("launch_settings")
+    expect("launch_settings answers no skin and no options, and the stored skins", not err and "skin: none" in t and "options: none" in t and "galaxy-s25" in t, t)
+    t, err = a.call("launch_settings", skin="nonesuch")
+    expect("... refuses a skin that is not stored", err and "no stored skin called nonesuch" in t, t)
+    t, err = a.call("launch_settings", skin="galaxy-s25", options="--timezone Europe/Berlin --headless --data-slots x")
+    expect("... saves a skin and options, leaving out Greenroom's own", not err and "skin: galaxy-s25" in t and "options: --timezone Europe/Berlin --headless --data-slots x" in t
+           and "left out" in t and "--data-slots x" in t.split("left out")[1] and "--skin galaxy-s25" in t, t)
+    t, err = a.call("session")
+    expect("session shows them", not err and "launch: skin galaxy-s25, options --timezone Europe/Berlin" in t, t)
+    t, err = b.call("launch_settings")
+    expect("the other worktree of the repository has them too", not err and "skin: galaxy-s25" in t, t)
+    t, err = a.call("launch", fresh=True)
+    sims, _ = a.call("simulators")
+    expect("a launch for the session takes the skin and the options, without the left-out ones",
+           not err and "skin galaxy-s25" in t and "--skin galaxy-s25" in sims and "--timezone Europe/Berlin" in sims and "--headless --data-slots x" not in sims, t + "\n" + sims)
+    t, err = away.call("launch", apk=apk, fresh=True, skin="galaxy-a56", options="--font-scale 1.3 --window front")
+    sims, _ = away.call("simulators")
+    expect("launch takes skin and options of its own, leaving out Greenroom's", not err and "skin galaxy-a56" in t and "left out" in t and "--font-scale 1.3" in sims, t + "\n" + sims)
+    t, err = a.call("launch_settings", skin="", options="")
+    expect("... and clears them", not err and "skin: none" in t and "options: none" in t, t)
 
 def history_mode():
     """One worktree of a temporary repository with two commits; the store holds the fixtures' `mixed` base at the first and its

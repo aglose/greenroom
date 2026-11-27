@@ -239,11 +239,13 @@ final class PullRows {
     /// A click: the running simulator, else the build in a simulator of its own data, else fetch it first.
     func open(_ p: PullRequest) {
         guard let wb = sessions?.workbench else { return }
+        if sessions?.deferUntilLaunchSetup(URL(fileURLWithPath: p.workspace), { [weak self] in self?.open(p) }) == true { return }
         if let sim = simulator(of: p) { wb.select(sim); return }
         guard let b = build(of: p), FileManager.default.fileExists(atPath: b.apk.path) else { fetch(p, thenOpen: true); return }
         let s = slot(of: p)
         let extra = sessions?.signInLaunchOptions(forWorkspace: URL(fileURLWithPath: p.workspace), targetSlot: s) ?? []
-        let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra)
+        let own = sessions?.launchOptions(forWorkspace: URL(fileURLWithPath: p.workspace)) ?? []
+        let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra + own)
         sim?.displayLabel = "#\(p.number) \(p.headRef.isEmpty ? p.title : p.headRef) · \(String(p.headSha.prefix(7)))"
         wb.refreshCaptions()
     }

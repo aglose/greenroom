@@ -568,6 +568,9 @@ struct WorkspaceRecipesSection: View {
     @State private var prFetchScript = ""
     @State private var skipLocalAPKScan = false
     @State private var disableLocalBuilds = false
+    @State private var skin = ""
+    @State private var launchOptions = ""
+    @State private var skins: [LaunchSettings.Skin] = LaunchSettings.cachedSkins
     @State private var remoteSandbox = ""
     @State private var remoteTemplate = ""
     @State private var remoteConsent: Bool? = nil
@@ -607,6 +610,9 @@ struct WorkspaceRecipesSection: View {
         prFetchScript = ws.prFetchScript
         skipLocalAPKScan = ws.skipLocalAPKScan
         disableLocalBuilds = ws.disableLocalBuilds
+        skin = ws.skin
+        launchOptions = ws.launchOptions
+        LaunchSettings.loadSkins { skins = $0 }
         remoteSandbox = ws.remote.sandbox
         remoteTemplate = ws.remote.template
         remoteConsent = ws.remote.consent
@@ -628,6 +634,7 @@ struct WorkspaceRecipesSection: View {
         c.workspaces[i].remote.sandbox = remoteSandbox.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].remote.template = remoteTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
         c.store.saveWorkspaces(c.workspaces)
+        c.setLaunch(skin: skin, options: launchOptions.trimmingCharacters(in: .whitespacesAndNewlines), for: ws.root)
         if moduleChanged { c.setAppModule(newMod, for: ws.root, silent: true) }
         if scanChanged { c.setSkipLocalAPKScan(skipLocalAPKScan, for: ws.root, silent: true) }
         if disableChanged { c.setDisableLocalBuilds(disableLocalBuilds, for: ws.root, silent: true) }
@@ -751,6 +758,48 @@ struct WorkspaceRecipesSection: View {
                         }
                     }
                     .toggleStyle(.switch)
+                }
+
+                SettingsCard {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Simulator Skin & Launch Options")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(SettingsTheme.ink)
+                        Text("Every simulator of this repository (main, sessions, pull requests, agents) starts with these. A running one takes a new skin now, new options when it next launches.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(SettingsTheme.mute)
+                    }
+                    HStack(spacing: 8) {
+                        Text("Skin")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(SettingsTheme.mute)
+                        Picker("", selection: $skin) {
+                            Text("None (plain screen)").tag("")
+                            ForEach(skins, id: \.name) { s in Text(s.label).tag(s.name) }
+                            if !skin.isEmpty, !skins.contains(where: { $0.name == skin }) { Text("\(skin) (not found)").tag(skin) }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: 260)
+                        Button("Add Skin…") {
+                            LaunchSettings.chooseAndAddSkin(for: SettingsWindow.shared.window) { name in
+                                skins = LaunchSettings.cachedSkins
+                                if let name { skin = name }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(SettingsTheme.ink)
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(0.09)))
+                        Spacer()
+                    }
+                    field("Custom apksim options", text: $launchOptions, placeholder: "e.g. --appearance dark --locale de-DE --network-profile 3g")
+                    let dropped = LaunchSettings.sanitized(LaunchSettings.tokens(launchOptions)).dropped
+                    if !dropped.isEmpty {
+                        Text("Left out (Greenroom sets these itself): " + dropped.joined(separator: ", "))
+                            .font(.system(size: 11))
+                            .foregroundStyle(SettingsTheme.warning)
+                    }
                 }
 
                 SettingsCard {
