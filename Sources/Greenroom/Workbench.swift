@@ -43,6 +43,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     var showingTimeline: Bool { showingBottomDock && bottomDock.activeTab == .timeline }
     private var logErrorCount = 0
     private var networkRuleCount = 0
+    /// What the stage's "Can't reach" notice last showed for the selected simulator, and the addresses its × put away.
+    private var unreachable: [Unreachable] = []
+    private var unreachableDismissed: [ObjectIdentifier: Set<String>] = [:]
+    private var unreachableExpiry: DispatchWorkItem?
     private var recording = Set<ObjectIdentifier>()
     private var recordingStarted: [ObjectIdentifier: Date] = [:]
     private var recordTimer: Timer?
@@ -867,6 +871,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             guard let self, (note.object as AnyObject?) === self.selected else { return }
             self.refreshOverrides()
         }
+        // Requests arrive up to five times a second: the bar is rebuilt only when what it would say changes.
+        NotificationCenter.default.addObserver(forName: Activity.requestsArrived, object: nil, queue: .main) { [weak self] note in
+            guard let self, let sim = self.selected, (note.object as AnyObject?) === sim.activity else { return }
+            if self.currentUnreachable(for: sim) != self.unreachable { self.refreshOverrides() }
+        }
         devicePane.onClose = { [weak self] in self?.setShowingDevice(false) }
         deviceLeading = devicePane.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
         inspectorLeading = inspectorView.leadingAnchor.constraint(equalTo: host.trailingAnchor, constant: 20)
@@ -932,6 +941,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if let asked = sim.permissionRequest {
             overrideBar.addArrangedSubview(makePermissionPrompt(asked, on: sim))
         }
+        unreachable = currentUnreachable(for: sim)
+        unreachableExpiry?.cancel()
+        if let first = unreachable.first {
+            overrideBar.addArrangedSubview(makeUnreachableNotice(first, more: unreachable.count - 1, on: sim))
+            // Failures age out of the window: look again then, in case the app stopped trying.
+            let again = DispatchWorkItem { [weak self] in self?.refreshOverrides() }
+            unreachableExpiry = again
+            DispatchQueue.main.asyncAfter(deadline: .now() + Unreachable.window / 4, execute: again)
+        }
         let overrides = devicePane.activeOverrides(for: sim)
         for o in overrides {
             let pill = makeOverridePill(symbol: o.symbol, title: o.label, color: o.color) { [weak self] in
@@ -984,6 +1002,56 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         row.layer?.borderColor = Design.warning.withAlphaComponent(0.38).cgColor
         row.heightAnchor.constraint(equalToConstant: 24).isActive = true
         row.setAccessibilityLabel("The app asks for \(phrase)")
+        return row
+    }
+
+    /// The addresses the selected simulator's app keeps failing to connect to, less those the notice's × put away.
+    private func currentUnreachable(for sim: Simulator) -> [Unreachable] {
+        guard sim.isAlive else { return [] }
+        let dismissed = unreachableDismissed[ObjectIdentifier(sim)] ?? []
+        return Unreachable.find(in: sim.activity.requests).filter { !dismissed.contains($0.address) }
+    }
+
+    /// "Can't reach 127.0.0.1:8971 · nothing on this Mac is listening on port 8971": the address the app keeps trying
+    /// and why it can't work from here. Clicking it opens the network pane; × hides it until another address fails.
+    private func makeUnreachableNotice(_ u: Unreachable, more: Int, on sim: Simulator) -> NSView {
+        let color = Design.record
+        let icon = NSImageView(image: NSImage(systemSymbolName: "wifi.exclamationmark", accessibilityDescription: "Can't reach a server") ?? NSImage())
+        icon.contentTintColor = color
+        icon.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        let text = NSMutableAttributedString(string: "Can't reach \(u.address)", attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: color])
+        text.append(NSAttributedString(string: "  ·  \(u.reason)" + (more > 0 ? "  (+\(more) more)" : ""),
+                                       attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: Design.ink]))
+        let label = NSTextField(labelWithAttributedString: text)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.widthAnchor.constraint(lessThanOrEqualToConstant: 560).isActive = true
+        let all = unreachable.map { "\($0.address): \($0.reason) (\($0.failures) failed connects in the last minute)" }
+        label.toolTip = all.joined(separator: "\n") + "\nClick to open the network pane."
+        let open = GlassButton(symbol: nil, title: "Network", label: "Open the network pane", style: .well, target: nil, action: nil)
+        open.font = .systemFont(ofSize: 11, weight: .semibold)
+        open.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        open.layer?.cornerRadius = 10
+        open.onPress = { [weak self] in self?.setShowingNetwork(true) }
+        let close = GlassButton(symbol: "xmark", title: "", label: "Hide this notice", style: .well, target: nil, action: nil)
+        close.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        close.layer?.cornerRadius = 10
+        close.onPress = { [weak self, weak sim] in
+            guard let self, let sim else { return }
+            self.unreachableDismissed[ObjectIdentifier(sim), default: []].formUnion(self.unreachable.map(\.address))
+            self.refreshOverrides()
+        }
+        let row = NSStackView(views: [icon, label, open, close])
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 3)
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 12
+        // Opaque: it sits over the device's top edge, and a see-through fill lets the bezel run through the words.
+        row.layer?.backgroundColor = (Design.stage.blended(withFraction: 0.18, of: color) ?? Design.stage).cgColor
+        row.layer?.borderWidth = 1
+        row.layer?.borderColor = color.withAlphaComponent(0.4).cgColor
+        row.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        row.setAccessibilityLabel("The app can't reach \(u.address): \(u.reason)")
         return row
     }
 

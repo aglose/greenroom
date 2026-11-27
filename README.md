@@ -124,6 +124,10 @@ version of it and adds the workbench.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
 - **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.
+- **Can't reach**: when the app keeps failing to connect to an address (two failed connects or lookups within a
+  minute, and nothing to that host working since), the stage names it and the likely reason, in this Mac's terms:
+  nothing on this Mac listening on that port, a local network this Mac isn't on, Tailscale off on this Mac, or a
+  name that doesn't resolve. Network opens the network pane; × hides it until another address fails.
 - **Record** (⌥⌘R) turns the engine's flight recorder on: input, log, network, database and screen for the last
   minutes. File > Save Recording writes a `.apkrec` bundle; Save Recording and Open Timeline shows it in the
   engine's trace viewer, as does opening a `.apkrec` file. Bundles replay with `apksim replay`.

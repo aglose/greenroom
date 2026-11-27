@@ -30,6 +30,8 @@ if let i = arguments.firstIndex(of: "--map-share-check"), i + 1 < arguments.coun
 if let i = arguments.firstIndex(of: "--map-impact-check"), i + 1 < arguments.count {
     MapImpactCheck.run(dir: URL(fileURLWithPath: arguments[i + 1]), apk: i + 2 < arguments.count ? URL(fileURLWithPath: arguments[i + 2]) : nil)
 }
+// `Greenroom --unreachable-check`: the stage's "Can't reach" notice from made-up network rows (UnreachableCheck).
+if arguments.contains("--unreachable-check") { UnreachableCheck.run() }
 // `Greenroom --map-layout-check`: the map's layout (MapLayout) on the fixtures.
 if arguments.contains("--map-layout-check") { MapLayoutCheck.run() }
 // `Greenroom --map-git-check DIR`: map snapshots in git refs, between a bare repository and two clones (MapGitCheck).
