@@ -188,16 +188,35 @@ final class SessionsController {
             let worktree = (await Git.toplevel(of: folder)) ?? root
             let worktreePath = worktree.resolvingSymlinksInPath().path
             let rootPath = root.standardizedFileURL.path
+            // Warm Android app discovery off the main thread before reloading the sidebar so UI never blocks.
+            let discoveredApps = await Task.detached(priority: .userInitiated) { AndroidProject.apps(in: root) }.value
+            let folderPath = folder.resolvingSymlinksInPath().standardizedFileURL.path
+            let matchedApp: AndroidAppTarget? = discoveredApps.first { target in
+                let dir = target.moduleDir.isEmpty ? rootPath : root.appendingPathComponent(target.moduleDir).standardizedFileURL.path
+                let proj = target.projectDir.isEmpty ? rootPath : root.appendingPathComponent(target.projectDir).standardizedFileURL.path
+                return folderPath == dir || folderPath.hasPrefix(dir + "/") || (proj != rootPath && (folderPath == proj || folderPath.hasPrefix(proj + "/")))
+            }
+            let defaultApp: AndroidAppTarget? = discoveredApps.count > 1
+                ? (matchedApp ?? discoveredApps.first { $0.gradleModule == ":app" } ?? discoveredApps.first)
+                : nil
             if let i = self.workspaces.firstIndex(where: { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }) {
                 let wasShown = self.workspaces[i].shown.contains(worktreePath)
                 if !wasShown { self.workspaces[i].shown.insert(worktreePath, at: 0) }
                 self.workspaces[i].hidden.removeAll { $0 == worktreePath }
                 self.workspaces[i].archived.removeAll { $0 == worktreePath }
+                if let matchedApp, discoveredApps.count > 1, self.workspaces[i].module != matchedApp.id {
+                    self.workspaces[i].module = matchedApp.id
+                    self.mainBuilds.reset(self.workspaces[i])
+                } else if self.workspaces[i].module == nil, let defaultApp {
+                    self.workspaces[i].module = defaultApp.id
+                }
                 self.store.saveWorkspaces(self.workspaces)
                 if !quietIfExisting {
                     if !wasShown {
                         let what = worktreePath == rootPath ? root.lastPathComponent : "\(worktree.lastPathComponent) in \(root.lastPathComponent)"
                         self.workbench?.toast.show("Showing \(what)")
+                    } else if let matchedApp, discoveredApps.count > 1 {
+                        self.workbench?.toast.show("Switched \(root.lastPathComponent) to \(matchedApp.displayName)")
                     } else {
                         self.workbench?.toast.show("\(root.lastPathComponent) is already in Sessions")
                     }
@@ -205,11 +224,16 @@ final class SessionsController {
             } else {
                 var ws = Workspace(root: root)
                 ws.shown = [worktreePath]
+                if let defaultApp { ws.module = defaultApp.id }
                 self.workspaces.append(ws)
                 self.store.saveWorkspaces(self.workspaces)
                 ClaudeSessions.shared.workspacesChanged()
                 T3Sessions.shared.reload()
-                self.workbench?.toast.show("Added \(root.lastPathComponent)")
+                if let defaultApp {
+                    self.workbench?.toast.show("Added \(root.lastPathComponent) (\(discoveredApps.count) Android apps — using \(defaultApp.displayName); switch in sidebar)")
+                } else {
+                    self.workbench?.toast.show("Added \(root.lastPathComponent)")
+                }
             }
             // Put the added worktree into `sessions` right away so the sidebar displays it immediately even while git
             // status and APK discovery are still running for large repositories.
@@ -225,6 +249,75 @@ final class SessionsController {
             self.refresh(supersede: true)
             return root
         }
+    }
+
+    /// Cached Android app targets for `workspace` (never blocks the main thread).
+    func apps(for workspace: URL) -> [AndroidAppTarget] {
+        if let known = AndroidProject.cachedApps(in: workspace) { return known }
+        AndroidProject.probe(workspace) { [weak self] in
+            self?.reconcileAppTarget(for: workspace)
+            self?.onChange?()
+        }
+        return []
+    }
+
+    /// The active Android app target for `workspace` when it has multiple apps (or nil for single-app repos).
+    func selectedApp(for workspace: URL) -> AndroidAppTarget? {
+        let all = apps(for: workspace)
+        guard !all.isEmpty else { return nil }
+        if let mod = self.workspace(at: workspace)?.module, !mod.isEmpty {
+            if let exact = all.first(where: { $0.id == mod }) { return exact }
+            let modDir = AndroidAppTarget.moduleDirectory(for: mod)
+            if let byDir = all.first(where: { $0.moduleDir == modDir }) { return byDir }
+        }
+        return all.first { $0.gradleModule == ":app" } ?? all.first
+    }
+
+    /// Ensures a multi-app monorepo workspace has a valid `module` selected once its apps are discovered.
+    func reconcileAppTarget(for workspace: URL) {
+        let all = AndroidProject.cachedApps(in: workspace) ?? []
+        guard all.count > 1, let i = workspaces.firstIndex(where: { $0.root.path == workspace.path }) else { return }
+        if let cur = workspaces[i].module, !cur.isEmpty,
+           all.contains(where: { $0.id == cur || $0.moduleDir == AndroidAppTarget.moduleDirectory(for: cur) }) {
+            return
+        }
+        let chosen = all.first { $0.gradleModule == ":app" } ?? all[0]
+        workspaces[i].module = chosen.id
+        store.saveWorkspaces(workspaces)
+    }
+
+    /// Switches which Android app module a monorepo workspace builds and runs.
+    func setAppModule(_ module: String?, for workspace: URL, silent: Bool = false) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == workspace.path }) else { return }
+        let clean = module?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let next = (clean?.isEmpty == false) ? clean : nil
+        guard workspaces[i].module != next else { return }
+        workspaces[i].module = next
+        store.saveWorkspaces(workspaces)
+        mainBuilds.reset(workspaces[i])
+        if !silent {
+            let label = next.flatMap { id in AndroidProject.cachedApps(in: workspace)?.first(where: { $0.id == id })?.displayName ?? id } ?? "auto-detect"
+            workbench?.toast.show("Switched \(workspace.lastPathComponent) to \(label)")
+        }
+        onChange?()
+        refresh(supersede: true)
+    }
+
+    /// Dropdown menu of all Android apps in a monorepo workspace.
+    func appMenu(for workspace: URL) -> NSMenu {
+        let menu = NSMenu(title: "Android App")
+        let all = apps(for: workspace)
+        let active = selectedApp(for: workspace)
+        if #available(macOS 14.0, *) {
+            menu.addItem(.sectionHeader(title: "Android App (\(all.count))"))
+        }
+        for target in all {
+            let label = target.displayName == target.id ? target.displayName : "\(target.displayName)  ·  \(target.id)"
+            let item = ClosureMenuItem(label) { [weak self] in self?.setAppModule(target.id, for: workspace) }
+            item.state = (target == active) ? .on : .off
+            menu.addItem(item)
+        }
+        return menu
     }
 
     func removeWorkspace(containing session: Session) { removeWorkspace(at: session.workspace) }
@@ -357,7 +450,14 @@ final class SessionsController {
         if menu.items.isEmpty { menu.addItem(withTitle: "Every worktree is in the sidebar", action: nil, keyEquivalent: "").isEnabled = false }
         menu.addItem(.separator())
         if rest.count > 1 { menu.addItem(ClosureMenuItem("Show All \(rest.count)") { [weak self] in self?.showAll(in: workspace) }) }
-        if let ws = self.workspace(at: workspace), AndroidProject.isApp(ws.root) {
+        let discoveredApps = apps(for: workspace)
+        if discoveredApps.count > 1 {
+            let active = selectedApp(for: workspace)
+            let appItem = NSMenuItem(title: "Android App: \(active?.displayName ?? "Auto")", action: nil, keyEquivalent: "")
+            appItem.submenu = appMenu(for: workspace)
+            menu.addItem(appItem)
+        }
+        if let ws = self.workspace(at: workspace), AndroidProject.cachedIsApp(ws.root) == true {
             let keep = ClosureMenuItem("Keep \(MainBuilds.shortName(ws.baseRef)) Built") { [weak self] in self?.setKeepMain(!ws.keepMain, for: workspace) }
             keep.state = ws.keepMain ? .on : .off
             keep.toolTip = "A row at the top runs the newest \(MainBuilds.shortName(ws.baseRef)): Greenroom fetches it and builds each new commit by itself"
@@ -413,6 +513,8 @@ final class SessionsController {
                 var live = Set<String>()
                 var complete = Git.available
                 for ws in spaces {
+                    _ = AndroidProject.isApp(ws.root)
+                    let wsModule = ws.module
                     let list = await Git.worktrees(of: ws.root)
                     if list.isEmpty {
                         complete = false   // git failed, or the repository moved: do not judge by it
@@ -434,7 +536,7 @@ final class SessionsController {
                         for (idx, wt) in worktrees.enumerated() {
                             group.addTask {
                                 let path = wt.path
-                                async let outputsTask = Task.detached(priority: .utility) { SessionStore.newestAPK(in: path) }.value
+                                async let outputsTask = Task.detached(priority: .utility) { SessionStore.newestAPK(in: path, module: wsModule) }.value
                                 async let stateTask = Git.state(of: path)
                                 let (outputs, state) = await (outputsTask, stateTask)
                                 if let state {

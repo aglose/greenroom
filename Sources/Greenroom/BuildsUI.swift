@@ -24,6 +24,18 @@ final class ClosureButton: NSButton {
         setContentHuggingPriority(.required, for: .horizontal)
         setContentCompressionResistancePriority(.required, for: .horizontal)
     }
+
+    convenience init(title: String, tip: String, handler: @escaping () -> Void) {
+        self.init(frame: .zero)
+        self.handler = handler
+        self.title = title
+        isBordered = false
+        toolTip = tip
+        target = self
+        action = #selector(fire)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+    }
 }
 
 final class ClosureMenuItem: NSMenuItem {

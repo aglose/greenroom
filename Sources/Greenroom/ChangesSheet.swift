@@ -807,7 +807,7 @@ final class ChangesSheet: NSView, NSCollectionViewDataSource, NSCollectionViewDe
             } else if let s = session, let c = controller, let ws = c.workspace(of: s) {
                 let name = MainBuilds.shortName(ws.baseRef)
                 if !c.mainBuilds.applies(to: ws) {
-                    if !ws.keepMain && AndroidProject.isApp(ws.root) {
+                    if !ws.keepMain && AndroidProject.cachedIsApp(ws.root) == true {
                         let b = GlassButton(symbol: "hammer", title: "Keep \(name) built", label: "Enable automatic builds of \(name) and compare again", style: .accent, target: self, action: #selector(enableKeepMain))
                         stateButtons.addArrangedSubview(b)
                     }

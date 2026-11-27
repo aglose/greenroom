@@ -186,26 +186,35 @@ final class SessionStore {
         return false
     }
 
-    /// The newest `.apk` under a worktree's Gradle outputs (`isBuildOutput`).
-    static func newestAPK(in worktree: URL) -> Session.Outputs? {
+    /// The newest `.apk` under a worktree's Gradle outputs (`isBuildOutput`). When `module` is set (e.g. `":app"` or
+    /// `"consumer/:app"`), looks directly in that module's `build/outputs/apk` folder so multi-app monorepos stay
+    /// scoped to the selected app without scanning the whole tree.
+    static func newestAPK(in worktree: URL, module: String? = nil) -> Session.Outputs? {
         let fm = FileManager.default
         var roots: [URL] = []
-        var queue: [(URL, Int)] = [(worktree, 0)]
-        var index = 0
-        let maxDepth = 4
-        let maxDirs = 500
-        while index < queue.count && index < maxDirs {
-            let (dir, depth) = queue[index]
-            index += 1
-            let apks = dir.appendingPathComponent("build/outputs/apk", isDirectory: true)
+        if let module, !module.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let modDir = AndroidAppTarget.moduleDirectory(for: module)
+            let base = modDir.isEmpty ? worktree : worktree.appendingPathComponent(modDir, isDirectory: true)
+            let apks = base.appendingPathComponent("build/outputs/apk", isDirectory: true)
             if fm.fileExists(atPath: apks.path) { roots.append(apks) }
-            if depth < maxDepth,
-               let children = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) {
-                for child in children where queue.count < maxDirs {
-                    guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-                          vals.isDirectory == true, vals.isSymbolicLink != true,
-                          !AndroidProject.skipDirectories.contains(child.lastPathComponent) else { continue }
-                    queue.append((child, depth + 1))
+        } else {
+            var queue: [(URL, Int)] = [(worktree, 0)]
+            var index = 0
+            let maxDepth = 4
+            let maxDirs = 300
+            while index < queue.count && index < maxDirs {
+                let (dir, depth) = queue[index]
+                index += 1
+                let apks = dir.appendingPathComponent("build/outputs/apk", isDirectory: true)
+                if fm.fileExists(atPath: apks.path) { roots.append(apks) }
+                if depth < maxDepth,
+                   let children = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) {
+                    for child in children where queue.count < maxDirs {
+                        guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                              vals.isDirectory == true, vals.isSymbolicLink != true,
+                              !AndroidProject.skipDirectories.contains(child.lastPathComponent) else { continue }
+                        queue.append((child, depth + 1))
+                    }
                 }
             }
         }

@@ -520,7 +520,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// Everything a row shows.
     private func key(of row: Row) -> String {
         switch row {
-        case .sessionsHeader(_, _, let hidden): return Self.identity(row) + "|\(hidden)"
+        case .sessionsHeader(_, let ws, let hidden):
+            let appTag = sessions.apps(for: ws).count > 1 ? (sessions.selectedApp(for: ws)?.id ?? "") : ""
+            return Self.identity(row) + "|\(hidden)|\(sessions.apps(for: ws).count)|\(appTag)"
         case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
         case .session(let s): return Self.identity(row) + "|" + sessions.rowKey(for: s)
         case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
@@ -1825,7 +1827,24 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 self.sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 0, y: add.bounds.height + 2), in: add)
             }
             add.contentTintColor = .secondaryLabelColor
-            let stack = NSStackView(views: [label, add])
+            var views: [NSView] = [label]
+            let repoApps = sessions.apps(for: ws)
+            if repoApps.count > 1, let active = sessions.selectedApp(for: ws) {
+                let pill = ClosureButton(title: "\(active.displayName) ▾", tip: "Switch Android app in \(ws.lastPathComponent) (\(repoApps.count) apps)") {}
+                pill.font = .systemFont(ofSize: 10, weight: .medium)
+                pill.contentTintColor = Design.accent
+                pill.wantsLayer = true
+                pill.layer?.cornerRadius = 5
+                pill.layer?.backgroundColor = Design.accent.withAlphaComponent(0.14).cgColor
+                pill.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+                pill.handler = { [weak self, weak pill] in
+                    guard let self, let pill else { return }
+                    self.sessions.appMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 0, y: pill.bounds.height + 2), in: pill)
+                }
+                views.append(pill)
+            }
+            views.append(add)
+            let stack = NSStackView(views: views)
             stack.spacing = 4
             stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 6)
             return stack

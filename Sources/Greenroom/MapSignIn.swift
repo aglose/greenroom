@@ -28,8 +28,8 @@ final class MapSignIn {
     private static var live: [ObjectIdentifier: MapSignIn] = [:]
     private static let quitObserver: NSObjectProtocol = NotificationCenter.default.addObserver(
         forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { _ in
-        // The main thread ends here, so nothing queued to it runs: stop the script and the device directly.
-        for s in live.values { s.cancelled = true; s.run?.cancel(); s.sim?.quit(); s.sim?.waitUntilExit(); discard(s.slot) }
+        // The main thread ends here, so nothing queued to it runs: stop the script and the device directly (bounded).
+        for s in live.values { s.cancelled = true; s.run?.cancel(); s.sim?.terminateNow(); s.sim?.waitUntilExit(timeout: 1.5); discard(s.slot) }
     }
 
     /// How long the script may take: a sign-in that waits on an email or a slow server, but not forever.

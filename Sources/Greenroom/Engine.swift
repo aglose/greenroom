@@ -170,10 +170,17 @@ final class Engine {
 
     var screenshots: URL { engineState.appendingPathComponent("screenshots", isDirectory: true) }
 
-    /// Asks every simulator to quit (SIGTERM: the engine's client passes it on) and stops the engine's standbys.
+    /// Asks every simulator to quit immediately (`SIGTERM`, with a bounded wait and `SIGKILL` fallback so no engine
+    /// child processes stay alive inside the app bundle during a Sparkle update swap) and stops the engine's standbys.
     func stopAll() {
         for i in running where i.process.isRunning { i.process.terminate() }
-        for s in simulators { s.quit() }
+        for s in simulators { s.terminateNow() }
+        let simDeadline = Date().addingTimeInterval(1.5)
+        for s in simulators where s.isProcessRunning {
+            let remaining = simDeadline.timeIntervalSinceNow
+            if remaining > 0 { s.waitUntilExit(timeout: remaining) }
+            else { s.killNow() }
+        }
         let p = Process()
         p.executableURL = launcher
         p.arguments = ["--stop-standbys"]
@@ -183,8 +190,9 @@ final class Engine {
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return }
-        // Bounded: this runs as the app quits, and quitting must not hang on the engine.
-        let deadline = Date().addingTimeInterval(3)
+        // Bounded: this runs as the app quits, and quitting must not hang on the engine or outlast Sparkle's relaunch.
+        let deadline = Date().addingTimeInterval(2)
         while p.isRunning, Date() < deadline { usleep(50_000) }
+        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
     }
 }
