@@ -61,11 +61,26 @@ session's simulator), do the same steps on each with `sim`, then **`compare`**: 
 the other, `>` moved, with the share of pixels that differ. `s1 vs s2: SAME` means the change did nothing visible on
 that screen. `set` changes appearance, locale, font scale, rotation and more on either.
 
+## Debugging what you see
+
+When something looks wrong, look before you guess:
+
+- **`network`** lists the app's requests (`failed: true` for failures); `network` with `id` shows one exchange's
+  headers and bodies. **`network_rule`** mocks, fails, patches or slows a request to reproduce a server problem.
+- **`perf`** answers frame rate, frame times, memory and CPU; **`accessibility`** audits the screen; **`inspect`**
+  gives one node's resource id, bounds and tap box.
+- **`set`** also covers the Device pane: `clock`, `thermal`, `fold`, `keyboard`, `push`, `lowmemory` and more.
+- **`devtools`** turns on adb or a debugger port, or records the app's traffic to a HAR and replays it. Each restarts
+  the app with its data; the answer starts with the simulator's new id.
+- **`recorder`** keeps the last while of a session; `save` it and **`replay`** it on another build to see whether the
+  change altered behaviour. **`tests`** runs instrumentation tests; **`snapshots`** the owner's screenshot tests.
+- **`sessions`**, **`jobs`**, **`workspace`** and **`app`** show (and change) what Greenroom is doing and how it is set up.
+
 ## What you cannot do, and what to do instead
 
 - **Paused.** The person can pause the agent in Greenroom. While paused every action is refused (`build`,
   `changes`, `launch`, `tap`, `type`, `set`...); only reading works (`session`, `simulators`, `screen`, `check`,
-  `wait_for`, `compare`, `screenshot`, `logs`). Do not retry an action: tell the person that Greenroom's Agent button (✦) has the switch, and wait.
+  `wait_for`, `compare`, `screenshot`, `logs`, `network`, `perf`, `sessions`, and the other tools when they only list or answer a status). Do not retry an action: tell the person that Greenroom's Agent button (✦) has the switch, and wait.
 - **`remote` builds need the person's consent.** The `remote` recipe uploads source code to the person's own
   account, so it runs only after they allowed it for that repository in Greenroom. You cannot give that yes: if
   `build` says so, ask them to allow it in the app, or use another recipe.
@@ -79,6 +94,8 @@ that screen. `set` changes appearance, locale, font scale, rotation and more on 
   run.
 - Sign-ins are the person's: never ask for or type passwords. If the app needs one, call `scripts`: a sign-in script the person allowed can be run with `run_script` (it types their stored credentials, which you never see); otherwise ask the person to sign in.
 - While you drive a session's simulator its screen is recorded on this Mac, for the person to review.
+- Some settings are the person's alone (telemetry, the pause switch, recording agents, sharing maps, custom recipes):
+  `app` and `workspace` show them and refuse to change them. Ask the person instead.
 
 If the tools are missing or the server failed to start, Greenroom.app is not installed where the plugin looks
 (`/Applications`, `~/Applications`, Spotlight): say so instead of falling back to an emulator silently.
