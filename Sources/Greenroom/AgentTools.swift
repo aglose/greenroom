@@ -45,18 +45,18 @@ final class AgentTools {
 
     // MARK: Schemas
 
-    private static let str: [String: Any] = ["type": "string"]
-    private static let int: [String: Any] = ["type": "integer"]
-    private static let bool: [String: Any] = ["type": "boolean"]
-    private static let strings: [String: Any] = ["type": "array", "items": ["type": "string"]]
+    static let str: [String: Any] = ["type": "string"]
+    static let int: [String: Any] = ["type": "integer"]
+    static let bool: [String: Any] = ["type": "boolean"]
+    static let strings: [String: Any] = ["type": "array", "items": ["type": "string"]]
 
-    private static func schema(_ props: [String: Any] = [:], required: [String] = [], sim: Bool = true) -> [String: Any] {
+    static func schema(_ props: [String: Any] = [:], required: [String] = [], sim: Bool = true) -> [String: Any] {
         var p = props
         if sim { p["sim"] = ["type": "string", "description": "simulator id (s1), if several run"] }
         return ["type": "object", "properties": p, "required": required, "additionalProperties": false]
     }
 
-    private static let devices = ["phone", "foldable", "tablet", "desktop", "tv", "watch"]
+    static let devices = ["phone", "foldable", "tablet", "desktop", "tv", "watch"]
     static let settings: [String: String] = [
         "appearance": "^(dark|light|toggle)$", "locale": "^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$", "fontscale": "^[0-9.]{1,4}$",
         "rotate": "^(left|right|portrait|landscape)$", "network": "^(online|offline|3g|lossy)$",
@@ -66,7 +66,32 @@ final class AgentTools {
         "location": "^(none|run|bike|drive|-?[0-9]{1,2}(\\.[0-9]+)? -?[0-9]{1,3}(\\.[0-9]+)?)$", "home": "^$", "resume": "^$", "lock": "^$",
         "unlock": "^$", "recreate": "^$", "restart": "^$", "process-death": "^$",
         "skin": "^([a-z0-9-]{1,64}|off)$",
+        // The Device pane's controls (DevicePane.swift), each one engine command (`engineCommand`).
+        "statusbar": "^(on|off)$", "navbar": "^(gesture|off)$", "keyboard": "^(on|off)$", "layoutbounds": "^(on|off)$",
+        "clock": "^(real|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(Z|[+-][0-9]{2}:?[0-9]{2})?)$",
+        "thermal": "^(none|light|moderate|severe|critical)$", "bluetooth": "^(on|off)$", "fold": "^(closed|half|open)$",
+        "tilt": "^-?[0-9]{1,3} -?[0-9]{1,3}$", "shake": "^$", "light": "^[0-9]{1,6}$", "proximity": "^(far|near)$",
+        "camera": "^(pattern|off)$", "biometrics": "^(match|nomatch)$", "lowmemory": "^$", "push": "^[^=\\r\\n]{1,200}$",
+        "notification": "^$",
     ]
+
+    /// The engine's command for a setting the agent names otherwise (`set statusbar off` is `bars status off`).
+    static func engineCommand(_ setting: String, _ value: String) -> String {
+        switch setting {
+        case "statusbar": return "bars status \(value)"
+        case "navbar": return "bars nav \(value)"
+        case "keyboard": return "keyboard soft \(value)"
+        case "layoutbounds": return "debug layout \(value)"
+        case "tilt": return "sensor tilt \(value)"
+        case "shake": return "sensor shake"
+        case "light": return "sensor light \(value)"
+        case "proximity": return "sensor proximity \(value)"
+        case "lowmemory": return "memory low"
+        case "push": return "push title=Greenroom body=\(value)"
+        case "notification": return "notifications last"
+        default: return value.isEmpty ? setting : "\(setting) \(value)"
+        }
+    }
 
     /// A location value is a route name, or a latitude and longitude on the globe.
     static func validLocation(_ value: String) -> Bool {
@@ -76,14 +101,18 @@ final class AgentTools {
     }
 
     /// The tools that act on a simulator and so are recorded (launch is noted when it has made one).
-    static let driving: Set<String> = ["tap", "type", "key", "swipe", "back", "open_url", "set", "screen", "check", "wait_for", "screenshot", "logs", "run_script"]
+    static let driving: Set<String> = ["tap", "type", "key", "swipe", "back", "open_url", "set", "screen", "check", "wait_for", "screenshot", "logs", "run_script",
+                                       "network", "network_rule", "perf", "accessibility", "background", "clipboard", "inspect"]
 
     /// Tools that wait for builds and walks: they run on their own queue so the others still answer meanwhile.
-    static let slow: Set<String> = ["build", "changes"]
+    static let slow: Set<String> = ["build", "changes", "replay", "tests", "snapshots"]
 
-    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session", "scripts", "history"]
+    static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session", "scripts", "history",
+                                        "network", "perf", "accessibility", "inspect", "sessions", "agent_activity"]
 
-    static let tools: [(name: String, description: String, schema: [String: Any])] = [
+    static let tools: [(name: String, description: String, schema: [String: Any])] = core + debugTools + appTools
+
+    static let core: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
             + "with its own app data. Answers with the screen's nodes.", schema([
             "apk": ["type": "string", "description": "path of the .apk (omit in a worktree of a repository added to Greenroom)"],
@@ -115,7 +144,10 @@ final class AgentTools {
             + "landscape, network online|offline|3g|lossy, device phone|tablet|..., timezone, animscale, permission allow|deny|"
             + "grant NAME|revoke NAME|reset, "
             + "location \"LAT LON\" (37.7749 -122.4194) or a moving route run|bike|drive, none clears it; skin NAME|off (a stored device skin, "
-            + "this simulator only: launch_settings changes the repository's); and (no value) home, resume, lock, unlock, recreate, restart, process-death.",
+            + "this simulator only: launch_settings changes the repository's); statusbar on|off, navbar gesture|off, keyboard on|off (soft keyboard), "
+            + "layoutbounds on|off, clock ISO-8601 time|real, thermal none|light|moderate|severe|critical, bluetooth on|off, fold closed|half|open, "
+            + "tilt \"PITCH ROLL\", light LUX, proximity far|near, camera pattern|off, biometrics match|nomatch, push BODY (a notification); "
+            + "and (no value) home, resume, lock, unlock, recreate, restart, process-death, shake, lowmemory, notification (opens the last one).",
          schema(["setting": ["type": "string", "enum": settings.keys.sorted()], "value": str], required: ["setting"])),
         ("screen", "The whole screen as compact lines: ref \"label\" click|field. text keeps lines containing it.",
          schema(["text": str, "bounds": bool])),
@@ -178,7 +210,7 @@ final class AgentTools {
     func call(_ name: String, _ args: [String: Any], connection: Connection = Connection()) throws -> [[String: Any]] {
         Reports.shared.count(.agentTool)
         guard AgentTools.tools.contains(where: { $0.name == name }) else { throw Failure(message: "unknown tool \(name)") }
-        if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readOnly.contains(name) {
+        if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readsOnly(name, args) {
             throw Failure(message: "The person at the Mac has paused the agent in Greenroom. Ask them to resume it.")
         }
         // build and changes wait for minutes and run beside the other tools (AgentServer): they touch no simulator and no recording.
@@ -218,7 +250,9 @@ final class AgentTools {
             case "scripts": content = text(scriptsList())
             case "run_script": content = text(try runScript(args))
             case "compare": content = try compare(args)
-            default: throw Failure(message: "unknown tool \(name)")
+            default:
+                guard let extra = try debugCall(name, args, connection) ?? appCall(name, args, connection) else { throw Failure(message: "unknown tool \(name)") }
+                content = extra
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
             if recorded, name == "launch", let s = currentSim { beginRecording(s) }
@@ -308,20 +342,20 @@ final class AgentTools {
                                             : "several simulators run (\(live.map(id).joined(separator: ", "))): say which with sim")
     }
 
-    private func command(_ sim: Simulator, _ command: String, timeout: TimeInterval = 30) throws -> String {
+    func command(_ sim: Simulator, _ command: String, timeout: TimeInterval = 30) throws -> String {
         let answer = sim.sendSync(command, timeout: timeout)
         if answer.hasPrefix("error") { throw Failure(message: "\(command.split(separator: " ").first ?? ""): \(answer)") }
         return answer
     }
 
-    private func nodes(_ sim: Simulator) -> [ScreenNode] { ScreenNode.parse(sim.sendSync("nodes")) }
+    func nodes(_ sim: Simulator) -> [ScreenNode] { ScreenNode.parse(sim.sendSync("nodes")) }
 
-    private func activity(_ sim: Simulator) -> String {
+    func activity(_ sim: Simulator) -> String {
         String(sim.sendSync("activity").split(separator: ".").last ?? "")
     }
 
     /// The node a reference named, found again on the screen as it is now (it may have moved, or gone).
-    private func resolve(_ sim: Simulator, ref: String) throws -> ScreenNode {
+    func resolve(_ sim: Simulator, ref: String) throws -> ScreenNode {
         guard let old = sim.tree.node(ref: ref) else { throw Failure(message: "\(ref) is not on screen: call screen") }
         let fresh = nodes(sim)
         let same = fresh.filter {
@@ -343,7 +377,7 @@ final class AgentTools {
     }
 
     /// Settles, reads the screen and says what changed since the last answer.
-    private func answer(_ sim: Simulator, head: String, before: String? = nil) -> String {
+    func answer(_ sim: Simulator, head: String, before: String? = nil) -> String {
         let settled = sim.sendSync("settle 2500 150", timeout: 10)
         let now = activity(sim)
         let change = sim.tree.update(nodes(sim))
@@ -361,7 +395,7 @@ final class AgentTools {
         return ([first] + (lines.isEmpty ? ["no change in the screen's text (colours and pictures are not compared: screenshot shows them)"] : lines)).joined(separator: "\n")
     }
 
-    private func act(_ sim: Simulator, _ commandLine: String, head: String) throws -> String {
+    func act(_ sim: Simulator, _ commandLine: String, head: String) throws -> String {
         let before = activity(sim)
         _ = try command(sim, commandLine)
         return answer(sim, head: head, before: before)
@@ -630,7 +664,7 @@ final class AgentTools {
         }
         let line = value.isEmpty ? setting : "\(setting) \(value)"
         let before = activity(s)
-        _ = try command(s, line, timeout: 60)
+        _ = try command(s, AgentTools.engineCommand(setting, value), timeout: 60)
         _ = s.sendSync("settle 8000 250", timeout: 15)   // a configuration change rebuilds the screen
         return answer(s, head: line, before: before)
     }
@@ -768,7 +802,7 @@ final class AgentTools {
         return (dropped > 0 ? ["(\(dropped) earlier lines left out)"] : []).joined() + (dropped > 0 ? "\n" : "") + shown.joined(separator: "\n")
     }
 
-    private func tail(_ sim: Simulator, _ count: Int) -> String {
+    func tail(_ sim: Simulator, _ count: Int) -> String {
         let all = (try? String(contentsOf: sim.log, encoding: .utf8)) ?? ""
         return all.split(separator: "\n").suffix(count).joined(separator: "\n")
     }

@@ -78,6 +78,41 @@ The answers are built to be cheap to read:
 | `history` | the maps stored for the session's repository and profile, newest first: commit, date, screens, and what changed against the one before. With `screen` (a title or id): that screen's lineage, a line per commit that changed it (`visual`, `structure`, routes, texts). `screenshot` with `screen` and `commit` answers the stored picture. It only reads |
 | `compare` | how two simulators' screens differ: `-` only on the base, `+` only on the other, `>` moved, and the share of pixels that differ; `map` adds a picture of where |
 
+### Debugging: what the panes show
+
+| Tool | |
+| --- | --- |
+| `network` | the app's HTTP traffic as the Network pane has it: `#12 GET 200 84 ms 3.1 KB https://...` (`mocked` when a rule answered), `filter`, `failed`, `limit`. With `id`: that exchange's headers and bodies, JSON pretty-printed, cut at 8 KB; `Authorization`, `Cookie`, `Set-Cookie` and any header named like a token, secret, password or API key are `••••` |
+| `network_rule` | the Network pane's rules: `list`, `add` (`method`, `pattern` with `*`, `status` or 0 to only delay, `body`, `patch` for a JSON merge patch over the server's answer, `content_type`, `latency_ms`), `remove` (`rule`), `clear` |
+| `perf` | frame rate, p50/p95 frame times and the share on pace since the last call, Java heap, footprint, CPU over `sample_ms`. It reads the same counter as the Diagnostics pane, so the pane's next sample starts from the agent's call |
+| `accessibility` | the Diagnostics pane's audit: each finding with its bounds and the node it is on |
+| `background` | scheduled jobs, services and alarms; `run_job` runs a job now |
+| `clipboard` | the device's clipboard, or `text` to set it |
+| `inspect` | one node (`ref` or `text`): kind, text (never a password field's), hint, content description, resource id, bounds, where a tap lands, the box that takes it, and accessibility problems (no label, under 48 dp) |
+| `set` | also takes the Device pane's controls: `statusbar`, `navbar`, `keyboard`, `layoutbounds`, `clock` (ISO 8601 or `real`), `thermal`, `bluetooth`, `fold`, `tilt`, `shake`, `light`, `proximity`, `camera`, `biometrics`, `lowmemory`, `push` (a notification's text), `notification` (opens the last) |
+| `devtools` | the developer hooks: `status`, `adb_on` (answers `adb connect localhost:PORT`), `adb_off`, `debugger_on` (a JDWP port for Remote JVM Debug), `debugger_off`, `har_record`, `har_save`, `har_stop`, `har_list`, `har_replay` (`name` from `har_list`). Each but the reading ones restarts the app with the same options and data, and the answer starts with the restarted simulator's id. HARs are kept in the engine's `hars` folder; an agent replays only those, never a file it names |
+| `recorder` | the flight recorder: `status`, `on`, `off`, `save` (answers the recording's name), `list` |
+| `replay` | replays a saved recording headless on its own build or `apk`, and answers `same`, `diverged` (point, pixels), `crashed` or `cannot replay`. It waits up to `timeout_s` (200 s); calling again with the same recording joins it |
+| `tests` | runs instrumentation tests headless: `test_apk`, `app_apk` (default: the worktree's build, else the only running simulator's APK), `filter`; answers passed, failed and ignored with each failure's first stack lines. Without `test_apk` it answers the last run; `stop` ends it |
+| `snapshots` | the screenshot tests the owner set up in Snapshots: `status`, `run`, `record`, `accept` (`ids` as `screen/combo`). The spec is the owner's choice; `record` and `accept` write golden pictures in the repository |
+
+### Greenroom itself
+
+| Tool | |
+| --- | --- |
+| `app` | the version, the engine's, the state folder, and every app setting with its value. `setting` and `value` change `sessions_warm`, `auto_archive`, `jobs_at_once`, `evidence_cap_gb`, `build_timeout_minutes`, `reopen_last`, `app_icon`, `update_checks`. `crash_reports`, `usage_reports`, `claude_sessions`, `t3_sessions` and `agents_paused` are answered and never set |
+| `workspace` | a repository's settings (default: the connection's; `repo` names another by folder name or path, so an agent outside every worktree can use it). Settable: `base_ref`, `module`, `variant`, `default_recipe`, `auto`, `walk_with_data`, `quick_walk`, `keep_main`, `unsigned_baseline`, `skip_local_apk_scan`, `disable_local_builds`, `ci_workflow`, `ci_artifact`, `ci_apk`. The skin and options are `launch_settings` |
+| `sessions` | every repository with its sessions (branch, title, build and whether it is stale, simulator, pull request, the walk of its newest build), its main build and the pull requests Greenroom holds |
+| `session_action` | by `session` (a branch, title or worktree path; default the connection's): `open`, `close`, `build` (queued, not waited for), `cancel_build`, `walk`, `stop_walk`, `show`, `hide`; and `add_repository` with `path` |
+| `jobs` | the job queue, then the recent jobs; `cancel`, `pause`, `resume`, `prioritize` one by its `job` id, `pause_all`, `resume_all` |
+| `pull_requests` | `list`, `add` (a number or address, fetches its CI build), `fetch`, `open`, `close`, `remove` |
+| `matrix` | one APK on every combination of `devices`, `appearances`, `locales` and `font_scales` (at most 16), side by side with input mirrored; answers each simulator's id. `close` ends it |
+| `agent_activity` | the Agent popover's log: the newest calls, the client, whether agents are paused and which repositories record them |
+
+Tools that both read and change (`app`, `workspace`, `launch_settings`, `jobs`, `pull_requests`, `network_rule`,
+`recorder`, `devtools`, `snapshots`, `tests`, `clipboard`, `background`) answer while the agent is paused when the call
+only reads (no `setting`, a `list` or `status` action), and refuse otherwise.
+
 With several simulators running, each tool takes `sim` (`s1`, `s2`...). A second `launch` puts its simulator
 beside the first, so the same build can be driven on a phone and a tablet at once.
 
@@ -202,12 +237,16 @@ reason, never the value. The agent's view is unchanged: names only, output maske
 
 ## What an agent cannot do
 
-- Name a file for the engine to read or write. `screenshot` and `logs` answer with their content; nothing else
-  touches the disk on an agent's say.
+- Name a file for the engine to write, or one to read other than an APK (`launch`, `tests`, `replay`, `matrix`) or a
+  repository folder to add (`session_action add_repository`). `screenshot` and `logs` answer with their content; HARs
+  and recordings are written in Greenroom's own state folder, and replayed by name only.
 - Send the engine a raw command. Settings and keys are checked against fixed patterns.
 - Act while paused. The Agent popover's switch refuses every action, `build` and `changes` included, until it is
   lifted; reading (`session`, `screen`, `screenshot`, `logs`...) still works.
 - Allow the remote recipe, or start a CI workflow, or build a base: see above.
+- Change what is the owner's alone: telemetry, reading Claude Code's or T3 Code's sessions, the pause switch, whether
+  agents are recorded, sharing maps through git, custom recipes and the PR fetch script (programs Greenroom runs).
+  `app` and `workspace` answer them and refuse to set them.
 - Read a variable, or run a script the owner has not allowed as it is now: see "Signing in: scripts".
 
 ## Who can reach it
@@ -215,7 +254,7 @@ reason, never the value. The agent's view is unchanged: names only, output maske
 The app listens on the loopback interface only, on a port the system picks, and answers only requests carrying a
 token it writes to `~/Library/Application Support/Greenroom/agent.json` (readable by you alone). A request with an
 `Origin` header, which a browser adds to any page's cross-site request, is refused, as is one whose `Host` is not
-this address: a web page cannot drive it. `scripts/mcp-check.py` runs a session as an agent would.
+this address: a web page cannot drive it. `scripts/mcp-check.py` runs a session as an agent would (`--tools` checks the tools above).
 
 An agent you connect sees the screens and logs of the apps you run, as you asked it to. Greenroom itself sends
 nothing anywhere ([PRIVACY.md](../PRIVACY.md)).

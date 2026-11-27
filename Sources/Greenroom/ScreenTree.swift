@@ -5,6 +5,8 @@ struct ScreenNode {
     var left = 0, top = 0, right = 0, bottom = 0
     var field = false, click = false, password = false
     var text = "", hint = "", desc = ""
+    /// The view's resource id (`com.example:id/save`), when the app gave it one.
+    var resourceId = ""
     /// Where to tap when it is not the node's own centre (a label folded into the box that takes the tap).
     var tapPoint: (Int, Int)?
     /// The box that takes the tap, when it is larger than the node's own (the row or tab a label was folded into).
@@ -90,6 +92,7 @@ struct ScreenNode {
                 case "text": n.text = value
                 case "hint": n.hint = value
                 case "desc": n.desc = value
+                case "id": n.resourceId = value
                 default: break
                 }
             }

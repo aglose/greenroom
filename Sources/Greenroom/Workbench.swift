@@ -2365,11 +2365,26 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     @objc func toggleRecording(_ sender: Any?) {
         Reports.shared.count(.recording)
         guard let sim = live else { return }
+        setFlightRecorder(sim, on: !recording.contains(ObjectIdentifier(sim)))
+    }
+
+    /// Whether `sim`'s flight recorder is on, and since when (an agent's `recorder` reads it).
+    func flightRecorder(of sim: Simulator) -> Date? {
         let key = ObjectIdentifier(sim)
-        let on = !recording.contains(key)
+        return recording.contains(key) ? (recordingStarted[key] ?? Date()) : nil
+    }
+
+    /// Turns `sim`'s flight recorder on or off; `done` hears nil, or the engine's error.
+    func setFlightRecorder(_ sim: Simulator, on: Bool, done: ((String?) -> Void)? = nil) {
+        let key = ObjectIdentifier(sim)
         sim.send(on ? "rec on all" : "rec off all") { [weak self] answer in
-            guard let self else { return }
-            if answer.hasPrefix("error") { self.toast.show("Recorder: " + answer.replacingOccurrences(of: "error: ", with: ""), problem: true); return }
+            guard let self else { done?("Greenroom is closing"); return }
+            if answer.hasPrefix("error") {
+                self.toast.show("Recorder: " + answer.replacingOccurrences(of: "error: ", with: ""), problem: true)
+                done?(answer.replacingOccurrences(of: "error: ", with: ""))
+                return
+            }
+            defer { done?(nil) }
             if on {
                 self.recording.insert(key)
                 self.recordingStarted[key] = Date()
@@ -2405,8 +2420,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     var recordings: URL { Engine.shared.engineState.appendingPathComponent("recordings", isDirectory: true) }
 
     /// Saves what the recorder holds as a .apkrec bundle and shows it. `done` gets the file, or nil with the reason.
-    func saveRecording(done: ((URL?, String) -> Void)? = nil) {
-        guard let sim = live else { done?(nil, "no running simulator"); return }
+    func saveRecording(of chosen: Simulator? = nil, done: ((URL?, String) -> Void)? = nil) {
+        guard let sim = chosen ?? live else { done?(nil, "no running simulator"); return }
         try? FileManager.default.createDirectory(at: recordings, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let stamp = DateFormatter()
         stamp.dateFormat = "yyyyMMdd-HHmmss"

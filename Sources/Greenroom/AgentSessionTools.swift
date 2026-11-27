@@ -27,7 +27,7 @@ extension AgentTools {
     }
 
     /// The session this connection is tied to, as the app has it now, with its workspace and git state read again.
-    private func tied(_ connection: Connection) throws -> (session: Session, workspace: Workspace) {
+    func tied(_ connection: Connection) throws -> (session: Session, workspace: Workspace) {
         guard let wb = workbench, let old = connection.session else { throw Failure(message: Self.noSession) }
         var found: (Session, Workspace)?
         mainSync {
@@ -46,7 +46,7 @@ extension AgentTools {
 
     private func label(_ s: Session) -> String { s.branch ?? "detached \(s.shortHead)" }
 
-    private func age(_ date: Date) -> String {
+    func age(_ date: Date) -> String {
         let n = max(0, Int(Date().timeIntervalSince(date)))
         if n < 90 { return "\(n) s ago" }
         if n < 5400 { return "\(n / 60) min ago" }

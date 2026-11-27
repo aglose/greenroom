@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Checks the agent interface as an agent uses it: `Greenroom --mcp` on stdin/stdout, against the bundled test app.
-Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK [--sessions]
+Usage: scripts/mcp-check.py GREENROOM_EXECUTABLE APK [--sessions | --tools | --history]
+--tools: the --sessions setup, then only the tools for the rest of Greenroom (more_tools), not the session tools.
 --history: `changes` and `history` from stored maps, with no walk and no simulator (a temporary repository whose store is seeded
 from MapFixtures' golden pair `mixed` by GREENROOM_CHECK_HISTORY_SEED; APK is not used).
 --sessions: the agent tied to its worktree's session (a temporary git repository with two worktrees, a state folder
@@ -68,7 +69,8 @@ cp "{built_apk}" "$GREENROOM_OUT"
     app = subprocess.Popen([exe, "--background", "--agent-check"], stdout=app_log, stderr=subprocess.STDOUT, env=env)
     failures, shims = [], []
     def expect(what, ok, got=""):
-        print(("ok   " if ok else "FAIL ") + what + ("" if ok else "\n     got: " + str(got)[:400].replace("\n", "\n          ")))
+        verbose = os.environ.get("MCP_CHECK_VERBOSE") and got   # every answer, to read what an agent reads
+        print(("ok   " if ok else "FAIL ") + what + ("" if ok and not verbose else "\n     got: " + str(got)[:1500 if verbose else 400].replace("\n", "\n          ")))
         if not ok:
             failures.append(what)
     class Shim:
@@ -85,8 +87,8 @@ cp "{built_apk}" "$GREENROOM_OUT"
             if not line:
                 raise SystemExit("mcp-check: the shim closed its output")
             return json.loads(line)
-        def call(self, name, **args):
-            r = self.rpc("tools/call", {"name": name, "arguments": args}).get("result", {})
+        def call(self, tool, **args):
+            r = self.rpc("tools/call", {"name": tool, "arguments": args}).get("result", {})
             return "\n".join(c["text"] for c in r.get("content", []) if c["type"] == "text"), bool(r.get("isError"))
     def slot(path):
         path = path[len("/private"):] if path.startswith(("/private/tmp", "/private/var", "/private/etc")) else path   # as Foundation resolves it
@@ -198,7 +200,9 @@ cp "{built_apk}" "$GREENROOM_OUT"
         expect("feat-a's feed has its subfolder shim's call, feat-b's has none of a's",
                sum(e["tool"] == "launch" for e in feed_a) == 3 and sum(e["tool"] == "launch" for e in feed_b) == 3 and not any(e["tool"] == "tap" for e in feed_b), json.dumps(by)[:600])
         expect("calls from no session are a feed of their own", len(none) >= 4 and all(e["label"] == "" for e in none), json.dumps(none)[:400])
-        session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up)
+        if "--tools" not in sys.argv:
+            session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up)
+        more_tools(a, away, trees, state_dir, apk, expect)
     finally:
         for s in shims:
             try:
@@ -215,6 +219,159 @@ cp "{built_apk}" "$GREENROOM_OUT"
         subprocess.run(["rm", "-rf", root])
     print(f"mcp-check --sessions: {len(failures)} failed" if failures else "mcp-check --sessions: all passed")
     sys.exit(1 if failures else 0)
+
+def more_tools(a, away, trees, state_dir, apk, expect):
+    """The tools for the rest of Greenroom: the panes (network, perf, accessibility, background, clipboard, inspect, the
+    Device pane's settings), the developer hooks, the recorder, tests and snapshots, and the app, its repositories,
+    sessions, jobs, pull requests and agent activity; and which of them answer while the agent is paused."""
+    listed = {t["name"] for t in a.rpc("tools/list")["result"]["tools"]}
+    want = {"network", "network_rule", "perf", "accessibility", "background", "clipboard", "inspect", "devtools", "recorder", "replay",
+            "tests", "snapshots", "app", "workspace", "sessions", "session_action", "jobs", "pull_requests", "matrix", "agent_activity", "launch_settings"}
+    expect("tools/list has the tools for the rest of Greenroom", want <= listed, sorted(want - listed))
+    t, err = a.call("launch")
+    sim = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else None
+    expect("the session's simulator runs for the pane tools", sim is not None, t)
+    if sim is None:
+        return
+    # The panes
+    t, err = a.call("network", sim=sim)
+    expect("network answers the requests, or that there are none", not err and (" requests" in t or "no requests yet" in t), t)
+    t, err = a.call("network", sim=sim, id=999999)
+    expect("network refuses an unknown request id", err and "no request #999999" in t, t)
+    t, err = a.call("network_rule", sim=sim, action="add", method="GET", pattern="https://example.invalid/items*", status=503, body='{"error":"x"}')
+    expect("network_rule adds a mock and lists it", not err and "rule added" in t and "example.invalid/items*" in t and "answers 503" in t, t)
+    t, err = a.call("network_rule", sim=sim, action="add", method="GET", pattern="has space", status=200)
+    expect("... refuses a pattern with a space", err and "no spaces" in t, t)
+    t, err = a.call("network_rule", sim=sim, action="clear")
+    t2, _ = a.call("network_rule", sim=sim)
+    expect("... clears them", not err and t2 == "no rules", t + "\n" + t2)
+    t, err = a.call("perf", sim=sim, sample_ms=300)
+    expect("perf answers frames, memory and cpu", not err and ("frames:" in t or "footprint" in t or "cpu:" in t), t)
+    t, err = a.call("accessibility", sim=sim)
+    expect("accessibility audits the screen", not err and ("issue" in t.lower() or "no issues" in t.lower()), t)
+    t, err = a.call("background", sim=sim)
+    expect("background lists jobs, services and alarms", not err and "jobs:" in t and "services:" in t and "alarms:" in t, t)
+    t, err = a.call("clipboard", sim=sim, text="greenroom clip")
+    t2, err2 = a.call("clipboard", sim=sim)
+    expect("clipboard sets and reads the device's clipboard", not err and not err2 and "greenroom clip" in t2, t + "\n" + t2)
+    screen, _ = a.call("screen", sim=sim)
+    ref = next((l.split()[0] for l in screen.split("\n")[1:] if l.startswith("e")), None)
+    t, err = a.call("inspect", sim=sim, ref=ref or "e1")
+    expect("inspect describes a node: bounds, tap point, accessibility", not err and "bounds: [" in t and "a tap lands at" in t and "accessibility:" in t, t)
+    t, err = a.call("set", sim=sim, setting="statusbar", value="off")
+    expect("set takes the Device pane's controls (statusbar off)", not err and t.startswith(f"{sim} statusbar off"), t)
+    t, err = a.call("set", sim=sim, setting="thermal", value="melting")
+    expect("... and checks their values", err and "not a value it takes" in t, t)
+    a.call("set", sim=sim, setting="statusbar", value="on")
+    t, err = a.call("devtools", sim=sim)
+    expect("devtools status says adb, debugger and traffic", not err and "adb: off" in t and "debugger: off" in t and "traffic: live" in t, t)
+    t, err = a.call("devtools", action="har_list")
+    expect("devtools har_list answers without a simulator", not err, t)
+    t, err = a.call("recorder", sim=sim)
+    expect("recorder status: off", not err and "flight recorder is off" in t, t)
+    t, err = a.call("recorder", sim=sim, action="on")
+    t2, _ = a.call("recorder", sim=sim)
+    expect("recorder on turns it on", not err and "recording input" in t and "is on" in t2, t + "\n" + t2)
+    t, err = a.call("recorder", sim=sim, action="off")
+    expect("... and off", not err and "is off" in t, t)
+    # The flight recorder's recording, saved and replayed headless on its own build.
+    a.call("recorder", sim=sim, action="on")
+    a.call("tap", sim=sim, text="Add")
+    a.call("tap", sim=sim, text="Add")
+    t, err = a.call("recorder", sim=sim, action="save")
+    name = re.match(r"saved (\S+):", t).group(1) if not err and re.match(r"saved \S+:", t) else None
+    a.call("recorder", sim=sim, action="off")
+    t2, _ = a.call("recorder", action="list")
+    expect("recorder save writes a recording that list shows", name is not None and name in t2, t + "\n" + t2)
+    if name:
+        t, err = a.call("replay", recording=name, timeout_s=200)
+        expect("replay replays it headless and says how it went", not err and t.startswith(name + " on its own build: ") and any(w in t for w in ("same", "diverged", "crashed", "cannot replay", "failed")) or "still running" in t, t)
+    # Developer hooks: each restarts the app with the same data, in the same place.
+    t, err = a.call("devtools", sim=sim, action="debugger_on")
+    sim2 = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else sim
+    t2, _ = a.call("devtools", sim=sim2)
+    expect("devtools debugger_on restarts the app with a JDWP port", not err and "JDWP on localhost:" in t and "debugger: JDWP on localhost:" in t2, t + "\n" + t2)
+    t, err = a.call("devtools", sim=sim2, action="debugger_off")
+    sim2 = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else sim2
+    expect("... and debugger_off detaches it", not err and "debugger detached" in t, t)
+    t, err = a.call("devtools", sim=sim2, action="adb_on")
+    sim2 = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else sim2
+    expect("devtools adb_on answers the adb connect command", not err and ("adb connect localhost:" in t or "adb is starting" in t), t)
+    t, err = a.call("devtools", sim=sim2, action="adb_off")
+    sim2 = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else sim2
+    expect("... and adb_off turns it off", not err and "adb is off" in t, t)
+    t, err = a.call("devtools", sim=sim2, action="har_record")
+    sim2 = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else sim2
+    har = re.search(r"to (agent-\S+):", t).group(1) if not err and re.search(r"to (agent-\S+):", t) else None
+    t2, err2 = a.call("devtools", sim=sim2, action="har_stop")
+    sim2 = re.match(r"(s\d+)", t2).group(1) if not err2 and re.match(r"s\d+", t2) else sim2
+    t3, _ = a.call("devtools", action="har_list")
+    expect("devtools har_record records traffic to a HAR, har_stop writes it, har_list shows it", har is not None and not err2 and "traffic is live again" in t2 and har in t3, t + "\n" + t2 + "\n" + t3)
+    if har:
+        t, err = a.call("devtools", sim=sim2, action="har_replay", name=har)
+        sim2 = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else sim2
+        expect("devtools har_replay answers every request from it", not err and f"answered from {har}" in t, t)
+        t, err = a.call("devtools", sim=sim2, action="har_stop")
+        sim2 = re.match(r"(s\d+)", t).group(1) if not err and re.match(r"s\d+", t) else sim2
+    sim = sim2   # the session's simulator, restarted
+    t, err = a.call("replay", recording="nonesuch")
+    expect("replay refuses an unknown recording", err and "no recording called nonesuch" in t, t)
+    t, err = a.call("tests")
+    expect("tests without test_apk answers that there is no run", not err and "no test run yet" in t, t)
+    t, err = a.call("tests", test_apk="/etc/hosts")
+    expect("tests refuses a file that is not an APK", err and "not an .apk" in t, t)
+    t, err = a.call("snapshots")
+    expect("snapshots status says what is set up", not err and ("spec" in t), t)
+    # The app and its repositories
+    t, err = a.call("app")
+    expect("app answers the versions and every setting", not err and "engine: apksim" in t and "sessions_warm =" in t and "crash_reports =" in t, t)
+    t, err = a.call("app", setting="crash_reports", value="on")
+    expect("... refuses the owner's settings", err and "owner's to change" in t, t)
+    t, err = a.call("app", setting="sessions_warm", value="4")
+    expect("... changes one of the others", not err and t == "sessions_warm: 4", t)
+    a.call("app", setting="sessions_warm", value="3")
+    t, err = a.call("workspace")
+    expect("workspace answers this worktree's repository and its settings", not err and "base_ref = " in t and "default_recipe = " in t, t)
+    t, err = a.call("workspace", setting="variant", value="release")
+    expect("... changes a setting", not err and "variant = release" in t, t)
+    a.call("workspace", setting="variant", value="debug")
+    t, err = a.call("workspace", setting="share_maps", value="on")
+    expect("... refuses the owner's", err and "owner's to change" in t, t)
+    t, err = away.call("workspace")
+    expect("workspace from no worktree asks which repository", err and "say which repository" in t, t)
+    t, err = away.call("workspace", repo="repo")
+    expect("... and takes repo", not err and t.startswith("repo ("), t)
+    t, err = a.call("sessions")
+    expect("sessions lists the repositories and their sessions", not err and "feat-a" in t and "feat-b" in t and "repo2" in t, t)
+    t, err = a.call("session_action", action="close", session="feat-b")
+    expect("session_action closes another session's simulator by its branch", not err and ("closed" in t or "no simulator running" in t), t)
+    t, err = a.call("session_action", action="open", session="feat-b")
+    expect("... and opens it", not err and ("runs feat-b" in t or "is starting" in t), t)
+    t, err = a.call("jobs")
+    expect("jobs lists the queue", not err and ("running" in t or "no jobs" in t), t)
+    t, err = a.call("pull_requests")
+    expect("pull_requests lists them", not err and ("pull request" in t.lower() or t.startswith("#")), t)
+    t, err = a.call("agent_activity")
+    expect("agent_activity has this worktree's calls", not err and "client: mcp-check" in t and "workspace" in t, t)
+    # Paused: what only reads still answers, what changes is refused.
+    open(state_dir + "/agent-paused-check", "w").write("1")
+    try:
+        t, err = a.call("app")
+        expect("paused: app still answers", not err and "settings:" in t, t)
+        t, err = a.call("app", setting="sessions_warm", value="4")
+        expect("paused: app setting is refused", err and "paused" in t, t)
+        t, err = a.call("network_rule", sim=sim)
+        expect("paused: network_rule list answers", not err, t)
+        t, err = a.call("network_rule", sim=sim, action="clear")
+        expect("paused: network_rule clear is refused", err and "paused" in t, t)
+        t, err = a.call("clipboard", sim=sim, text="x")
+        expect("paused: clipboard set is refused", err and "paused" in t, t)
+    finally:
+        os.remove(state_dir + "/agent-paused-check")
+    t, err = a.call("matrix", apk=apk, devices=["phone"], appearances=["light", "dark"])
+    expect("matrix runs one APK on several combinations and answers their ids", not err and "on 2 simulators" in t and t.count(" running") >= 2, t)
+    t, err = a.call("matrix", action="close")
+    expect("... and closes them", not err and "closed" in t, t)
 
 def mp4_has_video(path):
     """A video track: a `hdlr` box whose handler type is `vide`, inside a file with a `moov`."""
@@ -500,7 +657,7 @@ def history_mode():
 
 if "--history" in sys.argv:
     history_mode()
-if "--sessions" in sys.argv:
+if "--sessions" in sys.argv or "--tools" in sys.argv:
     sessions_mode()
 state = (os.environ.get("GREENROOM_STATE") or os.path.expanduser("~/Library/Application Support/Greenroom")) + "/agent.json"   # GREENROOM_STATE: a state folder of its own
 def running_pid():
