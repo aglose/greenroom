@@ -20,7 +20,9 @@ final class SessionsController {
     private var watchers: [String: WorktreeWatcher] = [:]
     private var buildWatcher: BuildWatcher?
     private var watched: [String] = []
-    private var generation = 0
+    private var refreshEpoch = 0
+    private var refreshing = false
+    private var refreshQueued = false
     /// Slots whose simulator is to start as soon as the one that held the slot has exited.
     private var starting = Set<String>()
     static let noGit = "Sessions needs git: install the Command Line Tools (xcode-select --install)"
@@ -149,7 +151,7 @@ final class SessionsController {
         evidence.store = store
         workspaces = store.loadWorkspaces()
         builds = [:]
-        refresh()
+        refresh(supersede: true)
     }
 
     // MARK: Workspaces
@@ -173,26 +175,54 @@ final class SessionsController {
         for f in folders { addRepository(f) }
     }
 
-    /// Adds the repository `folder` is in (a worktree of it is as good as the main checkout). Gives the main
-    /// checkout it resolved to, or nil with a toast when it is not a repository.
+    /// Adds the repository `folder` is in (a worktree of it is as good as the main checkout) and ensures that
+    /// worktree is visible in the sidebar. Gives the main checkout it resolved to, or nil with a toast when it is not
+    /// a repository.
     @discardableResult
-    func addRepository(_ folder: URL) -> Task<URL?, Never> {
+    func addRepository(_ folder: URL, quietIfExisting: Bool = false) -> Task<URL?, Never> {
         Task { @MainActor in
             guard let root = await Git.mainCheckout(of: folder)?.resolvingSymlinksInPath() else {
                 self.workbench?.toast.show(Git.available ? "\(folder.lastPathComponent) is not in a git repository" : Self.noGit, problem: true)
                 return nil
             }
-            if self.workspaces.contains(where: { $0.root == root }) {
-                self.workbench?.toast.show("\(root.lastPathComponent) is already in Sessions")
+            let worktree = (await Git.toplevel(of: folder)) ?? root
+            let worktreePath = worktree.resolvingSymlinksInPath().path
+            let rootPath = root.standardizedFileURL.path
+            if let i = self.workspaces.firstIndex(where: { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }) {
+                let wasShown = self.workspaces[i].shown.contains(worktreePath)
+                if !wasShown { self.workspaces[i].shown.insert(worktreePath, at: 0) }
+                self.workspaces[i].hidden.removeAll { $0 == worktreePath }
+                self.workspaces[i].archived.removeAll { $0 == worktreePath }
+                self.store.saveWorkspaces(self.workspaces)
+                if !quietIfExisting {
+                    if !wasShown {
+                        let what = worktreePath == rootPath ? root.lastPathComponent : "\(worktree.lastPathComponent) in \(root.lastPathComponent)"
+                        self.workbench?.toast.show("Showing \(what)")
+                    } else {
+                        self.workbench?.toast.show("\(root.lastPathComponent) is already in Sessions")
+                    }
+                }
             } else {
-                self.workspaces.append(Workspace(root: root))
+                var ws = Workspace(root: root)
+                ws.shown = [worktreePath]
+                self.workspaces.append(ws)
                 self.store.saveWorkspaces(self.workspaces)
                 ClaudeSessions.shared.workspacesChanged()
                 T3Sessions.shared.reload()
                 self.workbench?.toast.show("Added \(root.lastPathComponent)")
-                self.workbench?.showLibrary()
             }
-            self.refresh()
+            // Put the added worktree into `sessions` right away so the sidebar displays it immediately even while git
+            // status and APK discovery are still running for large repositories.
+            if !self.sessions.contains(where: { $0.worktree.resolvingSymlinksInPath().path == worktreePath }) {
+                let wsRoot = self.workspaces.first { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }?.root ?? root
+                let initial = Session(worktree: worktree, workspace: wsRoot, branch: nil, head: "", dirty: false,
+                                      ahead: 0, claude: nil, build: self.builds[worktreePath], simulator: nil,
+                                      outputs: nil, sourcesDate: nil)
+                self.sessions.append(initial)
+            }
+            self.workbench?.showLibrary()
+            self.onChange?()
+            self.refresh(supersede: true)
             return root
         }
     }
@@ -200,12 +230,14 @@ final class SessionsController {
     func removeWorkspace(containing session: Session) { removeWorkspace(at: session.workspace) }
 
     func removeWorkspace(at root: URL) {
-        for s in sessions where s.workspace.path == root.path { evidence.forget(worktree: s.worktree.path) }
-        if let ws = workspaces.first(where: { $0.root.path == root.path }) { mainBuilds.close(ws) }
-        workspaces.removeAll { $0.root.path == root.path }
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        for s in sessions where s.workspace.resolvingSymlinksInPath().standardizedFileURL.path == rootPath { evidence.forget(worktree: s.worktree.path) }
+        if let ws = workspaces.first(where: { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }) { mainBuilds.close(ws) }
+        workspaces.removeAll { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }
         store.saveWorkspaces(workspaces)
         ClaudeSessions.shared.workspacesChanged()
-        refresh()
+        onChange?()
+        refresh(supersede: true)
     }
 
     // MARK: Which rows show
@@ -336,6 +368,7 @@ final class SessionsController {
             menu.addItem(unsigned)
         }
         menu.addItem(ClosureMenuItem("Add Repository…") { [weak self] in self?.chooseRepository() })
+        menu.addItem(ClosureMenuItem("Remove \(workspace.lastPathComponent) from Sessions") { [weak self] in self?.removeWorkspace(at: workspace) })
         return menu
     }
 
@@ -349,40 +382,94 @@ final class SessionsController {
 
     // MARK: Rows
 
-    /// Re-reads git and the Gradle outputs of every worktree. Overlapping calls: the last one's answer is used.
-    func refresh() {
-        generation += 1
-        let mine = generation
+    /// Re-reads git and the Gradle outputs of every worktree. Workspace mutations supersede an in-flight refresh;
+    /// passive refreshes (app activation, FSEvents) coalesce into one follow-up pass instead of cancelling a slow scan.
+    func refresh(supersede: Bool = false) {
+        if supersede {
+            refreshEpoch += 1
+            refreshing = false
+            refreshQueued = false
+        } else if refreshing {
+            refreshQueued = true
+            return
+        }
+        refreshing = true
+        let epoch = refreshEpoch
         let spaces = workspaces
         // Teammates' maps, for the workspaces that share them (at most every ten minutes each; nothing when off).
         let sharing = spaces.filter(\.shareMaps)
         if !sharing.isEmpty { let root = store.root; Task.detached(priority: .utility) { for ws in sharing { _ = await History.fetchIfDue(ws, stateRoot: root) } } }
         let known = builds
         let before = sessions
+        let trunkBase = mainBuilds.folder
+        let trunkResolved = trunkBase.resolvingSymlinksInPath().path + "/"
+        let trunkRaw = trunkBase.path + "/"
+        let isTrunkPath: (URL) -> Bool = { url in
+            url.resolvingSymlinksInPath().path.hasPrefix(trunkResolved) || url.path.hasPrefix(trunkRaw)
+        }
         Task { @MainActor in
-            var all: [Session] = []
-            var live = Set<String>()
-            var complete = Git.available
-            for ws in spaces {
-                let list = await Git.worktrees(of: ws.root)
-                if list.isEmpty { complete = false }   // git failed, or the repository moved: do not judge by it
-                for wt in list where !self.mainBuilds.isTrunk(wt.path) {   // main's own worktree is its row, not a session
-                    live.insert(wt.path.path)
-                    let path = wt.path
-                    let outputs = await Task.detached(priority: .utility) { SessionStore.newestAPK(in: path) }.value
-                    if let state = await Git.state(of: wt.path) {
-                        all.append(Session(worktree: wt.path, workspace: ws.root, branch: state.branch, head: state.head, dirty: state.dirty,
-                                           ahead: state.ahead, claude: nil, build: known[wt.path.path], simulator: nil,
-                                           outputs: outputs, sourcesDate: state.sourcesDate))
-                    } else if var old = before.first(where: { $0.worktree.path == wt.path.path }) {
-                        // One failed call (a lock, a busy disk) must not drop the row, and with it the simulator's.
-                        old.outputs = outputs
-                        old.build = known[wt.path.path]
-                        all.append(old)
+            let scanned = await Task.detached(priority: .userInitiated) { () -> (all: [Session], live: Set<String>, complete: Bool) in
+                var all: [Session] = []
+                var live = Set<String>()
+                var complete = Git.available
+                for ws in spaces {
+                    let list = await Git.worktrees(of: ws.root)
+                    if list.isEmpty {
+                        complete = false   // git failed, or the repository moved: do not judge by it
+                        let kept = before.filter { $0.workspace.path == ws.root.path }
+                        if !kept.isEmpty {
+                            all.append(contentsOf: kept)
+                        } else if FileManager.default.fileExists(atPath: ws.root.path) {
+                            let path = ws.root.resolvingSymlinksInPath()
+                            all.append(Session(worktree: path, workspace: ws.root, branch: nil, head: "", dirty: false,
+                                               ahead: 0, claude: nil, build: known[path.path], simulator: nil,
+                                               outputs: nil, sourcesDate: nil))
+                        }
+                        continue
+                    }
+                    let worktrees = list.filter { !isTrunkPath($0.path) }
+                    for wt in worktrees { live.insert(wt.path.path) }
+                    // Scan each workspace's worktrees concurrently so multi-worktree / monorepo scans do not stall.
+                    let results = await withTaskGroup(of: (Int, Session).self) { group -> [(Int, Session)] in
+                        for (idx, wt) in worktrees.enumerated() {
+                            group.addTask {
+                                let path = wt.path
+                                async let outputsTask = Task.detached(priority: .utility) { SessionStore.newestAPK(in: path) }.value
+                                async let stateTask = Git.state(of: path)
+                                let (outputs, state) = await (outputsTask, stateTask)
+                                if let state {
+                                    return (idx, Session(worktree: path, workspace: ws.root, branch: state.branch, head: state.head,
+                                                         dirty: state.dirty, ahead: state.ahead, claude: nil, build: known[path.path],
+                                                         simulator: nil, outputs: outputs, sourcesDate: state.sourcesDate))
+                                } else if var old = before.first(where: { $0.worktree.path == path.path }) {
+                                    // One failed call (a lock, a busy disk) must not drop the row, and with it the simulator's.
+                                    old.outputs = outputs
+                                    old.build = known[path.path]
+                                    return (idx, old)
+                                } else {
+                                    // Unborn HEAD or transient git failure: still list the worktree from `git worktree list`.
+                                    let head = wt.head.allSatisfy({ $0 == "0" }) ? "" : wt.head
+                                    return (idx, Session(worktree: path, workspace: ws.root, branch: wt.branch, head: head,
+                                                         dirty: false, ahead: 0, claude: nil, build: known[path.path],
+                                                         simulator: nil, outputs: outputs, sourcesDate: nil))
+                                }
+                            }
+                        }
+                        var collected: [(Int, Session)] = []
+                        for await item in group { collected.append(item) }
+                        return collected
+                    }
+                    for (_, session) in results.sorted(by: { $0.0 < $1.0 }) {
+                        all.append(session)
                     }
                 }
-            }
-            guard mine == self.generation else { return }
+                return (all, live, complete)
+            }.value
+            guard epoch == self.refreshEpoch else { return }
+            self.refreshing = false
+            var live = scanned.live
+            let complete = scanned.complete
+            let all = scanned.all
             if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
             self.sessions = self.attachPulls(ClaudeSessions.shared.attach(all))
             self.refreshPulls(for: spaces)
@@ -404,6 +491,10 @@ final class SessionsController {
                 DispatchQueue.global(qos: .utility).async { store.prune(live: live) }
                 self.evidence.pruneToCap()
             }
+            if self.refreshQueued {
+                self.refreshQueued = false
+                self.refresh()
+            }
         }
     }
 
@@ -414,7 +505,6 @@ final class SessionsController {
         if !workspaces.isEmpty, !Git.available { return [(Self.noGit, nil, [], 0)] }
         for ws in workspaces {
             let all = sessions.filter { $0.workspace.path == ws.root.path }
-            if all.isEmpty { continue }
             let order = Dictionary(ws.shown.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
             let rows = all.filter(isShown).map { s -> Session in var s = s; s.simulator = simulator(for: s); return s }
                 .sorted { a, b in
@@ -422,7 +512,7 @@ final class SessionsController {
                     let kb = (Self.tier(b, live: b.simulator != nil), order[b.worktree.path] ?? -1)
                     return ka < kb
                 }
-            out.append((workspaces.count > 1 ? ws.root.lastPathComponent : "Sessions", ws.root, rows, all.count - rows.count))
+            out.append((ws.root.lastPathComponent, ws.root, rows, all.count - rows.count))
         }
         return out
     }
@@ -445,6 +535,7 @@ final class SessionsController {
     @discardableResult
     func activate(_ session: Session) -> Bool {
         guard let wb = workbench else { return false }
+        show(session)
         if let sim = simulator(for: session) {
             wb.select(sim)
             noteUsed(session.worktree.path)
@@ -453,7 +544,6 @@ final class SessionsController {
         guard let apk = newestAPK(for: session) else {
             // Nothing to run yet: build it, and it opens when the build lands.
             let path = session.worktree.path
-            show(session)
             if buildQueue.isBuilding(path) {
                 openWhenBuilt.insert(path)
                 wb.toast.show("\(session.title) is building: it opens when it is ready")

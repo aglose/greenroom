@@ -117,16 +117,19 @@ struct Session {
     var title: String {
         if let b = branch, b == "main" || b == "master" { return b }
         if let t = claude?.title { return t }
-        if let pr = githubPR { return "#\(pr.number) \(pr.title.isEmpty ? (branch ?? shortHead) : pr.title)" }
-        return branch ?? "(detached \(String(head.prefix(7))))"
+        if let pr = githubPR { return "#\(pr.number) \(pr.title.isEmpty ? (branch ?? (shortHead.isEmpty ? worktree.lastPathComponent : shortHead)) : pr.title)" }
+        if let b = branch { return b }
+        return shortHead.isEmpty ? worktree.lastPathComponent : "(detached \(shortHead))"
     }
     /// Short, unmistakable label for a simulator running this session's build.
     var simLabel: String {
         if let pr = githubPR {
             let draft = pr.isDraft ? " Draft" : ""
-            return "#\(pr.number)\(draft) · \(branch ?? shortHead)"
+            let tail = branch ?? (shortHead.isEmpty ? worktree.lastPathComponent : shortHead)
+            return "#\(pr.number)\(draft) · \(tail)"
         }
-        return "\(branch ?? title) · \(shortHead)"
+        let base = branch ?? title
+        return shortHead.isEmpty ? base : "\(base) · \(shortHead)"
     }
     var shortHead: String { String(head.prefix(7)) }
     /// The engine's data slot for this worktree: its own app data, kept across rebuilds and restarts.
