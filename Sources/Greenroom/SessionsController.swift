@@ -18,6 +18,7 @@ final class SessionsController {
     private var branchPRs: [String: [String: GH.BranchPull]] = [:]
     /// Pull requests checked out as sessions here (PullSessions.swift), by workspace and local branch: how a session
     /// keeps its pull request when `gh pr list` does not name it (an older one, or a fork's head under another name).
+    /// Rebuilt after a restart from the branches' `greenroomPr` git config (`restoreCheckedOutPRs`).
     var checkedOutPRs: [String: [String: GH.BranchPull]] = [:] {
         didSet { sessions = attachPulls(sessions) }
     }
@@ -154,6 +155,7 @@ final class SessionsController {
                     self.workbench?.refreshCaptions()
                     self.onChange?()
                 }
+                await self.restoreCheckedOutPRs(in: root, listed: map)
             }
         }
     }

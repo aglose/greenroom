@@ -464,6 +464,13 @@ enum RecipesCheck {
             sessions.refresh()
             _ = await wait("the pull request's session", 30) { sessions.session(atWorktree: URL(fileURLWithPath: wtPath))?.prNumber == 45 }
             expect(sessions.session(atWorktree: URL(fileURLWithPath: wtPath))?.githubPR?.title == "PR work", "its session knows its pull request without gh pr list naming it")
+            // After a restart: nothing remembered but the branch's git config.
+            expect(gitOut(["config", "--get", "branch.feature-pr.greenroomPr"], in: repo) == "45", "the branch names its pull request in git config")
+            sessions.checkedOutPRs = [:]
+            expect(sessions.session(atWorktree: URL(fileURLWithPath: wtPath))?.prNumber == nil, "forgotten, the session has no pull request")
+            await sessions.restoreCheckedOutPRs(in: ws().root, listed: [:])
+            expect(sessions.session(atWorktree: URL(fileURLWithPath: wtPath))?.githubPR?.title == "PR work",
+                   "the session finds its pull request again from the branch's git config")
             let (again, againWhy) = await sessions.checkOutPullRequest(number: 45, slug: "example/app", in: ws())
             expect(again?.resolvingSymlinksInPath().path == URL(fileURLWithPath: wtPath).resolvingSymlinksInPath().path && againWhy.contains("already"),
                    "checking it out again gives the same worktree (\(againWhy))")

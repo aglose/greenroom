@@ -8,6 +8,41 @@ import AppKit
 private enum PullCheckouts { static var running = Set<String>() }
 
 extension SessionsController {
+    /// The git config key, under `branch.<name>.`, that names the pull request a branch was checked out for.
+    static let prMarker = "greenroomPr"
+
+    /// Gives back the pull requests of branches checked out for one here (they carry `branch.<b>.greenroomPr`) that
+    /// `listed` (`gh pr list`'s newest) does not name: older pull requests, or a fork's head under another name.
+    /// Their state is read again each time, so a merge shows. At most 10 are asked for at once.
+    @MainActor
+    func restoreCheckedOutPRs(in root: URL, listed: [String: GH.BranchPull]) async {
+        guard let out = await Git.run(["config", "--get-regexp", #"^branch\..*\.greenroompr$"#], in: root) else { return }
+        let prefix = "branch.", suffix = "." + Self.prMarker.lowercased()
+        var marked: [(branch: String, number: Int)] = []
+        for line in out.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let n = Int(parts[1].trimmingCharacters(in: .whitespaces)), n > 0,
+                  parts[0].hasPrefix(prefix), parts[0].hasSuffix(suffix), parts[0].count > prefix.count + suffix.count else { continue }
+            let branch = String(parts[0].dropFirst(prefix.count).dropLast(suffix.count))
+            guard listed[branch]?.number != n, sessions.contains(where: { $0.workspace.path == root.path && $0.branch == branch }) else { continue }
+            marked.append((branch, n))
+        }
+        guard !marked.isEmpty else { return }
+        let slug = await GitHubRemote.repoSlug(for: root)
+        var found = checkedOutPRs[root.path] ?? [:]
+        for (branch, n) in marked.prefix(10) {
+            guard let info = await GH.pull(number: n, slug: slug, in: root).0 else { continue }   // offline: what was known stays
+            found[branch] = GH.BranchPull(number: n, title: info.title, branch: branch, state: info.state, isDraft: info.isDraft, url: info.url)
+        }
+        guard found != checkedOutPRs[root.path] ?? [:] else { return }
+        checkedOutPRs[root.path] = found
+        for s in sessions where s.workspace.path == root.path {
+            if let sim = simulator(for: s) { sim.displayLabel = s.simLabel }
+        }
+        workbench?.refreshCaptions()
+        onChange?()
+    }
+
     /// "Check Out Pull Request…": its number or address in a sheet, then `checkOutPull`. The repository is `workspace`,
     /// else the current session's, else the first.
     func askAndCheckOutPull(in workspace: URL? = nil) {
@@ -102,7 +137,7 @@ extension SessionsController {
         var candidates: [String] = []
         if validName && info.ref != base { candidates.append(info.ref) }
         candidates.append("pr-\(number)")
-        let marker = "greenroomPr"
+        let marker = Self.prMarker
         var branch: String?
         var exists = false
         for name in candidates {
@@ -121,6 +156,7 @@ extension SessionsController {
         if exists {
             // Checked out already: that worktree is the session.
             if let w = await Git.worktrees(of: root).first(where: { $0.branch == branch }) {
+                _ = await git(["config", "branch.\(branch).\(marker)", String(number)])
                 remember()
                 let behind = w.head != sha ? " (it is at \(w.head.prefix(7)), the pull request at \(sha.prefix(7)): pull to update it)" : ""
                 return (w.path, "#\(number) is checked out in \(w.path.lastPathComponent) already\(behind)")
@@ -132,8 +168,9 @@ extension SessionsController {
             }
         } else {
             guard await git(["branch", "--no-track", branch, sha]) != nil else { return (nil, "git could not make the branch \(branch)") }
-            _ = await git(["config", "branch.\(branch).\(marker)", String(number)])
         }
+        // The branch says which pull request it is: how its session finds it again after a restart.
+        _ = await git(["config", "branch.\(branch).\(marker)", String(number)])
         // Its own branch in the repository itself is its upstream, so pull and push work as usual.
         if !info.crossRepository && branch == info.ref,
            await git(["fetch", "--quiet", "--no-tags", remote, "+refs/heads/\(branch):refs/remotes/\(remote)/\(branch)"], timeout: 300) != nil {
