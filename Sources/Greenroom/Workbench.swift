@@ -1923,10 +1923,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if let open = menu.items.first(where: { $0.action == #selector(openInClaudeClicked) }) {
             if case .session(let s) = rows[row], s.claude?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
         }
-        // Main's row is not a worktree of the person's: no Claude session, nothing to remove but the repository.
+        // Main's row, headers and the empty placeholder are not worktrees: hide session-only actions on them.
         var isMain = false
+        var isWorkspaceOnly = false
         if case .main = rows[row] { isMain = true }
-        for item in menu.items where [#selector(openInClaudeClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain }
+        if case .sessionsHeader = rows[row] { isWorkspaceOnly = true }
+        if case .addSession = rows[row] { isWorkspaceOnly = true }
+        for item in menu.items where [#selector(openInClaudeClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain || isWorkspaceOnly }
+        for item in menu.items where item.action == #selector(closeClicked) { item.isHidden = isWorkspaceOnly }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
         else if case .pull(let pull) = rows[row] { items = sessions.pullMenuItems(for: pull) + [.separator()] }
@@ -1972,6 +1976,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
         if case .main(let m) = rows[row] { sessions.removeWorkspace(at: m.workspace); return }
+        if case .sessionsHeader(_, let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
+        if case .addSession(let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
         guard case .session(let session) = rows[row] else { return }
         sessions.removeWorkspace(containing: session)
     }

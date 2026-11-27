@@ -26,12 +26,13 @@ extension SessionsController {
                 self.workbench?.toast.show(Git.available ? "\(folder.lastPathComponent) is not a git repository: run `git init` in it, or choose an APK" : Self.noGit, problem: true)
                 return
             }
-            guard AndroidProject.isApp(top) else {
+            let isApp = await Task.detached(priority: .userInitiated) { AndroidProject.isApp(top) }.value
+            guard isApp else {
                 self.workbench?.toast.show("\(top.lastPathComponent) does not look like an Android app: no Gradle wrapper and app module were found", problem: true)
                 return
             }
             self.runWhenListed = top.path
-            if await self.addRepository(top).value == nil { self.runWhenListed = nil }
+            if await self.addRepository(top, quietIfExisting: true).value == nil { self.runWhenListed = nil }
         }
     }
 

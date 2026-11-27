@@ -77,8 +77,10 @@ enum Git {
     static func mainCheckout(of folder: URL) async -> URL? {
         guard let out = await run(["rev-parse", "--path-format=absolute", "--git-common-dir"], in: folder) else { return nil }
         let common = URL(fileURLWithPath: out.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard common.lastPathComponent == ".git" else { return nil }   // a bare repository has no checkout
-        return common.deletingLastPathComponent()
+        if common.lastPathComponent == ".git" { return common.deletingLastPathComponent() }
+        // A git submodule's common dir is `<super>/.git/modules/<name>` (not bare): its own toplevel is its checkout.
+        guard await run(["rev-parse", "--is-bare-repository"], in: folder)?.trimmingCharacters(in: .whitespacesAndNewlines) == "false" else { return nil }
+        return await toplevel(of: folder)
     }
 
     /// `git rev-parse --show-toplevel`: the root of the worktree `folder` is in, symlinks resolved, or nil when it
@@ -115,7 +117,9 @@ enum Git {
     /// worktrees whose folder is gone are left out.
     static func worktrees(of repo: URL) async -> [Worktree] {
         guard let out = await run(["worktree", "list", "--porcelain"], in: repo) else { return [] }
-        return parseWorktrees(out).filter { !$0.isBare && !$0.isPrunable && FileManager.default.fileExists(atPath: $0.path.path) }
+        return parseWorktrees(out)
+            .filter { !$0.isBare && !$0.isPrunable && FileManager.default.fileExists(atPath: $0.path.path) }
+            .map { var w = $0; w.path = w.path.resolvingSymlinksInPath(); return w }
     }
 
     /// A worktree's branch, head, changes, commits ahead of its upstream, and the date of its newest source change.
@@ -124,9 +128,11 @@ enum Git {
         async let branchOut = run(["symbolic-ref", "--quiet", "--short", "HEAD"], in: worktree)
         async let aheadOut = run(["rev-list", "--count", "@{upstream}..HEAD"], in: worktree)   // fails with no upstream: 0
         async let dateOut = run(["log", "-1", "--format=%ct"], in: worktree)
-        async let statusOut = run(["status", "--porcelain=v1", "-z"], in: worktree)
-        guard let head = await headOut?.trimmingCharacters(in: .whitespacesAndNewlines), !head.isEmpty else { return nil }
+        async let statusOut = run(["status", "--porcelain=v1", "-z"], in: worktree, timeout: 8)
+        let head = (await headOut?.trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
         let branch = await branchOut?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Freshly initialized repositories have an unborn HEAD (branch exists, no commits yet).
+        guard !head.isEmpty || (branch?.isEmpty == false) else { return nil }
         let ahead = Int((await aheadOut)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
         var newest = (await dateOut).flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }.map { Date(timeIntervalSince1970: $0) }
         let status = await statusOut ?? ""

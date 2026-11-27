@@ -188,6 +188,35 @@ enum MainCheck {
             expect(row() == nil && sessions.mainBuilds.simulator(of: root) == nil, "off, main has no row and its simulator quit")
             sessions.setKeepMain(true, for: root)
             expect(row() != nil, "on again, the row is back")
+
+            // 7. Adding a project folder always makes it visible in the sidebar: immediately on add, on re-add after
+            // removing its row, and even for a freshly initialized repository with no commits yet (unborn HEAD).
+            let fresh = base.appendingPathComponent("fresh-unborn", isDirectory: true)
+            try? fm.createDirectory(at: fresh, withIntermediateDirectories: true)
+            write("#!/bin/sh\nexit 1\n", fresh.appendingPathComponent("gradlew"), executable: true)
+            write("plugins { id(\"com.android.application\") }\n", fresh.appendingPathComponent("app/build.gradle.kts"))
+            git(["init", "-q", "-b", "main"], in: fresh)
+            let freshRoot = await sessions.addRepository(fresh).value
+            let freshGroupNow = sessions.groups().first { $0.workspace?.resolvingSymlinksInPath().path == fresh.resolvingSymlinksInPath().path }
+            expect(freshRoot == fresh.resolvingSymlinksInPath() && freshGroupNow != nil && freshGroupNow?.header == "fresh-unborn" && !(freshGroupNow?.sessions.isEmpty ?? true),
+                   "an added project (even with unborn HEAD) appears in the sidebar immediately with its own header and row")
+            _ = await wait("fresh unborn refresh", 15) {
+                sessions.sessions.first { $0.worktree.resolvingSymlinksInPath().path == fresh.resolvingSymlinksInPath().path }?.branch == "main"
+            }
+            let freshSession = sessions.sessions.first { $0.worktree.resolvingSymlinksInPath().path == fresh.resolvingSymlinksInPath().path }
+            expect(freshSession != nil && freshSession?.branch == "main" && sessions.isShown(freshSession!),
+                   "unborn HEAD repo stays listed and shown in the sidebar after refresh")
+            if let fs = freshSession {
+                sessions.remove(fs)
+                expect(!sessions.isShown(fs) && sessions.groups().contains { $0.workspace?.resolvingSymlinksInPath().path == fresh.resolvingSymlinksInPath().path },
+                       "removing the row keeps the repository header in the sidebar")
+                _ = await sessions.addRepository(fresh).value
+                expect(sessions.isShown(fs), "re-adding an already-added repository restores its row in the sidebar")
+            }
+            // Removing the repo from Sessions removes it cleanly.
+            sessions.removeWorkspace(at: fresh)
+            expect(!sessions.groups().contains { $0.workspace?.resolvingSymlinksInPath().path == fresh.resolvingSymlinksInPath().path },
+                   "removing the repository takes it out of the sidebar")
             finish()
         }
     }
