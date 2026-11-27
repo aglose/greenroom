@@ -55,13 +55,92 @@ extension Workspace {
         return env
     }
 
-    /// Why a recipe may not run for this workspace yet, or nil. Only `remote` needs the person's yes.
+    /// Why a recipe may not run for this workspace yet, or nil.
     func refusal(forRecipe name: String) -> String? {
+        if name == "local" && disableLocalBuilds {
+            return "Local Gradle builds are disabled for \(root.lastPathComponent). Use your PR APK script, link a local APK, or re-enable local builds in Settings > Build Recipes."
+        }
         if name == "remote" && recipes["remote"] == nil && remote.consent != true {
             return "The remote recipe has not been allowed for \(root.lastPathComponent): it uploads this repository's source code to your own boat.dev account. Choose Build with > remote to read what it sends and say yes."
         }
         return nil
     }
+}
+
+/// Starter template and helpers for user-owned PR APK retrieval scripts.
+/// Greenroom never connects to Artifactory or external artifact stores directly: the user provides their own
+/// local executable script that runs with their own credentials and returns an APK (via GREENROOM_OUT or GREENROOM_APK=).
+enum PRFetchScript {
+    static var folder: URL { Engine.shared.state.appendingPathComponent("recipes", isDirectory: true) }
+
+    /// Writes an executable starter script for `repoName` and returns its URL.
+    static func createTemplate(for repoName: String) throws -> URL {
+        let fm = FileManager.default
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let safe = repoName.map { ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") ? $0 : "-" }
+        let base = String(safe).isEmpty ? "repo" : String(safe)
+        var url = folder.appendingPathComponent("\(base)-pr-apk.sh")
+        var n = 2
+        while fm.fileExists(atPath: url.path) {
+            url = folder.appendingPathComponent("\(base)-pr-apk-\(n).sh")
+            n += 1
+        }
+        guard fm.createFile(atPath: url.path, contents: Data(template.utf8), attributes: [.posixPermissions: 0o700]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return url
+    }
+
+    static let template = #"""
+        #!/bin/bash
+        # Greenroom PR APK Script: fetch or locate an APK for a pull request using your own tools and credentials.
+        # Greenroom never connects to Artifactory or your build storage directly — only this script does.
+        #
+        # Environment variables provided by Greenroom:
+        #   GREENROOM_PR_NUMBER   Pull request number (when a PR exists for this branch / review row)
+        #   GREENROOM_PR_TITLE    Pull request title (when known)
+        #   GREENROOM_PR_URL      Pull request URL (when known)
+        #   GREENROOM_PR_STATE    Pull request state: OPEN, DRAFT, MERGED, CLOSED (when known)
+        #   GREENROOM_REF         Branch name
+        #   GREENROOM_SHA         Commit SHA
+        #   GREENROOM_REPO_SLUG   GitHub owner/repo (when a GitHub remote exists)
+        #   GREENROOM_WORKTREE    Path to the local git worktree
+        #   GREENROOM_REPO        Path to the repository's main checkout
+        #   GREENROOM_MODULE      Selected Gradle module (empty if auto-detected)
+        #   GREENROOM_VARIANT     Selected build variant (default: debug)
+        #   GREENROOM_OUT         Destination path if you copy/download the APK directly
+        #   Plus any variables from Greenroom > Settings > Variables (secrets are masked in logs).
+        #
+        # Two ways to hand the APK back to Greenroom:
+        #   1. Download or copy the APK directly to "$GREENROOM_OUT", OR
+        #   2. Point Greenroom at a local APK you downloaded/kept on disk by printing:
+        #        GREENROOM_APK=/path/to/your/app-pr.apk
+        #      (optionally also print GREENROOM_PR=123 to tag/link it to a specific PR number).
+        #
+        # You can also link a local APK to a PR from outside Greenroom at any time:
+        #   /Applications/Greenroom.app/Contents/MacOS/Greenroom --link-apk /path/to/app.apk --pr 123
+        set -euo pipefail
+
+        pr="${GREENROOM_PR_NUMBER:-}"
+        sha="${GREENROOM_SHA:-}"
+        branch="${GREENROOM_REF:-}"
+
+        # Example 1 (JFrog CLI / Artifactory):
+        # : "${pr:?no open pull request found for branch '${branch:-detached}'}"
+        # tmp="$(mktemp -d)"
+        # trap 'rm -rf "$tmp"' EXIT
+        # jf rt dl "my-android-repo/pr-${pr}/*-debug.apk" "$tmp/" --flat=true --sort-by=created --sort-order=desc --limit=1
+        # apk="$(find "$tmp" -name '*.apk' -type f | head -n 1)"
+        # [ -n "$apk" ] || { echo "error: no APK found in Artifactory for PR #${pr}" >&2; exit 1; }
+        # cp "$apk" "$GREENROOM_OUT"
+
+        # Example 2 (link an already-downloaded local APK to this PR without copying):
+        # echo "GREENROOM_PR=${pr}"
+        # echo "GREENROOM_APK=$HOME/Downloads/app-pr-${pr}.apk"
+
+        echo "error: edit $0 with your command to fetch or locate the PR APK (PR=${pr:-none}, sha=${sha:0:7})" >&2
+        exit 1
+        """#
 }
 
 /// Whether a repository has a GitHub remote (the `ci` recipe is offered only then), and what CI would be behind by.

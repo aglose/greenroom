@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 // The Build button, progress, log and Cancel of a session's row (docs/SESSIONS-PLAN.md, "2. Builds"). The queue is
 // Builds.swift; SessionsController calls into this file in a few places (the row, the palette, the install).
@@ -87,7 +88,11 @@ extension SessionsController {
         guard let ws = workspace(of: session) else { return }
         let name = recipe ?? ws.defaultRecipeName
         // The remote recipe uploads source code: it runs only for a repository whose person said yes (RecipesUI.swift).
-        if ws.refusal(forRecipe: name) != nil { askRemoteConsent(for: ws) { [weak self] in self?.build(session, recipe: name) }; return }
+        if let why = ws.refusal(forRecipe: name) {
+            if name == "remote" { askRemoteConsent(for: ws) { [weak self] in self?.build(session, recipe: name) } }
+            else { workbench?.toast.show(why, problem: true) }
+            return
+        }
         if recipe != nil { ws.defaultRecipeName = name }
         buildQueue.start(session, workspace: ws, recipeName: name, store: store) { [weak self] why in
             self?.workbench?.toast.show(why, problem: true)
@@ -95,6 +100,32 @@ extension SessionsController {
     }
 
     func cancelBuild(_ session: Session) { buildQueue.cancel(session.worktree.path) }
+
+    /// Opens a file chooser to link a local `.apk` on disk directly to `session` (and its PR, if any).
+    func chooseLocalAPK(for session: Session) {
+        guard let window = workbench?.window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "apk") ?? .data]
+        if let pr = session.prNumber {
+            panel.message = "Choose a local APK to link to PR #\(pr) (\(session.title))"
+        } else {
+            panel.message = "Choose a local APK to link to \(session.title)"
+        }
+        panel.prompt = "Link APK"
+        panel.beginSheetModal(for: window) { [weak self] r in
+            guard let self, r == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                if await self.linkLocalAPK(url, to: session, open: true) != nil {
+                    let target = session.prNumber.map { "PR #\($0)" } ?? session.title
+                    self.workbench?.toast.show("Linked \(url.lastPathComponent) to \(target)")
+                } else {
+                    self.workbench?.toast.show("Could not link \(url.lastPathComponent)", problem: true)
+                }
+            }
+        }
+    }
 
     /// "Custom...": any executable becomes the workspace's "custom" recipe and builds at once.
     func chooseCustomRecipe(for session: Session) {
@@ -173,10 +204,17 @@ extension SessionsController {
         if active {
             items.append(ClosureMenuItem("Cancel Build") { [weak self] in self?.cancelBuild(s) })
         } else {
-            items.append(ClosureMenuItem("Build (\(ws.defaultRecipeName))") { [weak self] in self?.build(s) })
+            if let pr = s.prNumber, ws.hasPRFetchScript {
+                items.append(ClosureMenuItem("Fetch PR #\(pr) APK (pr-script)") { [weak self] in self?.build(s, recipe: "pr-script") })
+            }
+            if !(ws.disableLocalBuilds && ws.defaultRecipeName == "local") {
+                items.append(ClosureMenuItem("Build (\(ws.defaultRecipeName))") { [weak self] in self?.build(s) })
+            }
+            let linkTitle = s.prNumber.map { "Link Local APK to PR #\($0)…" } ?? "Link Local APK…"
+            items.append(ClosureMenuItem(linkTitle) { [weak self] in self?.chooseLocalAPK(for: s) })
             let sub = NSMenu()
             for name in ws.recipeNames { sub.addItem(ClosureMenuItem(name) { [weak self] in self?.build(s, recipe: name) }) }
-            sub.addItem(.separator())
+            if !ws.recipeNames.isEmpty { sub.addItem(.separator()) }
             sub.addItem(ClosureMenuItem("Custom…") { [weak self] in self?.chooseCustomRecipe(for: s) })
             sub.addItem(.separator())
             for item in recipeMenuItems(for: s, in: ws) { sub.addItem(item) }
@@ -194,7 +232,7 @@ extension SessionsController {
 
     func buildPaletteItems() -> [PaletteItem] {
         [
-            PaletteItem(id: "session.build", title: "Build this session", group: "Sessions", symbol: "hammer", keywords: "recipe gradle assemble compile") { [weak self] in
+            PaletteItem(id: "session.build", title: "Build this session", group: "Sessions", symbol: "hammer", keywords: "recipe gradle assemble compile pr-script") { [weak self] in
                 guard let self else { return }
                 if let s = self.currentSession { self.build(s) } else { self.workbench?.toast.show("No session to build: add a repository first", problem: true) }
             },
@@ -202,6 +240,17 @@ extension SessionsController {
                 guard let self else { return }
                 if let s = self.currentSession, self.buildQueue.isBuilding(s.worktree.path) { self.cancelBuild(s) }
                 else { self.workbench?.toast.show("Nothing is building") }
+            },
+            PaletteItem(id: "session.link.apk", title: "Link local APK to this session / PR…", group: "Sessions", symbol: "link", keywords: "apk pr artifactory local file attach") { [weak self] in
+                guard let self else { return }
+                if let s = self.currentSession { self.chooseLocalAPK(for: s) }
+                else { self.workbench?.toast.show("No session selected: add a repository first", problem: true) }
+            },
+            PaletteItem(id: "session.stop.local.scan", title: "Stop local APK search for this repository", group: "Sessions", symbol: "stop.circle", keywords: "scan skip disable gradle artifactory") { [weak self] in
+                guard let self else { return }
+                if let s = self.currentSession { self.stopLocalSearch(for: s.workspace) }
+                else if let first = self.workspaces.first { self.stopLocalSearch(for: first.root) }
+                else { self.workbench?.toast.show("No repository added yet", problem: true) }
             },
         ]
     }

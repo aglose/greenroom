@@ -283,7 +283,7 @@ enum AgentShim {
         return nil
     }
 
-    private static func post(_ body: Data, to e: Endpoint) -> (status: Int, data: Data)? {
+    private static func post(_ body: Data, to e: Endpoint, cwdOverride: String? = nil) -> (status: Int, data: Data)? {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(e.port)/mcp")!)
         request.httpMethod = "POST"
         request.httpBody = body
@@ -293,7 +293,8 @@ enum AgentShim {
         // Where the agent works and who started this shim: the app ties the connection to a worktree's session.
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "/-_.~")
-        if let cwd = FileManager.default.currentDirectoryPath.addingPercentEncoding(withAllowedCharacters: allowed) {
+        let cwdPath = cwdOverride ?? FileManager.default.currentDirectoryPath
+        if let cwd = cwdPath.addingPercentEncoding(withAllowedCharacters: allowed) {
             request.setValue(cwd, forHTTPHeaderField: "X-Greenroom-Cwd")
         }
         request.setValue(String(getppid()), forHTTPHeaderField: "X-Greenroom-Parent")
@@ -308,6 +309,72 @@ enum AgentShim {
         }.resume()
         done.wait()
         return out.map { (status: $0.0, data: $0.1) }
+    }
+
+    /// `Greenroom --link-apk APK [--pr N] [--worktree DIR] [--open]`: notifies the running Greenroom app that a
+    /// local APK file is meant for a PR and/or worktree session and links it over the authenticated loopback channel.
+    static func linkAPK(args: [String]) -> Never {
+        func usage() -> Never {
+            FileHandle.standardError.write(Data("usage: Greenroom --link-apk PATH.apk [--pr NUMBER] [--worktree DIR] [--open]\n".utf8))
+            exit(2)
+        }
+        guard !args.isEmpty else { usage() }
+        var apkPath = ""
+        var prNumber: Int?
+        var worktreePath: String?
+        var shouldOpen = false
+        var i = 0
+        while i < args.count {
+            let a = args[i]
+            switch a {
+            case "--pr":
+                guard i + 1 < args.count, let n = Int(args[i + 1].trimmingCharacters(in: CharacterSet(charactersIn: "#"))), n > 0 else { usage() }
+                prNumber = n; i += 2
+            case "--worktree":
+                guard i + 1 < args.count else { usage() }
+                worktreePath = (args[i + 1] as NSString).expandingTildeInPath; i += 2
+            case "--open":
+                shouldOpen = true; i += 1
+            case "--agent-check":
+                i += 1
+            default:
+                if apkPath.isEmpty && !a.hasPrefix("-") { apkPath = (a as NSString).expandingTildeInPath; i += 1 }
+                else { usage() }
+            }
+        }
+        guard !apkPath.isEmpty else { usage() }
+        let absAPK = apkPath.hasPrefix("/") ? apkPath : URL(fileURLWithPath: apkPath).path
+        var toolArgs: [String: Any] = ["apk": absAPK, "open": shouldOpen]
+        if let prNumber { toolArgs["pr_number"] = prNumber }
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": ["name": "link_apk", "arguments": toolArgs],
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload),
+              let e = connect(),
+              let r = post(body, to: e, cwdOverride: worktreePath),
+              r.status == 200,
+              let json = (try? JSONSerialization.jsonObject(with: r.data)) as? [String: Any] else {
+            FileHandle.standardError.write(Data("error: could not contact Greenroom to link \(absAPK)\n".utf8))
+            exit(1)
+        }
+        if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
+            FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
+            exit(1)
+        }
+        if let res = json["result"] as? [String: Any] {
+            let content = (res["content"] as? [[String: Any]])?.first?["text"] as? String ?? ""
+            if (res["isError"] as? Bool) == true {
+                FileHandle.standardError.write(Data("error: \(content)\n".utf8))
+                exit(1)
+            }
+            if !content.isEmpty { print(content) }
+            exit(0)
+        }
+        FileHandle.standardError.write(Data("error: unexpected response from Greenroom\n".utf8))
+        exit(1)
     }
 
     static func run() -> Never {

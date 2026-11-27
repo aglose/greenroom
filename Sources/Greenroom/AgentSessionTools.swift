@@ -112,8 +112,11 @@ extension AgentTools {
             throw Failure(message: "there is no recipe called \(name): the recipes are \(ws.recipeNames.joined(separator: ", "))")
         }
         // The remote recipe uploads source code: only the person's yes, given in Greenroom, lets it run. An agent cannot give it.
-        if name == "remote", ws.refusal(forRecipe: "remote") != nil {
-            throw Failure(message: "The remote recipe uploads this repository's source code to the person's own boat.dev account, and they have not allowed it. Ask them to allow it in Greenroom (the row's Build with > remote); an agent cannot give that yes. Meanwhile use the local recipe.")
+        if let refusal = ws.refusal(forRecipe: name) {
+            if name == "remote" {
+                throw Failure(message: "The remote recipe uploads this repository's source code to the person's own boat.dev account, and they have not allowed it. Ask them to allow it in Greenroom (the row's Build with > remote); an agent cannot give that yes. Meanwhile use another recipe.")
+            }
+            throw Failure(message: refusal)
         }
         // One call waits at most 200 s (the shim gives up at 300); the build goes on and a second call joins it.
         let timeout = clamp(args["timeout_s"], 10, 200, 200)
@@ -160,6 +163,46 @@ extension AgentTools {
         let bad = all.filter { l in ["error", "failed", "exception", "fatal", "what went wrong"].contains { l.localizedCaseInsensitiveContains($0) } }
         let pick = bad.isEmpty ? Array(all.suffix(12)) : Array(bad.suffix(12))
         return pick.map { $0.count > 300 ? String($0.prefix(300)) + "…" : $0 }.joined(separator: "\n")
+    }
+
+    // MARK: link_apk
+
+    func linkAPKTool(_ args: [String: Any], _ connection: Connection) throws -> String {
+        guard let wb = workbench else { throw Failure(message: Self.noSession) }
+        guard let rawPath = (args["apk"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !rawPath.isEmpty else {
+            throw Failure(message: "link_apk requires apk: the path to a local .apk file")
+        }
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        let apkURL = URL(fileURLWithPath: expanded).resolvingSymlinksInPath()
+        var isDir: ObjCBool = false
+        guard apkURL.pathExtension.lowercased() == "apk",
+              FileManager.default.fileExists(atPath: apkURL.path, isDirectory: &isDir), !isDir.boolValue,
+              FileManager.default.isReadableFile(atPath: apkURL.path) else {
+            throw Failure(message: "\(rawPath) is not a readable .apk file")
+        }
+        let prNumber = (args["pr_number"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+        let shouldOpen = (args["open"] as? Bool) ?? false
+
+        if let tiedSession = try? tied(connection) {
+            let s = tiedSession.session
+            let linkedBuild: Build? = blocking {
+                await wb.sessions.linkLocalAPK(apkURL, to: s, prNumber: prNumber, open: shouldOpen)
+            }
+            guard let build = linkedBuild else { throw Failure(message: "could not store \(apkURL.lastPathComponent)") }
+            let prNote = (build.prNumber ?? prNumber).map { " (PR #\($0))" } ?? ""
+            mainSync { wb.toast.show("Linked \(apkURL.lastPathComponent) to \(s.title)\(prNote)") }
+            return "linked \(apkURL.lastPathComponent) [\(build.key)] to \(label(s))\(prNote)"
+        }
+        if let prNumber {
+            let result: (build: Build?, linkedTargets: [String]) = blocking {
+                await wb.sessions.linkLocalAPK(apkURL, toPR: prNumber, workspace: nil, open: shouldOpen)
+            }
+            guard let build = result.build else { throw Failure(message: "could not store \(apkURL.lastPathComponent)") }
+            let targetDesc = result.linkedTargets.isEmpty ? "PR #\(prNumber) in store" : result.linkedTargets.joined(separator: ", ")
+            mainSync { wb.toast.show("Linked \(apkURL.lastPathComponent) to PR #\(prNumber)") }
+            return "linked \(apkURL.lastPathComponent) [\(build.key)] to \(targetDesc)"
+        }
+        throw Failure(message: "link_apk needs either a worktree of an added repository or a pr_number")
     }
 
     // MARK: changes

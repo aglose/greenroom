@@ -6,6 +6,8 @@ let arguments = CommandLine.arguments
 
 // `Greenroom --mcp`: the agent interface on stdin and stdout, passed on to the running app (AgentShim).
 if arguments.contains("--mcp") { AgentShim.run() }
+// `Greenroom --link-apk APK [--pr N] [--worktree DIR] [--open]`: link a local APK to a PR/session in the running app.
+if let i = arguments.firstIndex(of: "--link-apk") { AgentShim.linkAPK(args: Array(arguments[(i + 1)...])) }
 // `Greenroom --connect-check DIR`: Connect Claude Code against a stand-in `claude` (ConnectCheck).
 if let i = arguments.firstIndex(of: "--connect-check"), i + 1 < arguments.count { ConnectCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --t3-check DIR`: T3 Code's threads through a stand-in `t3` (T3Check).

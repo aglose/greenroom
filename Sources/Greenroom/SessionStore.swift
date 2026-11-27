@@ -86,16 +86,25 @@ final class SessionStore {
 
     /// Files `apk` as a build: `builds/<key>/app.apk` (cloned, else copied) and `build.json`. A build already stored
     /// under its key is not written again; the existing record stays, as the first source of a build is its source.
+    /// If `prNumber` is supplied for an already-stored build that lacked one, its metadata is updated with that PR link.
     /// The APK is made under a temporary name and renamed into place, so `app.apk` is always whole, and two
     /// records of one file at once both succeed.
-    func record(apk: URL, source: Build.Source, sha: String?, ref: String?, dirty: Bool, date: Date? = nil) -> Build? {
+    func record(apk: URL, source: Build.Source, sha: String?, ref: String?, dirty: Bool, date: Date? = nil, prNumber: Int? = nil) -> Build? {
         guard let key = Self.key(of: apk) else { return nil }
         lock.lock(); defer { lock.unlock() }
         let dir = folder(of: key)
         let stored = dir.appendingPathComponent("app.apk")
         let size = (try? apk.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
         func whole(_ f: URL) -> Bool { (try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) == size }
-        if let existing = build(key), whole(existing.apk) { return existing }
+        if let existing = build(key), whole(existing.apk) {
+            if let prNumber, existing.prNumber == nil {
+                let updated = Build(key: existing.key, apk: existing.apk, source: existing.source, sha: existing.sha ?? sha,
+                                    ref: existing.ref ?? ref, dirty: existing.dirty, date: existing.date, prNumber: prNumber)
+                try? Self.encoder.encode(updated).write(to: dir.appendingPathComponent("build.json"), options: .atomic)
+                return updated
+            }
+            return existing
+        }
         do {
             try privateFolder(builds)
             try privateFolder(dir)
@@ -107,7 +116,7 @@ final class SessionStore {
                 guard whole(temp), rename(temp.path, stored.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
             }
             let when = date ?? (try? apk.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-            let build = Build(key: key, apk: stored, source: source, sha: sha, ref: ref, dirty: dirty, date: when)
+            let build = Build(key: key, apk: stored, source: source, sha: sha, ref: ref, dirty: dirty, date: when, prNumber: prNumber)
             try Self.encoder.encode(build).write(to: dir.appendingPathComponent("build.json"), options: .atomic)
             return build
         } catch {
@@ -168,6 +177,17 @@ final class SessionStore {
         return try? Self.decoder.decode(Build.self, from: data)
     }
 
+    /// The newest stored build explicitly linked to pull request `prNumber` whose APK still exists on disk.
+    func build(forPR prNumber: Int) -> Build? {
+        guard prNumber > 0, let names = try? fm.contentsOfDirectory(atPath: builds.path) else { return nil }
+        var best: Build?
+        for name in names {
+            guard let b = build(name), b.prNumber == prNumber, fm.fileExists(atPath: b.apk.path) else { continue }
+            if best == nil || b.date > best!.date { best = b }
+        }
+        return best
+    }
+
     // MARK: Gradle outputs
 
     /// Whether `file` is an APK Gradle left in `build/outputs/apk` of the worktree or of a module (including inside
@@ -188,8 +208,9 @@ final class SessionStore {
 
     /// The newest `.apk` under a worktree's Gradle outputs (`isBuildOutput`). When `module` is set (e.g. `":app"` or
     /// `"consumer/:app"`), looks directly in that module's `build/outputs/apk` folder so multi-app monorepos stay
-    /// scoped to the selected app without scanning the whole tree.
-    static func newestAPK(in worktree: URL, module: String? = nil) -> Session.Outputs? {
+    /// scoped to the selected app without scanning the whole tree. Stops early when `shouldCancel()` returns true.
+    static func newestAPK(in worktree: URL, module: String? = nil, shouldCancel: () -> Bool = { false }) -> Session.Outputs? {
+        if shouldCancel() { return nil }
         let fm = FileManager.default
         var roots: [URL] = []
         if let module, !module.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -203,6 +224,7 @@ final class SessionStore {
             let maxDepth = 4
             let maxDirs = 300
             while index < queue.count && index < maxDirs {
+                if shouldCancel() { return nil }
                 let (dir, depth) = queue[index]
                 index += 1
                 let apks = dir.appendingPathComponent("build/outputs/apk", isDirectory: true)
@@ -210,6 +232,7 @@ final class SessionStore {
                 if depth < maxDepth,
                    let children = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) {
                     for child in children where queue.count < maxDirs {
+                        if shouldCancel() { return nil }
                         guard let vals = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
                               vals.isDirectory == true, vals.isSymbolicLink != true,
                               !AndroidProject.skipDirectories.contains(child.lastPathComponent) else { continue }
@@ -220,8 +243,10 @@ final class SessionStore {
         }
         var best: Session.Outputs?
         for r in roots {
+            if shouldCancel() { return nil }
             guard let walk = fm.enumerator(at: r, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey], options: []) else { continue }
             for case let f as URL in walk where isBuildOutput(f, in: worktree) {
+                if shouldCancel() { return nil }
                 guard let v = try? f.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]), v.isRegularFile == true,
                       let d = v.contentModificationDate else { continue }
                 if best == nil || d > best!.date { best = Session.Outputs(apk: f, date: d) }

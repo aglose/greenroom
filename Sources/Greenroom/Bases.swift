@@ -195,11 +195,13 @@ enum Bases {
         if on { active.append(run) } else { active.removeAll { $0 === run } }
     }
 
-    /// The `ci` recipe for one commit, with no session and no queue: it only reads from GitHub. The APK is filed in
-    /// the store as a CI build of that commit. `onLine` gets the recipe's log on the main thread.
-    static func fetchCI(sha: String, ref: String?, workspace: Workspace, store: SessionStore, slug: String? = nil, onLine: ((String) -> Void)? = nil) async -> (Build?, String) {
-        guard let recipe = workspace.recipe(named: "ci") else { return (nil, "there is no ci recipe") }
-        let scratch = store.root.appendingPathComponent("sessions/work/ci-\(String(sha.prefix(7)))-\(UUID().uuidString.prefix(6))", isDirectory: true)
+    /// Runs a remote/artifact fetch recipe (`"pr-script"` or `"ci"`) for one commit, with no session and no queue.
+    /// The APK is filed in the store as a CI build of that commit (and PR, when known). `onLine` gets the log on main.
+    static func fetchCI(sha: String, ref: String?, workspace: Workspace, store: SessionStore, slug: String? = nil,
+                        recipeName: String = "ci", prNumber: Int? = nil, prTitle: String? = nil, prURL: String? = nil,
+                        onLine: ((String) -> Void)? = nil) async -> (Build?, String) {
+        guard let recipe = workspace.recipe(named: recipeName) else { return (nil, "there is no \(recipeName) recipe") }
+        let scratch = store.root.appendingPathComponent("sessions/work/\(recipeName)-\(String(sha.prefix(7)))-\(UUID().uuidString.prefix(6))", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
         // Looking for what CI already built must never start a workflow: only an explicit Build on a row does.
         var extra = workspace.recipeEnvironment
@@ -207,7 +209,8 @@ enum Bases {
         let known = await GitHubRemote.repoSlug(for: workspace.root)
         if let s = slug ?? known { extra["GREENROOM_REPO_SLUG"] = s }
         let job = RecipeJob(worktree: workspace.root, repo: workspace.root, ref: ref ?? "", sha: sha, dirty: false, module: workspace.module ?? "",
-                            variant: workspace.variant, out: scratch.appendingPathComponent("app.apk"), extra: extra)
+                            variant: workspace.variant, out: scratch.appendingPathComponent("app.apk"),
+                            prNumber: prNumber, prTitle: prTitle, prURL: prURL, extra: extra)
         let run = RecipeRun(recipe: recipe, job: job)
         run.onLine = onLine
         track(run, true)
@@ -218,31 +221,45 @@ enum Bases {
         case .failed(let why): return (nil, why)
         case .built:
             let out = job.out
-            let build = await Task.detached { store.record(apk: out, source: .ci, sha: sha, ref: ref, dirty: false, date: Date()) }.value
+            let resolvedPR = run.resolvedPRNumber ?? prNumber
+            let build = await Task.detached { store.record(apk: out, source: .ci, sha: sha, ref: ref, dirty: false, date: Date(), prNumber: resolvedPR) }.value
             return build.map { ($0, "") } ?? (nil, "The APK could not be stored")
         }
     }
 
-    /// A commit's build: the stored one, else the `ci` recipe, else an existing worktree already at that commit with
-    /// a fresh APK, else an offer to build it.
+    /// A commit's build: the stored one, else the user's PR APK script (if configured), else the `ci` recipe,
+    /// else an existing worktree already at that commit with a fresh APK, else an offer to build it.
     static func resolve(sha: String, ref: String?, in workspace: Workspace, sessions: [Session], store: SessionStore,
-                        pullRequest: Bool = false, slug: String? = nil, onLine: ((String) -> Void)? = nil) async -> BaseResolution {
+                        pullRequest: Bool = false, slug: String? = nil, prNumber: Int? = nil, prTitle: String? = nil,
+                        onLine: ((String) -> Void)? = nil) async -> BaseResolution {
         if let b = store.build(forSha: sha) { return .build(b) }
+        if let prNumber, let b = store.build(forPR: prNumber), b.sha == nil || b.sha == sha { return .build(b) }
         var ciReason = ""
-        if workspace.recipes["ci"] != nil || GitHubRemote.has(workspace.root) {
-            let (build, why) = await fetchCI(sha: sha, ref: ref, workspace: workspace, store: store, slug: slug, onLine: onLine)
+        let prURL = (prNumber != nil && slug != nil) ? "https://github.com/\(slug!)/pull/\(prNumber!)" : nil
+        if workspace.hasPRFetchScript {
+            let (build, why) = await fetchCI(sha: sha, ref: ref, workspace: workspace, store: store, slug: slug,
+                                             recipeName: "pr-script", prNumber: prNumber, prTitle: prTitle, prURL: prURL, onLine: onLine)
             if let build { return .build(build) }
             ciReason = why.split(separator: "\n").last.map(String.init) ?? why
-        } else {
+        }
+        if workspace.recipes["ci"] != nil || GitHubRemote.has(workspace.root) {
+            let (build, why) = await fetchCI(sha: sha, ref: ref, workspace: workspace, store: store, slug: slug,
+                                             recipeName: "ci", prNumber: prNumber, prTitle: prTitle, prURL: prURL, onLine: onLine)
+            if let build { return .build(build) }
+            let ghWhy = why.split(separator: "\n").last.map(String.init) ?? why
+            ciReason = ciReason.isEmpty ? ghWhy : "\(ciReason); CI: \(ghWhy)"
+        } else if ciReason.isEmpty {
             ciReason = "this repository has no GitHub remote"
         }
         let at = sessions.first { $0.workspace.path == workspace.root.path && $0.head == sha && !$0.dirty && $0.outputs != nil && !$0.isStale }
         if let at, let outputs = at.outputs {
             let apk = outputs.apk, head = at.head, branch = at.branch
-            let build = await Task.detached { store.record(apk: apk, source: .local, sha: head, ref: branch, dirty: false, date: outputs.date) }.value
+            let build = await Task.detached { store.record(apk: apk, source: .local, sha: head, ref: branch, dirty: false, date: outputs.date, prNumber: prNumber ?? at.prNumber) }.value
             if let build { return .build(build) }
         }
-        return .offer(BuildOffer(sha: sha, ref: ref, ciReason: ciReason, fromPullRequest: pullRequest))
+        var offer = BuildOffer(sha: sha, ref: ref, ciReason: ciReason, fromPullRequest: pullRequest)
+        if workspace.disableLocalBuilds { offer.options.removeAll { $0 == .localInWorktree } }
+        return .offer(offer)
     }
 
     /// `resolve(base:in:)` of the plan. `worktree` is the one the base branch's merge base is taken from (the
@@ -278,7 +295,7 @@ enum Bases {
             let slug = await GitHubRemote.repoSlug(for: workspace.root)
             let (pr, why) = await GH.pull(number: n, slug: slug, in: workspace.root)
             guard let pr else { return .failed(why) }
-            return await resolve(sha: pr.sha, ref: pr.ref.isEmpty ? nil : pr.ref, in: workspace, sessions: sessions, store: store, pullRequest: true, slug: slug, onLine: onLine)
+            return await resolve(sha: pr.sha, ref: pr.ref.isEmpty ? nil : pr.ref, in: workspace, sessions: sessions, store: store, pullRequest: true, slug: slug, prNumber: pr.number, prTitle: pr.title, onLine: onLine)
         }
     }
 }

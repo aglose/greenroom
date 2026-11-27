@@ -522,7 +522,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         switch row {
         case .sessionsHeader(_, let ws, let hidden):
             let appTag = sessions.apps(for: ws).count > 1 ? (sessions.selectedApp(for: ws)?.id ?? "") : ""
-            return Self.identity(row) + "|\(hidden)|\(sessions.apps(for: ws).count)|\(appTag)"
+            let scanning = sessions.scanningWorkspaces.contains(ws.path) ? "1" : "0"
+            return Self.identity(row) + "|\(hidden)|\(sessions.apps(for: ws).count)|\(appTag)|\(scanning)"
         case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
         case .session(let s): return Self.identity(row) + "|" + sessions.rowKey(for: s)
         case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
@@ -1828,6 +1829,20 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             }
             add.contentTintColor = .secondaryLabelColor
             var views: [NSView] = [label]
+            if sessions.scanningWorkspaces.contains(ws.path) {
+                let spin = NSProgressIndicator()
+                spin.style = .spinning
+                spin.controlSize = .mini
+                spin.isIndeterminate = true
+                spin.startAnimation(nil)
+                spin.setContentHuggingPriority(.required, for: .horizontal)
+                let stop = ClosureButton(symbol: "stop.circle", tip: "Stop local APK search for \(ws.lastPathComponent)") { [weak self] in
+                    self?.sessions.stopLocalSearch(for: ws)
+                }
+                stop.contentTintColor = .secondaryLabelColor
+                views.append(spin)
+                views.append(stop)
+            }
             let repoApps = sessions.apps(for: ws)
             if repoApps.count > 1, let active = sessions.selectedApp(for: ws) {
                 let pill = ClosureButton(title: "\(active.displayName) ▾", tip: "Switch Android app in \(ws.lastPathComponent) (\(repoApps.count) apps)") {}

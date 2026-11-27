@@ -22,11 +22,11 @@ extension Recipe {
         return Recipe(executable: bundledFolder.appendingPathComponent(name + ".sh").path)
     }
 
-    /// What a Build records as its source: "ci" and "remote" are theirs, anything else (local, a custom
+    /// What a Build records as its source: "ci", "pr-script", and "remote" are theirs, anything else (local, a custom
     /// executable) was built from the worktree as it is.
     static func source(ofRecipeNamed name: String) -> Build.Source {
         switch name {
-        case "ci": return .ci
+        case "ci", "pr-script": return .ci
         case "remote": return .remote
         default: return .local
         }
@@ -34,20 +34,45 @@ extension Recipe {
 }
 
 extension Workspace {
-    /// A recipe by name: the workspace's own (a custom one) first, then the built-in of that name.
-    func recipe(named name: String) -> Recipe? { recipes[name] ?? Recipe.builtIn(name) }
-
-    /// Every recipe name offered, built-ins first; "ci" only for a repository with a GitHub remote.
-    var recipeNames: [String] {
-        Recipe.builtInNames.filter { $0 != "ci" || recipes["ci"] != nil || GitHubRemote.has(root) }
-            + recipes.keys.filter { !Recipe.builtInNames.contains($0) }.sorted()
+    /// A recipe by name: the PR APK script, the workspace's own (a custom one), then the built-in of that name.
+    func recipe(named name: String) -> Recipe? {
+        if name == "pr-script" {
+            let trimmed = prFetchScript.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : Recipe(executable: (trimmed as NSString).expandingTildeInPath)
+        }
+        return recipes[name] ?? Recipe.builtIn(name)
     }
 
-    /// The name of the recipe the Build button runs: the last one chosen for this workspace, else "local".
+    var hasPRFetchScript: Bool { !prFetchScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    /// Every recipe name offered, PR script and built-ins first; "ci" only for a repository with a GitHub remote,
+    /// and "local" omitted when local Gradle builds are disabled.
+    var recipeNames: [String] {
+        var names: [String] = []
+        if hasPRFetchScript { names.append("pr-script") }
+        names += Recipe.builtInNames.filter { name in
+            if name == "local" && disableLocalBuilds { return false }
+            if name == "ci" && recipes["ci"] == nil && !GitHubRemote.has(root) { return false }
+            return true
+        }
+        names += recipes.keys.filter { !Recipe.builtInNames.contains($0) && $0 != "pr-script" }.sorted()
+        return names
+    }
+
+    /// The name of the recipe the Build button runs: the last one chosen for this workspace, else "pr-script" / "ci"
+    /// when local builds are disabled, else "local".
     var defaultRecipeName: String {
         get {
-            let n = UserDefaults.standard.string(forKey: "buildRecipe." + root.path) ?? "local"
-            return recipe(named: n) != nil ? n : "local"
+            let stored = UserDefaults.standard.string(forKey: "buildRecipe." + root.path)
+            if let stored, !(stored == "local" && disableLocalBuilds), recipe(named: stored) != nil {
+                return stored
+            }
+            if disableLocalBuilds {
+                if hasPRFetchScript { return "pr-script" }
+                if recipes["ci"] != nil || GitHubRemote.has(root) { return "ci" }
+                if let first = recipeNames.first { return first }
+            }
+            return "local"
         }
         nonmutating set { UserDefaults.standard.set(newValue, forKey: "buildRecipe." + root.path) }
     }
@@ -64,14 +89,24 @@ struct RecipeJob {
     var variant: String
     /// Where the recipe writes the APK.
     var out: URL
+    /// Optional pull request metadata when a PR is associated with this session or review row.
+    var prNumber: Int? = nil
+    var prTitle: String? = nil
+    var prURL: String? = nil
+    var prState: String? = nil
     /// The workspace's recipe settings (`Workspace.recipeEnvironment`), beside the contract's variables.
     var extra: [String: String] = [:]
 
     var environment: [String: String] {
-        extra.merging([
+        var contract: [String: String] = [
             "GREENROOM_WORKTREE": worktree.path, "GREENROOM_REPO": repo.path, "GREENROOM_REF": ref, "GREENROOM_SHA": sha,
             "GREENROOM_DIRTY": dirty ? "1" : "0", "GREENROOM_MODULE": module, "GREENROOM_VARIANT": variant, "GREENROOM_OUT": out.path,
-        ]) { _, contract in contract }
+        ]
+        if let prNumber { contract["GREENROOM_PR_NUMBER"] = String(prNumber) }
+        if let prTitle, !prTitle.isEmpty { contract["GREENROOM_PR_TITLE"] = prTitle }
+        if let prURL, !prURL.isEmpty { contract["GREENROOM_PR_URL"] = prURL }
+        if let prState, !prState.isEmpty { contract["GREENROOM_PR_STATE"] = prState }
+        return extra.merging(contract) { _, contract in contract }
     }
 }
 
@@ -279,6 +314,8 @@ final class RecipeRun {
     private(set) var dropped = 0
     private var cancelled = false
     private var reaped = false
+    /// Pull request number reported by the script (`GREENROOM_PR=N`), else `job.prNumber`.
+    private(set) var resolvedPRNumber: Int?
     /// Secret variables' values, taken out of every line (under `lock`).
     private var secrets: [String] = []
     private static let keep = 20000
@@ -286,6 +323,7 @@ final class RecipeRun {
     init(recipe: Recipe, job: RecipeJob) {
         self.recipe = recipe
         self.job = job
+        self.resolvedPRNumber = job.prNumber
     }
 
     /// Every line so far (the last `keep`).
@@ -378,11 +416,50 @@ final class RecipeRun {
         }
         let status = r.status
         let code: Int32 = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
-        let size = (try? FileManager.default.attributesOfItem(atPath: job.out.path)[.size] as? Int) ?? 0
+        let currentLines = lines
+        // A script may declare which PR this APK is for (`GREENROOM_PR=123`) and/or point Greenroom at a local APK
+        // (`GREENROOM_APK=/path/to/app.apk`) instead of copying it into GREENROOM_OUT itself.
+        if let prVal = Self.directive("GREENROOM_PR", in: currentLines), let n = Int(prVal.trimmingCharacters(in: CharacterSet(charactersIn: "# "))), n > 0 {
+            resolvedPRNumber = n
+        }
+        var size = (try? FileManager.default.attributesOfItem(atPath: job.out.path)[.size] as? Int) ?? 0
+        if code == 0 && size == 0, let rawPath = Self.directive("GREENROOM_APK", in: currentLines) {
+            let expanded = (rawPath as NSString).expandingTildeInPath
+            let linked = URL(fileURLWithPath: expanded).resolvingSymlinksInPath()
+            var isDir: ObjCBool = false
+            guard linked.pathExtension.lowercased() == "apk",
+                  FileManager.default.fileExists(atPath: linked.path, isDirectory: &isDir), !isDir.boolValue,
+                  FileManager.default.isReadableFile(atPath: linked.path) else {
+                return .failed("The script reported GREENROOM_APK=\(rawPath), which is not a readable .apk file")
+            }
+            let fm = FileManager.default
+            try? fm.removeItem(at: job.out)
+            if clonefile(linked.path, job.out.path, 0) != 0 {
+                do { try fm.copyItem(at: linked, to: job.out) } catch {
+                    return .failed("Could not link \(linked.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            size = (try? fm.attributesOfItem(atPath: job.out.path)[.size] as? Int) ?? 0
+        }
         if code == 0 && size > 0 { return .built }
-        let why2 = Self.reason(lines: lines)
-        if code == 0 { return .failed("The recipe finished but left no APK at GREENROOM_OUT" + (why2.isEmpty ? "" : ": " + why2)) }
+        let why2 = Self.reason(lines: currentLines)
+        if code == 0 { return .failed("The recipe finished but left no APK at GREENROOM_OUT or GREENROOM_APK" + (why2.isEmpty ? "" : ": " + why2)) }
         return .failed(why2.isEmpty ? "The recipe exited with status \(code)" : why2)
+    }
+
+    /// Last `KEY=VALUE` line emitted by a script (trimmed; quotes stripped if wrapped).
+    static func directive(_ key: String, in lines: [String]) -> String? {
+        let prefix = key + "="
+        for raw in lines.reversed() {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix(prefix) else { continue }
+            var val = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if val.count >= 2 && ((val.hasPrefix("\"") && val.hasSuffix("\"")) || (val.hasPrefix("'") && val.hasSuffix("'"))) {
+                val = String(val.dropFirst().dropLast())
+            }
+            if !val.isEmpty { return val }
+        }
+        return nil
     }
 
     /// The last error lines of a log: the lines that look like errors (the last three), else its last three.

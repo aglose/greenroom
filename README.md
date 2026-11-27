@@ -12,7 +12,13 @@ version of it and adds the workbench.
 - Open APKs (drop, ⌘O, double-click in Finder, recent list); each runs as a simulator inside the Greenroom window.
 - No APK yet? The first screen builds one from source: "Open a project folder…" adds an Android app's repository
   to Sessions and builds its working copy, and "Clone from GitHub…" clones a repository into `~/Developer` and does
-  the same. The app opens when the build lands.
+  the same. The app opens when the build lands. For large repositories where local Gradle builds are expensive, each
+  repository in Settings > Build Recipes (or its `+` menu) can skip local APK scanning (or stop an in-flight scan from
+  the sidebar header), disable local Gradle builds, and run a local **PR APK script** of your own (receiving
+  `GREENROOM_PR_NUMBER`, `GREENROOM_REF`, `GREENROOM_SHA`, `GREENROOM_OUT`) to fetch from Artifactory or custom
+  storage with your own credentials—Greenroom never contacts Artifactory itself. Your script can write to
+  `$GREENROOM_OUT` or print `GREENROOM_APK=/path/to/app.apk` (and `GREENROOM_PR=N`), or you can link any local APK to
+  a session/PR from its menu, the command palette, or `Greenroom --link-apk PATH.apk --pr N`.
 - The mouse is the finger, the scroll wheel scrolls, the keyboard types, ⌘V pastes.
 - Toolbar: Back, Home, Rotate, light/dark, the device (phone, foldable, tablet, desktop, TV, switched while the app
   runs), Screenshot, Restart, Close.

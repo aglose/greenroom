@@ -410,7 +410,15 @@ final class MainBuilds {
                 self.change()
             }
             if case .build(let b) = r { self.states[key] = .idle; self.land(b, in: ws); return }
-            await self.buildLocally(ws, sha: head.sha, name: head.name)
+            let latestWS = self.sessions?.workspaces.first { $0.root.path == key } ?? ws
+            if latestWS.disableLocalBuilds {
+                self.openWhenReady.remove(key)
+                self.attempted[key] = head.sha
+                self.states[key] = .idle
+                self.change()
+                return
+            }
+            await self.buildLocally(latestWS, sha: head.sha, name: head.name)
         }
     }
 
@@ -495,7 +503,7 @@ final class MainBuilds {
         openWhenReady.insert(ws.root.path)
         if let job = row.job, job.isActive { wb.toast.show("\(row.name) is building: it opens when it is ready"); return }
         if case .checking = row.state { wb.toast.show("Looking for the newest \(row.name): it opens when it is ready"); return }
-        wb.toast.show("Building the newest \(row.name): it opens when it is ready")
+        wb.toast.show(ws.disableLocalBuilds ? "Looking for a remote build of \(row.name)…" : "Building the newest \(row.name): it opens when it is ready")
         ensure(ws, force: true)
     }
 
@@ -587,6 +595,9 @@ extension SessionsController {
         }
         if let b = row.current { return ("latest · \(short ?? "") · \(Self.ageText(b.date))", .secondaryLabelColor) }
         if row.newest != nil { return ("older build; \(short ?? "the newest") not built yet", .systemOrange) }
+        if let ws = workspaces.first(where: { $0.root.path == row.workspace.path }), ws.disableLocalBuilds {
+            return ("no remote build yet (local builds off)", .secondaryLabelColor)
+        }
         return ("not built yet: click to build and open", .secondaryLabelColor)
     }
 

@@ -33,6 +33,11 @@ final class BuildJob {
     fileprivate var extra: [String: String]
     /// A sandbox the remote recipe made from a template (it says so in a line of its log).
     fileprivate(set) var createdSandbox: String?
+    /// Pull request metadata associated with this session at launch time, if any.
+    fileprivate var prNumber: Int?
+    fileprivate var prTitle: String?
+    fileprivate var prURL: String?
+    fileprivate var prState: String?
 
     init(session: Session, workspace: Workspace, recipeName: String, recipe: Recipe, store: SessionStore, environment: [String: String] = [:]) {
         self.session = session.worktree.path
@@ -43,6 +48,10 @@ final class BuildJob {
         self.recipe = recipe
         self.module = workspace.module ?? ""
         self.variant = workspace.variant
+        self.prNumber = session.prNumber
+        self.prTitle = session.prTitle
+        self.prURL = session.prURL?.absoluteString
+        self.prState = session.prState
         self.extra = workspace.recipeEnvironment.merging(environment) { _, new in new }
         let work = store.root.appendingPathComponent("sessions/work/\(session.slot)", isDirectory: true)
         self.out = work.appendingPathComponent("app.apk")
@@ -146,7 +155,8 @@ final class Builds {
             let dirty = state?.dirty ?? hint?.dirty ?? false
             var extra = job.extra
             if let slug = await GitHubRemote.repoSlug(for: wt) { extra["GREENROOM_REPO_SLUG"] = slug }
-            let rj = RecipeJob(worktree: wt, repo: job.workspace, ref: ref, sha: sha, dirty: dirty, module: job.module, variant: job.variant, out: job.out, extra: extra)
+            let rj = RecipeJob(worktree: wt, repo: job.workspace, ref: ref, sha: sha, dirty: dirty, module: job.module, variant: job.variant, out: job.out,
+                               prNumber: job.prNumber, prTitle: job.prTitle, prURL: job.prURL, prState: job.prState, extra: extra)
             let run = RecipeRun(recipe: job.recipe, job: rj)
             job.run = run
             if job.cancelRequested {
@@ -191,11 +201,12 @@ final class Builds {
             release()
         case .built:
             let out = job.out, source = job.source
+            let prNumber = job.run?.resolvedPRNumber ?? job.prNumber
             job.handingOff = true
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 // Hashing and cloning a big APK is off the main thread.
                 // CI built the pushed commit, whatever the worktree has changed since.
-                let build = store.record(apk: out, source: source, sha: sha.isEmpty ? nil : sha, ref: ref.isEmpty ? nil : ref, dirty: source == .ci ? false : dirty, date: Date())
+                let build = store.record(apk: out, source: source, sha: sha.isEmpty ? nil : sha, ref: ref.isEmpty ? nil : ref, dirty: source == .ci ? false : dirty, date: Date(), prNumber: prNumber)
                 if let build {
                     store.note(build: build.key, of: job.session)
                     try? log.write(to: store.folder(of: build.key).appendingPathComponent("build.log"), atomically: true, encoding: .utf8)
