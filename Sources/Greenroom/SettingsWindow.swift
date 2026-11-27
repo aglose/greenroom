@@ -565,10 +565,14 @@ struct WorkspaceRecipesSection: View {
     @State private var ciArtifact = ""
     @State private var ciAPK = ""
     @State private var ciWorkflow = ""
+    @State private var prFetchScript = ""
+    @State private var skipLocalAPKScan = false
+    @State private var disableLocalBuilds = false
     @State private var remoteSandbox = ""
     @State private var remoteTemplate = ""
     @State private var remoteConsent: Bool? = nil
     @State private var savedBanner = false
+    @State private var scriptNotice: String? = nil
 
     private var controller: SessionsController? { (NSApp.delegate as? AppDelegate)?.workbench.sessions }
 
@@ -600,9 +604,13 @@ struct WorkspaceRecipesSection: View {
         ciArtifact = ws.ci.artifact
         ciAPK = ws.ci.apk
         ciWorkflow = ws.ci.workflow
+        prFetchScript = ws.prFetchScript
+        skipLocalAPKScan = ws.skipLocalAPKScan
+        disableLocalBuilds = ws.disableLocalBuilds
         remoteSandbox = ws.remote.sandbox
         remoteTemplate = ws.remote.template
         remoteConsent = ws.remote.consent
+        scriptNotice = nil
     }
 
     private func save() {
@@ -611,16 +619,51 @@ struct WorkspaceRecipesSection: View {
         let trimmedMod = moduleSpec.trimmingCharacters(in: .whitespacesAndNewlines)
         let newMod = trimmedMod.isEmpty ? nil : trimmedMod
         let moduleChanged = c.workspaces[i].module != newMod
+        let scanChanged = c.workspaces[i].skipLocalAPKScan != skipLocalAPKScan
+        let disableChanged = c.workspaces[i].disableLocalBuilds != disableLocalBuilds
         c.workspaces[i].ci.artifact = ciArtifact.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].ci.apk = ciAPK.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].ci.workflow = ciWorkflow.trimmingCharacters(in: .whitespacesAndNewlines)
+        c.workspaces[i].prFetchScript = prFetchScript.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].remote.sandbox = remoteSandbox.trimmingCharacters(in: .whitespacesAndNewlines)
         c.workspaces[i].remote.template = remoteTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
         c.store.saveWorkspaces(c.workspaces)
         if moduleChanged { c.setAppModule(newMod, for: ws.root, silent: true) }
+        if scanChanged { c.setSkipLocalAPKScan(skipLocalAPKScan, for: ws.root, silent: true) }
+        if disableChanged { c.setDisableLocalBuilds(disableLocalBuilds, for: ws.root, silent: true) }
+        c.onChange?()
         workspaces = c.workspaces
         savedBanner = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { savedBanner = false }
+    }
+
+    private func choosePRScript() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.message = "Choose a local executable script that fetches or links an APK for a PR."
+        panel.prompt = "Choose"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if !FileManager.default.isExecutableFile(atPath: url.path) {
+            scriptNotice = "\(url.lastPathComponent) is not executable yet (run chmod +x)."
+        } else {
+            scriptNotice = nil
+        }
+        prFetchScript = url.path
+        save()
+    }
+
+    private func createPRScriptTemplate() {
+        guard let ws = activeWorkspace else { return }
+        do {
+            let url = try PRFetchScript.createTemplate(for: ws.root.lastPathComponent)
+            prFetchScript = url.path
+            scriptNotice = "Created \(url.lastPathComponent) — edit it with your download/link command."
+            save()
+            NSWorkspace.shared.open(url)
+        } catch {
+            scriptNotice = "Could not create starter script: \(error.localizedDescription)"
+        }
     }
 
     var body: some View {
@@ -680,6 +723,73 @@ struct WorkspaceRecipesSection: View {
                         }
                     }
                     field("Gradle module / composite target", text: $moduleSpec, placeholder: "Auto-detect (e.g. :app or consumer/:app)")
+                }
+
+                SettingsCard {
+                    Text("Local APK Search & Builds")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(SettingsTheme.ink)
+                    Toggle(isOn: $skipLocalAPKScan) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Skip local APK scan")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(SettingsTheme.ink)
+                            Text("Don't walk local build/outputs/apk directories or watch Gradle outputs. Rely on your PR script or linked APKs.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SettingsTheme.mute)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    Toggle(isOn: $disableLocalBuilds) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Disable local Gradle builds")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(SettingsTheme.ink)
+                            Text("Never run ./gradlew locally for this repository (including automatic main-branch builds).")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SettingsTheme.mute)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                }
+
+                SettingsCard {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("PR APK Script (Artifactory / Custom Storage)")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(SettingsTheme.ink)
+                            Text("Greenroom never accesses Artifactory directly. Your local script runs with your credentials, receives GREENROOM_PR_NUMBER / GREENROOM_SHA / GREENROOM_REF, and writes to $GREENROOM_OUT or prints GREENROOM_APK=/path/to/app.apk.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SettingsTheme.mute)
+                        }
+                        Spacer()
+                    }
+                    HStack(spacing: 8) {
+                        field("Local executable script path", text: $prFetchScript, placeholder: "/path/to/fetch-pr-apk.sh")
+                        VStack(spacing: 4) {
+                            Spacer().frame(height: 15)
+                            HStack(spacing: 6) {
+                                Button("Choose…") { choosePRScript() }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(SettingsTheme.ink)
+                                    .padding(.horizontal, 9).padding(.vertical, 5)
+                                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(0.09)))
+                                Button("Create Template…") { createPRScriptTemplate() }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(SettingsTheme.ink)
+                                    .padding(.horizontal, 9).padding(.vertical, 5)
+                                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(0.09)))
+                            }
+                        }
+                    }
+                    if let scriptNotice {
+                        Text(scriptNotice)
+                            .font(.system(size: 11))
+                            .foregroundStyle(SettingsTheme.warning)
+                    }
                 }
 
                 SettingsCard {

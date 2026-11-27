@@ -23,6 +23,21 @@ final class SessionsController {
     private var refreshEpoch = 0
     private var refreshing = false
     private var refreshQueued = false
+    /// Thread-safe cancellation token for the current refresh scan's local APK filesystem walks.
+    private final class ScanGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelledAll = false
+        private var cancelledWorkspaces = Set<String>()
+        func cancelAll() { lock.lock(); cancelledAll = true; lock.unlock() }
+        func cancel(workspace path: String) { lock.lock(); cancelledWorkspaces.insert(path); lock.unlock() }
+        func isCancelled(workspace path: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return cancelledAll || cancelledWorkspaces.contains(path)
+        }
+    }
+    private var activeScanGate: ScanGate?
+    /// Workspaces currently scanning local worktree `build/outputs/apk` directories.
+    private(set) var scanningWorkspaces = Set<String>()
     /// Slots whose simulator is to start as soon as the one that held the slot has exited.
     private var starting = Set<String>()
     static let noGit = "Sessions needs git: install the Command Line Tools (xcode-select --install)"
@@ -457,16 +472,32 @@ final class SessionsController {
             appItem.submenu = appMenu(for: workspace)
             menu.addItem(appItem)
         }
-        if let ws = self.workspace(at: workspace), AndroidProject.cachedIsApp(ws.root) == true {
-            let keep = ClosureMenuItem("Keep \(MainBuilds.shortName(ws.baseRef)) Built") { [weak self] in self?.setKeepMain(!ws.keepMain, for: workspace) }
-            keep.state = ws.keepMain ? .on : .off
-            keep.toolTip = "A row at the top runs the newest \(MainBuilds.shortName(ws.baseRef)): Greenroom fetches it and builds each new commit by itself"
-            menu.addItem(keep)
-            let unsigned = ClosureMenuItem("Count Walks That Are Not Signed In") { [weak self] in self?.setUnsignedBaseline(!ws.unsignedBaseline, for: workspace) }
-            unsigned.state = ws.unsignedBaseline ? .on : .off
-            unsigned.toolTip = Workspace.unsignedExplanation
-            menu.addItem(unsigned)
+        if let ws = self.workspace(at: workspace) {
+            if AndroidProject.cachedIsApp(ws.root) == true {
+                let keep = ClosureMenuItem("Keep \(MainBuilds.shortName(ws.baseRef)) Built") { [weak self] in self?.setKeepMain(!ws.keepMain, for: workspace) }
+                keep.state = ws.keepMain ? .on : .off
+                keep.toolTip = "A row at the top runs the newest \(MainBuilds.shortName(ws.baseRef)): Greenroom fetches it and builds each new commit by itself"
+                menu.addItem(keep)
+                let unsigned = ClosureMenuItem("Count Walks That Are Not Signed In") { [weak self] in self?.setUnsignedBaseline(!ws.unsignedBaseline, for: workspace) }
+                unsigned.state = ws.unsignedBaseline ? .on : .off
+                unsigned.toolTip = Workspace.unsignedExplanation
+                menu.addItem(unsigned)
+            }
+            menu.addItem(.separator())
+            let skipScan = ClosureMenuItem("Skip Local APK Scan") { [weak self] in self?.setSkipLocalAPKScan(!ws.skipLocalAPKScan, for: workspace) }
+            skipScan.state = ws.skipLocalAPKScan ? .on : .off
+            skipScan.toolTip = "Stop scanning local build/outputs/apk directories in this repository and rely on your PR APK script or linked APKs"
+            menu.addItem(skipScan)
+            let noLocal = ClosureMenuItem("Disable Local Gradle Builds") { [weak self] in self?.setDisableLocalBuilds(!ws.disableLocalBuilds, for: workspace) }
+            noLocal.state = ws.disableLocalBuilds ? .on : .off
+            noLocal.toolTip = "Never run ./gradlew locally for this repository (use a PR APK script, CI, or linked local APKs instead)"
+            menu.addItem(noLocal)
+            menu.addItem(ClosureMenuItem(ws.hasPRFetchScript ? "Edit PR APK Script Settings…" : "Configure PR APK Script…") { [weak self] in
+                guard self != nil else { return }
+                SettingsWindow.shared.show(tab: .recipes, workspacePath: workspace.path)
+            })
         }
+        menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("Add Repository…") { [weak self] in self?.chooseRepository() })
         menu.addItem(ClosureMenuItem("Remove \(workspace.lastPathComponent) from Sessions") { [weak self] in self?.removeWorkspace(at: workspace) })
         return menu
@@ -487,6 +518,7 @@ final class SessionsController {
     func refresh(supersede: Bool = false) {
         if supersede {
             refreshEpoch += 1
+            activeScanGate?.cancelAll()
             refreshing = false
             refreshQueued = false
         } else if refreshing {
@@ -495,7 +527,14 @@ final class SessionsController {
         }
         refreshing = true
         let epoch = refreshEpoch
+        let gate = ScanGate()
+        activeScanGate = gate
         let spaces = workspaces
+        let scanningNow = Set(spaces.filter { !$0.skipLocalAPKScan }.map(\.root.path))
+        if scanningWorkspaces != scanningNow {
+            scanningWorkspaces = scanningNow
+            if !scanningNow.isEmpty { onChange?() }
+        }
         // Teammates' maps, for the workspaces that share them (at most every ten minutes each; nothing when off).
         let sharing = spaces.filter(\.shareMaps)
         if !sharing.isEmpty { let root = store.root; Task.detached(priority: .utility) { for ws in sharing { _ = await History.fetchIfDue(ws, stateRoot: root) } } }
@@ -513,8 +552,10 @@ final class SessionsController {
                 var live = Set<String>()
                 var complete = Git.available
                 for ws in spaces {
-                    _ = AndroidProject.isApp(ws.root)
+                    if !ws.skipLocalAPKScan { _ = AndroidProject.isApp(ws.root) }
                     let wsModule = ws.module
+                    let wsRootPath = ws.root.path
+                    let skipLocalScan = ws.skipLocalAPKScan
                     let list = await Git.worktrees(of: ws.root)
                     if list.isEmpty {
                         complete = false   // git failed, or the repository moved: do not judge by it
@@ -536,7 +577,9 @@ final class SessionsController {
                         for (idx, wt) in worktrees.enumerated() {
                             group.addTask {
                                 let path = wt.path
-                                async let outputsTask = Task.detached(priority: .utility) { SessionStore.newestAPK(in: path, module: wsModule) }.value
+                                async let outputsTask: Session.Outputs? = skipLocalScan ? nil : Task.detached(priority: .utility) {
+                                    SessionStore.newestAPK(in: path, module: wsModule, shouldCancel: { gate.isCancelled(workspace: wsRootPath) })
+                                }.value
                                 async let stateTask = Git.state(of: path)
                                 let (outputs, state) = await (outputsTask, stateTask)
                                 if let state {
@@ -569,6 +612,8 @@ final class SessionsController {
             }.value
             guard epoch == self.refreshEpoch else { return }
             self.refreshing = false
+            self.scanningWorkspaces = []
+            self.activeScanGate = nil
             var live = scanned.live
             let complete = scanned.complete
             let all = scanned.all
@@ -644,7 +689,7 @@ final class SessionsController {
             return true
         }
         guard let apk = newestAPK(for: session) else {
-            // Nothing to run yet: build it, and it opens when the build lands.
+            // Nothing to run yet: build/fetch it with the workspace's recipe, and open when it lands.
             let path = session.worktree.path
             if buildQueue.isBuilding(path) {
                 openWhenBuilt.insert(path)
@@ -652,10 +697,24 @@ final class SessionsController {
                 return true
             }
             guard let ws = workspace(of: session) else { return false }
+            let recipeName = (ws.hasPRFetchScript && (session.prNumber != nil || ws.disableLocalBuilds)) ? "pr-script" : ws.defaultRecipeName
+            if let refusal = ws.refusal(forRecipe: recipeName) {
+                if recipeName == "remote" {
+                    openWhenBuilt.insert(path)
+                    build(session, recipe: recipeName)
+                } else {
+                    wb.toast.show(refusal, problem: true)
+                }
+                return true
+            }
             openWhenBuilt.insert(path)
-            build(session)
-            if buildQueue.isBuilding(path) { wb.toast.show("Building \(session.title) with \(ws.defaultRecipeName): it opens when it is ready") }
-            else { openWhenBuilt.remove(path) }
+            build(session, recipe: recipeName == ws.defaultRecipeName ? nil : recipeName)
+            if buildQueue.isBuilding(path) {
+                let verb = recipeName == "pr-script" ? "Fetching PR APK for" : "Building"
+                wb.toast.show("\(verb) \(session.title) with \(recipeName): it opens when it is ready")
+            } else {
+                openWhenBuilt.remove(path)
+            }
             return true
         }
         for stale in Engine.shared.simulators where !stale.isAlive && Self.slot(of: stale) == session.slot { Engine.shared.close(stale) }
@@ -785,7 +844,8 @@ final class SessionsController {
             w.onChange = { [weak self] in self?.refresh() }
             if w.start() { watchers[ws.root.path] = w }
         }
-        let paths = all.map(\.worktree.path).sorted()
+        let skippedRoots = Set(workspaces.filter(\.skipLocalAPKScan).map(\.root.path))
+        let paths = all.filter { !skippedRoots.contains($0.workspace.path) }.map(\.worktree.path).sorted()
         guard paths != watched else { return }
         watched = paths
         buildWatcher?.stop()
@@ -794,6 +854,106 @@ final class SessionsController {
         let b = BuildWatcher(folders: paths.map { URL(fileURLWithPath: $0, isDirectory: true) }, name: nil)
         b.onBuild = { [weak self] apk in self?.built(apk) }
         if b.start() { buildWatcher = b }
+    }
+
+    /// Stops any in-flight local APK scan for `root` immediately and enables `skipLocalAPKScan` so local search stays off.
+    func stopLocalSearch(for root: URL) {
+        activeScanGate?.cancel(workspace: root.path)
+        scanningWorkspaces.remove(root.path)
+        setSkipLocalAPKScan(true, for: root, silent: true)
+        workbench?.toast.show("Stopped local APK search for \(root.lastPathComponent). Link a local APK or configure a PR APK script instead.")
+    }
+
+    func setSkipLocalAPKScan(_ on: Bool, for root: URL, silent: Bool = false) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == root.path }) else { return }
+        if on {
+            activeScanGate?.cancel(workspace: root.path)
+            scanningWorkspaces.remove(root.path)
+        }
+        guard workspaces[i].skipLocalAPKScan != on else {
+            onChange?()
+            return
+        }
+        workspaces[i].skipLocalAPKScan = on
+        store.saveWorkspaces(workspaces)
+        if !silent {
+            workbench?.toast.show(on ? "Skipped local APK scanning for \(root.lastPathComponent)" : "Resumed local APK scanning for \(root.lastPathComponent)")
+        }
+        onChange?()
+        refresh(supersede: true)
+    }
+
+    func setDisableLocalBuilds(_ on: Bool, for root: URL, silent: Bool = false) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == root.path }) else { return }
+        guard workspaces[i].disableLocalBuilds != on else { return }
+        workspaces[i].disableLocalBuilds = on
+        store.saveWorkspaces(workspaces)
+        if on {
+            // Cancel any in-flight local Gradle builds belonging to this workspace.
+            for (wtPath, job) in buildQueue.jobs where job.workspace.path == root.path && job.isActive && job.recipeName == "local" {
+                buildQueue.cancel(wtPath)
+            }
+        }
+        if !silent {
+            workbench?.toast.show(on ? "Disabled local Gradle builds for \(root.lastPathComponent)" : "Enabled local Gradle builds for \(root.lastPathComponent)")
+        }
+        onChange?()
+    }
+
+    func setPRFetchScript(_ path: String, for root: URL) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == root.path }) else { return }
+        workspaces[i].prFetchScript = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        store.saveWorkspaces(workspaces)
+        onChange?()
+    }
+
+    /// Files a local `.apk` on disk and links it to `session` (and its PR, when known or specified).
+    @MainActor
+    func linkLocalAPK(_ apk: URL, to session: Session, prNumber: Int? = nil, open shouldOpen: Bool = false) async -> Build? {
+        let store = self.store
+        let sha = session.head.isEmpty ? nil : session.head
+        let ref = session.branch
+        let dirty = session.dirty
+        let path = session.worktree.path
+        let pr = prNumber ?? session.prNumber
+        let build = await Task.detached(priority: .userInitiated) {
+            guard let b = store.record(apk: apk, source: .file, sha: sha, ref: ref, dirty: dirty, date: Date(), prNumber: pr) else { return nil as Build? }
+            store.note(build: b.key, of: path)
+            return b
+        }.value
+        guard let build else { return nil }
+        if shouldOpen { openWhenBuilt.insert(path) }
+        adopt(build, forWorktree: path)
+        if let pr { pulls.applyLinkedBuild(build, toPR: pr, workspace: session.workspace.path, open: false) }
+        return build
+    }
+
+    /// Links a local `.apk` on disk to any session(s) and/or Review PR row matching `prNumber` (and optional `workspace`).
+    @MainActor
+    func linkLocalAPK(_ apk: URL, toPR prNumber: Int, workspace: URL? = nil, open shouldOpen: Bool = false) async -> (build: Build?, linkedTargets: [String]) {
+        let wsPath = workspace?.resolvingSymlinksInPath().standardizedFileURL.path
+        let matchingSessions = sessions.filter { s in
+            s.prNumber == prNumber && (wsPath == nil || s.workspace.resolvingSymlinksInPath().standardizedFileURL.path == wsPath)
+        }
+        var linked: [String] = []
+        var firstBuild: Build?
+        for s in matchingSessions {
+            if let b = await linkLocalAPK(apk, to: s, prNumber: prNumber, open: shouldOpen && firstBuild == nil) {
+                firstBuild = firstBuild ?? b
+                linked.append(s.title)
+            }
+        }
+        if firstBuild == nil {
+            let store = self.store
+            firstBuild = await Task.detached(priority: .userInitiated) {
+                store.record(apk: apk, source: .file, sha: nil, ref: nil, dirty: false, date: Date(), prNumber: prNumber)
+            }.value
+        }
+        if let b = firstBuild {
+            let prLinked = pulls.applyLinkedBuild(b, toPR: prNumber, workspace: wsPath, open: shouldOpen && linked.isEmpty)
+            if prLinked { linked.append("PR #\(prNumber)") }
+        }
+        return (firstBuild, linked)
     }
 
     /// An APK settled somewhere under a worktree: that session's simulator, if it runs this file, reloads on it
@@ -840,6 +1000,9 @@ final class SessionsController {
         if mainBuilds.adopted(build, worktree: path) { onChange?(); return }
         let waiting = openWhenBuilt.remove(path) != nil   // clicked with no build: it opens now
         buildArrivedForEvidence(path, build)
+        if let pr = build.prNumber, let session = sessions.first(where: { $0.worktree.path == path }) {
+            pulls.applyLinkedBuild(build, toPR: pr, workspace: session.workspace.path, open: false)
+        }
         if waiting, let session = sessions.first(where: { $0.worktree.path == path }), simulator(for: session) == nil {
             activate(session)
         } else if let session = sessions.first(where: { $0.worktree.path == path }), let old = simulator(for: session),

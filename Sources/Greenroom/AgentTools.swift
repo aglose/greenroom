@@ -121,8 +121,13 @@ final class AgentTools {
         ("build", "Build this worktree with a recipe and wait: answers the new build's key and age, or the log's last error lines. "
             + "The session's simulator then reloads on it with its data kept. The remote recipe needs the person's yes in Greenroom "
             + "(an agent cannot give it); ci never starts a workflow from here.",
-         schema(["recipe": ["type": "string", "description": "local, ci, remote or a custom recipe's name (default: the workspace's)"],
+         schema(["recipe": ["type": "string", "description": "local, pr-script, ci, remote or a custom recipe's name (default: the workspace's)"],
                  "timeout_s": ["type": "integer", "description": "how long this call waits, 10-200 s (default 200); the build goes on, and calling build again joins it"]], sim: false)),
+        ("link_apk", "Link a local .apk file on disk to this worktree's session and/or a pull request number (e.g. an APK fetched by a local Artifactory script). "
+            + "Files it in Greenroom's store, updates the session/PR row, and reloads any running simulator (or launches it when open is true).",
+         schema(["apk": ["type": "string", "description": "path to the local .apk file"],
+                 "pr_number": ["type": "integer", "description": "pull request number this APK is for (optional; defaults to this session's PR)"],
+                 "open": ["type": "boolean", "description": "launch the simulator if not already running (default false)"]], required: ["apk"], sim: false)),
         ("changes", "How this session's newest build differs from a base, as screens: + new, ~ changed (why: pixels, routes, texts), - gone, "
             + "> a control that now leads elsewhere, then counts, crashes (new, fixed or still there) and what the walk did not finish. "
             + "When both builds have a stored map the answer comes from history and its first line says so: no walk is started. Otherwise it walks both builds. "
@@ -172,6 +177,7 @@ final class AgentTools {
             switch name {
             case "session": content = text(try sessionTool(connection))
             case "build": content = text(try buildTool(args, connection))
+            case "link_apk": content = text(try linkAPKTool(args, connection))
             case "changes": content = text(try changesTool(args, connection))
             case "history": content = text(try historyTool(args, connection))
             case "launch": content = text(try launch(args, connection))

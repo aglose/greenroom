@@ -686,6 +686,47 @@ enum RecipesCheck {
             _ = git(["update-ref", "refs/remotes/origin/main", mainSha], in: repo)
             CIBehind.maxAge = 20
 
+            // PR APK script (GREENROOM_APK= + GREENROOM_PR=), local scan stop/skip, disable local builds, and direct linking.
+            let prScriptApk = variant("pr-script")
+            let prScriptKey = keyOf(prScriptApk)
+            let prScriptFile = base.appendingPathComponent("fetch-pr-apk.sh")
+            write(prScriptFile, """
+            #!/bin/bash
+            echo "seen pr=${GREENROOM_PR_NUMBER:-none} ref=${GREENROOM_REF:-}"
+            echo "GREENROOM_PR=77"
+            echo "GREENROOM_APK=\(prScriptApk.path)"
+            """, exec: true)
+            setWS {
+                $0.prFetchScript = prScriptFile.path
+                $0.disableLocalBuilds = true
+            }
+            expect(ws().hasPRFetchScript && !ws().recipeNames.contains("local") && ws().recipeNames.contains("pr-script") && ws().refusal(forRecipe: "local") != nil && ws().defaultRecipeName == "pr-script",
+                   "disableLocalBuilds hides and refuses local Gradle builds and defaults to pr-script when configured (\(ws().recipeNames.joined(separator: ",")), default \(ws().defaultRecipeName))")
+            let prJob = await build(row("b"), "pr-script", 60)
+            var prBuild: Build?
+            if case .built(let b)? = prJob?.state { prBuild = b }
+            expect(prBuild?.key == prScriptKey && prBuild?.source == .ci && prBuild?.prNumber == 77,
+                   "pr-script links a local APK via GREENROOM_APK= and tags it with GREENROOM_PR=77 (\(failure(prJob)))")
+            expect(store.build(forPR: 77)?.key == prScriptKey, "SessionStore.build(forPR:) finds the PR-linked build")
+
+            // Direct linkLocalAPK attaches a local APK to a session and PR without scanning or building locally.
+            let directApk = variant("direct-link")
+            let directKey = keyOf(directApk)
+            let linkedBuild = await sessions.linkLocalAPK(directApk, to: row("b")!, prNumber: 88, open: false)
+            expect(linkedBuild?.key == directKey && linkedBuild?.prNumber == 88 && store.build(forPR: 88)?.key == directKey,
+                   "linkLocalAPK records the APK for the session and PR #88")
+
+            // Stopping/skipping local APK search aborts scans immediately and omits local Gradle outputs on refresh.
+            let probeApk = worktree("a").appendingPathComponent("app/build/outputs/apk/debug/app-debug.apk")
+            try? fm.createDirectory(at: probeApk.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.copyItem(at: apk, to: probeApk)
+            expect(SessionStore.newestAPK(in: worktree("a"), shouldCancel: { true }) == nil && SessionStore.newestAPK(in: worktree("a"), shouldCancel: { false }) != nil,
+                   "SessionStore.newestAPK stops immediately when shouldCancel returns true")
+            sessions.stopLocalSearch(for: repo)
+            _ = await wait("skipLocalAPKScan refresh", 20) { ws().skipLocalAPKScan && row("a")?.outputs == nil }
+            expect(ws().skipLocalAPKScan && row("a")?.outputs == nil, "stopLocalSearch sets skipLocalAPKScan and clears local Gradle outputs without deleting linked builds")
+
+            setWS { $0.prFetchScript = ""; $0.disableLocalBuilds = false; $0.skipLocalAPKScan = false }
             LoginEnvironment.override = nil
             setWS { $0.remote.consent = nil }
             finish()

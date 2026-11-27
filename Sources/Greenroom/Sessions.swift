@@ -45,6 +45,13 @@ struct Workspace: Codable, Equatable {
     /// are compared with, is one walked signed in, since only that reaches every screen. With this on a walk that
     /// was not signed in counts too (an app with no sign-in, or one whose owner wants only that part walked).
     var unsignedBaseline = false
+    /// Path to a user-owned local executable script that retrieves or links a PR APK (e.g. from Artifactory).
+    /// Greenroom never connects to Artifactory directly; only this local script runs, with the user's own tools.
+    var prFetchScript = ""
+    /// Skip scanning local `build/outputs/apk` folders and watching worktree `.apk` outputs for this repository.
+    var skipLocalAPKScan = false
+    /// Never run the built-in `local` Gradle build recipe (including MainBuilds local fallback) for this repository.
+    var disableLocalBuilds = false
 
     static let unsignedExplanation = "The map of the base branch is walked signed in, so it has every screen, and walks that are not signed in are left out of pull request diffs. Turn this on for an app with no sign-in, or to compare only what is reachable without one."
     static let shareExplanation = "Stores each walk's map in this repository under refs/greenroom/maps and pushes it to origin, so teammates see a pull request's map without walking it. Captures of the app's screens are uploaded to your git remote."
@@ -53,7 +60,7 @@ struct Workspace: Codable, Equatable {
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain, unsignedBaseline }
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain, unsignedBaseline, prFetchScript, skipLocalAPKScan, disableLocalBuilds }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -75,6 +82,9 @@ struct Workspace: Codable, Equatable {
         shareSignedInMaps = (try? c.decodeIfPresent(Bool.self, forKey: .shareSignedInMaps)) ?? shareSignedInMaps
         keepMain = (try? c.decodeIfPresent(Bool.self, forKey: .keepMain)) ?? keepMain
         unsignedBaseline = (try? c.decodeIfPresent(Bool.self, forKey: .unsignedBaseline)) ?? unsignedBaseline
+        prFetchScript = (try? c.decodeIfPresent(String.self, forKey: .prFetchScript)) ?? prFetchScript
+        skipLocalAPKScan = (try? c.decodeIfPresent(Bool.self, forKey: .skipLocalAPKScan)) ?? skipLocalAPKScan
+        disableLocalBuilds = (try? c.decodeIfPresent(Bool.self, forKey: .disableLocalBuilds)) ?? disableLocalBuilds
     }
 }
 
@@ -140,6 +150,19 @@ struct Session {
         (claude?.prs ?? []).filter { pr in pr.branch == nil || branch == nil || pr.branch == branch }
     }
     var hasOpenPR: Bool { (githubPR?.isOpen ?? false) || pullRequests.contains { $0.state == .open } }
+    /// The primary pull request number associated with this session's branch, if any.
+    var prNumber: Int? {
+        if let n = githubPR?.number { return n }
+        if let n = pullRequests.first(where: { $0.state == .open })?.number ?? pullRequests.first?.number { return n }
+        if let pr = claude?.pullRequest, let n = Int(pr.lastPathComponent) { return n }
+        return nil
+    }
+    var prTitle: String? { githubPR?.title }
+    var prURL: URL? { githubPR?.url ?? pullRequests.first(where: { $0.state == .open })?.url ?? pullRequests.first?.url ?? claude?.pullRequest }
+    var prState: String? {
+        if let pr = githubPR { return pr.isDraft ? "DRAFT" : pr.state.uppercased() }
+        return pullRequests.first(where: { $0.state == .open })?.state?.rawValue ?? pullRequests.first?.state?.rawValue
+    }
     /// Every pull request known is closed and one of them merged: the work is in.
     var prMerged: Bool {
         if let pr = githubPR { return pr.isMerged }
@@ -167,10 +190,23 @@ struct Build: Codable, Equatable {
     let ref: String?
     let dirty: Bool
     let date: Date
+    /// Pull request number this build was fetched or linked for, when known.
+    let prNumber: Int?
+
+    init(key: String, apk: URL, source: Source, sha: String?, ref: String?, dirty: Bool, date: Date, prNumber: Int? = nil) {
+        self.key = key
+        self.apk = apk
+        self.source = source
+        self.sha = sha
+        self.ref = ref
+        self.dirty = dirty
+        self.date = date
+        self.prNumber = prNumber
+    }
 }
 
 extension Build {
-    private enum Keys: String, CodingKey { case key, apk, source, sha, ref, dirty, date }
+    private enum Keys: String, CodingKey { case key, apk, source, sha, ref, dirty, date, prNumber }
 
     /// Tolerant like `Workspace`: a later workstream's new field does not make an older build.json unreadable.
     init(from decoder: Decoder) throws {
@@ -179,6 +215,7 @@ extension Build {
                   source: (try? c.decodeIfPresent(Source.self, forKey: .source)) ?? .file,
                   sha: try? c.decodeIfPresent(String.self, forKey: .sha), ref: try? c.decodeIfPresent(String.self, forKey: .ref),
                   dirty: (try? c.decodeIfPresent(Bool.self, forKey: .dirty)) ?? false,
-                  date: (try? c.decodeIfPresent(Date.self, forKey: .date)) ?? Date(timeIntervalSince1970: 0))
+                  date: (try? c.decodeIfPresent(Date.self, forKey: .date)) ?? Date(timeIntervalSince1970: 0),
+                  prNumber: try? c.decodeIfPresent(Int.self, forKey: .prNumber))
     }
 }

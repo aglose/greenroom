@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import UniformTypeIdentifiers
 
 // Pull requests without a worktree, as rows in a "Review" section (docs/SESSIONS-PLAN.md, "2. Builds"): added by
 // number or address, their build fetched by the `ci` recipe, opened in a simulator with a data slot of their own,
@@ -169,7 +170,7 @@ final class PullRows {
         let store = self.store, known = sessions?.sessions ?? []
         Task { @MainActor in
             await Self.fetchHead(of: p, in: ws.root)
-            let result = await Bases.resolve(sha: p.headSha, ref: p.headRef, in: ws, sessions: known, store: store, pullRequest: true, slug: p.slug.isEmpty ? nil : p.slug) { [weak self] line in
+            let result = await Bases.resolve(sha: p.headSha, ref: p.headRef, in: ws, sessions: known, store: store, pullRequest: true, slug: p.slug.isEmpty ? nil : p.slug, prNumber: p.number, prTitle: p.title) { [weak self] line in
                 guard let self, case .fetching = self.states[p.id] ?? .idle, !line.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                 self.states[p.id] = .fetching(line)
                 self.change()
@@ -241,6 +242,64 @@ final class PullRows {
         let sim = wb.open(b.apk, remember: false, options: ["--data-slots", s] + extra)
         sim?.displayLabel = "#\(p.number) \(p.headRef.isEmpty ? p.title : p.headRef) · \(String(p.headSha.prefix(7)))"
         wb.refreshCaptions()
+    }
+
+    /// Links a local APK on disk directly to `pull` (without running CI or local Gradle), filing it in the store and
+    /// reloading or opening the pull request's simulator.
+    @MainActor
+    func linkLocalAPK(_ apk: URL, to p: PullRequest, open shouldOpen: Bool = false) async -> Build? {
+        let store = self.store
+        let build = await Task.detached(priority: .userInitiated) {
+            store.record(apk: apk, source: .file, sha: p.headSha.isEmpty ? nil : p.headSha, ref: p.headRef.isEmpty ? nil : p.headRef, dirty: false, date: Date(), prNumber: p.number)
+        }.value
+        guard let build else { return nil }
+        applyLinkedBuild(build, toPR: p.number, workspace: p.workspace, open: shouldOpen)
+        return build
+    }
+
+    /// Associates a filed build with any Review pull request matching `prNumber` (and optionally `workspace`).
+    @discardableResult
+    func applyLinkedBuild(_ build: Build, toPR prNumber: Int, workspace: String? = nil, open shouldOpen: Bool = false) -> Bool {
+        _ = all
+        var matched = false
+        for i in items.indices where items[i].number == prNumber && (workspace == nil || items[i].workspace == workspace) {
+            items[i].buildKey = build.key
+            states[items[i].id] = .idle
+            matched = true
+            let p = items[i]
+            sessions?.evidence.buildArrived(worktree: "pr:" + p.id, build: build, auto: sessions?.workspaces.first { $0.root.path == p.workspace }?.auto ?? .onBuild)
+            if let sim = simulator(of: p), sim.apk.resolvingSymlinksInPath().path != build.apk.resolvingSymlinksInPath().path {
+                DevHooks.shared.relaunch(sim, apk: build.apk, options: sim.options)
+            } else if shouldOpen {
+                open(p)
+            }
+        }
+        if matched {
+            save()
+            change()
+        }
+        return matched
+    }
+
+    /// Opens a file chooser to link a local `.apk` file to pull request `p`.
+    func chooseLocalAPK(for p: PullRequest) {
+        guard let window = sessions?.workbench?.window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.init(filenameExtension: "apk") ?? .data]
+        panel.message = "Choose a local APK to link to PR #\(p.number) (\(p.title))"
+        panel.prompt = "Link APK"
+        panel.beginSheetModal(for: window) { [weak self] r in
+            guard let self, r == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                if await self.linkLocalAPK(url, to: p, open: true) != nil {
+                    self.sessions?.workbench?.toast.show("Linked \(url.lastPathComponent) to PR #\(p.number)")
+                } else {
+                    self.sessions?.workbench?.toast.show("Could not link \(url.lastPathComponent)", problem: true)
+                }
+            }
+        }
     }
 
     func remove(_ p: PullRequest) {
@@ -335,6 +394,7 @@ extension SessionsController {
 
     func pullMenuItems(for row: PullRow) -> [NSMenuItem] {
         [ClosureMenuItem("Open #\(row.pull.number)") { [weak self] in self?.pulls.open(row.pull) },
+         ClosureMenuItem("Link Local APK to #\(row.pull.number)…") { [weak self] in self?.pulls.chooseLocalAPK(for: row.pull) },
          ClosureMenuItem("Look for a Newer Head") { [weak self] in self?.pulls.refresh(row.pull) },
          ClosureMenuItem("Remove Pull Request") { [weak self] in self?.pulls.remove(row.pull) }]
     }
