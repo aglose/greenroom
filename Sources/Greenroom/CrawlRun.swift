@@ -179,6 +179,31 @@ final class CrawlRun {
         let gb = Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824)
         return max(2, min(6, cores - 2, gb / 3))
     }()
+
+    /// Simulators a walk is given when it starts, out of the `requested` ones: `parallel` is sized for a Mac with
+    /// nothing else on it. With a simulator the person is using open, a walk takes half; the rest is split with the
+    /// walks already running on this Mac (this app's, or another Greenroom's walking the same build), so the open
+    /// simulator keeps a core. Two six-device walks beside an open simulator froze its window (load 31 on 12 cores).
+    static func share(requested: Int, openSimulators: Int, otherWalks: Int, parallel: Int = CrawlRun.parallel) -> Int {
+        var budget = parallel
+        if openSimulators > 0 { budget /= 2 }
+        budget /= max(0, otherWalks) + 1
+        return max(1, min(max(1, requested), budget))
+    }
+
+    /// Walks running on this Mac now, from any Greenroom: `crawl.py` processes writing a map (`--help` runs are not).
+    static func runningWalks() -> Int {
+        let p = Process(), out = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-f", "scripts/crawl\\.py .* --out "]
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return 0 }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        return text.split(separator: "\n").count
+    }
     struct Settings {
         /// Taps deep; 0 walks the whole app, which is what a history of the app needs.
         var depth = 0
@@ -362,6 +387,16 @@ final class CrawlRun {
 
     func start() {
         _ = CrawlRun.quitObserver
+        // The device count is settled now, not when the walk was queued: what else runs on the Mac is known only here.
+        if var a = process.arguments, let i = a.firstIndex(of: "-j"), i + 1 < a.count, let asked = Int(a[i + 1]) {
+            let open = Engine.shared.simulators.filter { $0.isProcessRunning }.count, others = CrawlRun.runningWalks()
+            let given = CrawlRun.share(requested: asked, openSimulators: open, otherWalks: others)
+            if given != asked {
+                a[i + 1] = String(given)
+                process.arguments = a
+                NSLog("Greenroom: walking on \(given) devices, not \(asked): \(open) simulator(s) open, \(others) other walk(s) running")
+            }
+        }
         let outPipe = Pipe(), errPipe = Pipe()
         process.executableURL = python
         var env = ProcessInfo.processInfo.environment
