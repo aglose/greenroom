@@ -349,12 +349,38 @@ extension SessionsController {
 
     func pullCell(_ row: PullRow) -> NSView {
         let running = row.simulator?.state == .running
-        let icon = NSImageView(image: NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil) ?? NSImage())
-        icon.contentTintColor = running ? .systemGreen : .secondaryLabelColor
+        let icon = NSImageView(image: NSImage(systemSymbolName: running ? "circle.fill" : "arrow.triangle.pull", accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = running ? Design.accent : .secondaryLabelColor
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: running ? 8.5 : 10, weight: .medium)
         icon.setContentHuggingPriority(.required, for: .horizontal)
-        let name = NSTextField(labelWithString: "#\(row.pull.number) \(row.pull.title)")
-        name.font = .systemFont(ofSize: 13)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let numLabel = NSTextField(labelWithString: "#\(row.pull.number)")
+        numLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .semibold)
+        numLabel.textColor = Design.accent
+        numLabel.setContentHuggingPriority(.required, for: .horizontal)
+        numLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        numLabel.translatesAutoresizingMaskIntoConstraints = false
+        let numPill = NSView()
+        numPill.wantsLayer = true
+        numPill.layer?.cornerRadius = 4.5
+        numPill.layer?.backgroundColor = Design.accent.withAlphaComponent(0.14).cgColor
+        numPill.addSubview(numLabel)
+        NSLayoutConstraint.activate([
+            numLabel.topAnchor.constraint(equalTo: numPill.topAnchor, constant: 1.5),
+            numLabel.bottomAnchor.constraint(equalTo: numPill.bottomAnchor, constant: -1.5),
+            numLabel.leadingAnchor.constraint(equalTo: numPill.leadingAnchor, constant: 5),
+            numLabel.trailingAnchor.constraint(equalTo: numPill.trailingAnchor, constant: -5),
+        ])
+
+        let name = NSTextField(labelWithString: row.pull.title.isEmpty ? row.pull.headRef : row.pull.title)
+        name.font = .systemFont(ofSize: 12.5, weight: .medium)
+        name.textColor = Design.ink
+        name.maximumNumberOfLines = 1
         name.lineBreakMode = .byTruncatingTail
+        name.cell?.usesSingleLineMode = true
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         var detail: String
         var color: NSColor = .secondaryLabelColor
         var views: [NSView] = []
@@ -371,25 +397,66 @@ extension SessionsController {
             detail = why
             color = .systemOrange
         case .idle:
-            if row.build != nil { detail = "\(String(row.pull.headSha.prefix(7))) · CI build" }
-            else { detail = String(row.pull.headSha.prefix(7)) + " · no build yet" }
-            if row.repo != workspaces.first?.root.lastPathComponent || workspaces.count > 1 { detail = row.repo + " · " + detail }
+            var bits: [String] = []
+            if !row.pull.headRef.isEmpty { bits.append(row.pull.headRef) }
+            bits.append(String(row.pull.headSha.prefix(7)))
+            bits.append(row.build != nil ? "CI build" : "no build yet")
+            if row.repo != workspaces.first?.root.lastPathComponent || workspaces.count > 1 { bits.insert(row.repo, at: 0) }
+            detail = bits.joined(separator: " · ")
         }
         if case .fetching = row.state {} else {
             views.append(ClosureButton(symbol: "arrow.clockwise", tip: "Look on GitHub for a newer head and fetch its build") { [weak self] in self?.pulls.refresh(row.pull) })
         }
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let headerRow = NSStackView(views: [icon, numPill, name, headerSpacer] + views)
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 5
+
         let sub = NSTextField(labelWithString: detail)
-        sub.font = .systemFont(ofSize: 10)
+        sub.font = .systemFont(ofSize: 10.5)
         sub.textColor = color
+        sub.alignment = .left
+        sub.maximumNumberOfLines = 1
         sub.lineBreakMode = .byTruncatingTail
+        sub.cell?.usesSingleLineMode = true
         sub.toolTip = detail
-        let text = NSStackView(views: [name, sub])
-        text.orientation = .vertical; text.alignment = .leading; text.spacing = 0
-        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [icon, text] + views)
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
-        return stack
+
+        let cardStack = NSStackView(views: [headerRow, sub])
+        cardStack.orientation = .vertical
+        cardStack.alignment = .leading
+        cardStack.spacing = 3
+        cardStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 8.5
+        card.layer?.cornerCurve = .continuous
+        card.layer?.backgroundColor = NSColor(white: 1, alpha: 0.032).cgColor
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = NSColor(white: 1, alpha: 0.068).cgColor
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(cardStack)
+        NSLayoutConstraint.activate([
+            cardStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 6),
+            cardStack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -6),
+            cardStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+            cardStack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+            headerRow.widthAnchor.constraint(equalTo: cardStack.widthAnchor),
+            sub.widthAnchor.constraint(equalTo: cardStack.widthAnchor),
+        ])
+
+        let wrapper = NSView()
+        wrapper.toolTip = "#\(row.pull.number) \(row.pull.title)\n\(detail)"
+        wrapper.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 3),
+            card.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -3),
+            card.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: 1),
+            card.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor, constant: -1),
+        ])
+        return wrapper
     }
 
     func pullMenuItems(for row: PullRow) -> [NSMenuItem] {

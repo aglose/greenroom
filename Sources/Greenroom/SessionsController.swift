@@ -108,11 +108,12 @@ final class SessionsController {
         refresh()
     }
 
-    /// Hands every row its Claude session (or takes it away) without asking git again. Says nothing when no row's
-    /// session changed in a way the row shows.
+    /// Hands every row its Claude/T3 sessions (or takes them away) without asking git again. Says nothing when no row's
+    /// sessions changed in a way the row shows.
     func applyClaude() {
         let next = attachPulls(ClaudeSessions.shared.attach(sessions))
-        let changed = next.map { $0.claude?.shown } != sessions.map { $0.claude?.shown }
+        let changed = next.map { $0.agentSessions.map(\.shown) } != sessions.map { $0.agentSessions.map(\.shown) }
+            || next.map { $0.claude?.shown } != sessions.map { $0.claude?.shown }
         sessions = next
         if autoArchive() || changed { onChange?() }
     }
@@ -441,10 +442,17 @@ final class SessionsController {
         let archived = Set(self.workspace(at: workspace)?.archived ?? [])
         func item(_ s: Session) -> NSMenuItem {
             var bits: [String] = []
-            if let n = s.pullRequests.first(where: { $0.state == .open })?.number { bits.append("#\(n) open") }
-            else if let n = s.pullRequests.first?.number { bits.append("#\(n)") }
-            if s.claude?.status == .working && s.claude?.running == true { bits.append("Claude working") }
-            else if s.claude?.status == .waiting { bits.append("waiting for you") }
+            if let pr = s.githubPR {
+                bits.append("#\(pr.number) \(pr.statusBadge.lowercased())")
+            } else if let n = s.pullRequests.first(where: { $0.state == .open })?.number {
+                bits.append("#\(n) open")
+            } else if let n = s.pullRequests.first?.number {
+                bits.append("#\(n)")
+            }
+            if let agent = s.displayAgent ?? s.claude {
+                if agent.status == .waiting { bits.append("\(agent.sourceName) waiting for you") }
+                else if agent.status == .working && agent.running { bits.append("\(agent.sourceName) working") }
+            }
             if self.newestAPK(for: s) == nil { bits.append("no build: click it to build") }
             let i = ClosureMenuItem(s.title + (bits.isEmpty ? "" : "  ·  " + bits.joined(separator: " · "))) { [weak self] in self?.show(s) }
             i.toolTip = (s.worktree.path as NSString).abbreviatingWithTildeInPath
@@ -1139,28 +1147,172 @@ final class SessionsController {
 
     // MARK: Row view
 
-    /// The second line of a row: what tells it apart (its pull request and draft/state), branch, then build age.
-    private func detail(for s: Session) -> (text: String, color: NSColor?) {
-        var bits: [String] = []
-        if let pr = s.githubPR {
-            let stateWord = pr.isDraft ? "Draft" : (pr.isMerged ? "Merged" : (pr.isClosed ? "Closed" : "Open"))
-            if s.claude?.title != nil {
-                bits.append("#\(pr.number) \(stateWord)")
-            } else {
-                bits.append(stateWord)
-                if let b = s.branch { bits.append(b) }
-            }
-        } else if let pr = s.pullRequests.first(where: { $0.state == .open }) ?? s.pullRequests.first, let n = pr.number {
-            bits.append("#\(n)" + (pr.state == .merged ? " merged" : pr.state == .closed ? " closed" : ""))
-        } else if let pr = s.claude?.pullRequest, let n = Int(pr.lastPathComponent) { bits.append("#\(n)") }
-        if let built = s.builtAt { bits.append(Self.age(built) + (s.isStale ? ", stale" : "")) } else { bits.append("not built") }
-        if s.dirty { bits.append("edited") }
-        if workspace(of: s)?.defaultRecipeName == "ci", let behind = CIBehind.note(for: s, store: store, then: { [weak self] in self?.onChange?() }) { bits.append(behind) }
-        return (bits.joined(separator: " · "), nil)
+    /// Structured display model for a session row, shared by `rowHeight(for:)`, `rowKey(for:)`, and `cell(for:)`
+    /// so layout heights and change detection stay strictly in sync.
+    private struct RowPresentation {
+        let isSelected: Bool
+        let prNumber: Int?
+        let prBadge: String?
+        let prBadgeColor: NSColor
+        let prTitle: String?
+        let prAdditions: Int?
+        let prDeletions: Int?
+        let prTwoLineTitle: Bool
+        /// Whether the branch / build line shows. A card that is not selected drops it when its agent line
+        /// already says what the session is doing, unless a build has something to report.
+        let showMeta: Bool
+        let branchLabel: String
+        let buildDetail: String?
+        let buildColor: NSColor?
+        let metadataParts: [(text: String, color: NSColor)]
+        let metadataKey: String
+        let agent: ClaudeSession?
+        let extraActiveAgents: Int
+        let agentTitle: String?
+        let agentSnippet: String?
+        let showOpenPRButton: Bool
     }
 
-    func rowHeight(for s: Session) -> CGFloat {
-        (s.simulator != nil && s.simulator === workbench?.selected) ? 74 : 42
+    private func presentation(for s: Session) -> RowPresentation {
+        let isSelected = (s.simulator != nil && s.simulator === workbench?.selected)
+        let build = buildAccessories(for: s)
+
+        // 1. Pull request details (prefer GitHub PR metadata; fall back to open/feature Claude PR).
+        let prNumber: Int?
+        let prBadge: String?
+        let prBadgeColor: NSColor
+        let prTitle: String?
+        if let pr = s.githubPR {
+            prNumber = pr.number
+            prBadge = pr.statusBadge
+            if pr.isDraft { prBadgeColor = Design.mute }
+            else if pr.isMerged { prBadgeColor = NSColor(srgbRed: 0.72, green: 0.56, blue: 1.0, alpha: 1) }
+            else if pr.isClosed { prBadgeColor = Design.record }
+            else if pr.reviewDecision?.uppercased() == "CHANGES_REQUESTED" { prBadgeColor = Design.warning }
+            else { prBadgeColor = Design.accent }
+            prTitle = pr.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : pr.title
+        } else if let pr = s.fallbackPR, let n = pr.number {
+            prNumber = n
+            switch pr.state {
+            case .open?: prBadge = "Open"; prBadgeColor = Design.accent
+            case .merged?: prBadge = "Merged"; prBadgeColor = NSColor(srgbRed: 0.72, green: 0.56, blue: 1.0, alpha: 1)
+            case .closed?: prBadge = "Closed"; prBadgeColor = Design.record
+            case nil: prBadge = nil; prBadgeColor = Design.mute
+            }
+            prTitle = nil
+        } else {
+            prNumber = nil
+            prBadge = nil
+            prBadgeColor = Design.mute
+            prTitle = nil
+        }
+
+        // 2. Branch & build metadata line (only highlight "stale" in amber; keep other parts calm).
+        let branchLabel = s.branch ?? (s.shortHead.isEmpty ? s.worktree.lastPathComponent : "(detached \(s.shortHead))")
+        var parts: [(String, NSColor)] = []
+        if prNumber != nil {
+            parts.append((branchLabel, .secondaryLabelColor))
+        } else if !s.shortHead.isEmpty {
+            parts.append((s.shortHead, .secondaryLabelColor))
+        }
+        if let built = s.builtAt {
+            parts.append((Self.age(built), .secondaryLabelColor))
+            if s.isStale { parts.append(("stale", Design.warning)) }
+        } else {
+            parts.append(("not built", .secondaryLabelColor))
+        }
+        if s.dirty { parts.append(("edited", .secondaryLabelColor)) }
+        if workspace(of: s)?.defaultRecipeName == "ci",
+           let behind = CIBehind.note(for: s, store: store, then: { [weak self] in self?.onChange?() }) {
+            parts.append((behind, .secondaryLabelColor))
+        }
+        let metadataKey = build.detail ?? parts.map(\.0).joined(separator: " · ")
+
+        // 3. T3 Code / Claude Code agent card details.
+        let agent = s.displayAgent
+        let activeCount = s.activeAgentSessions.count
+        let agentIsActive = agent != nil && s.activeAgentSessions.contains(where: {
+            $0.id == agent?.id && $0.title == agent?.title && $0.source == agent?.source
+        })
+        let extraActive = max(0, activeCount - (agentIsActive ? 1 : 0))
+        let agentTitle: String? = {
+            guard let a = agent else { return nil }
+            if let t = a.title, !t.isEmpty { return t }
+            if let sum = a.summary, !sum.isEmpty { return sum }
+            return a.status == .waiting ? "Waiting for your response" : (a.running ? "Active \(a.sourceName) session" : "\(a.sourceName) session")
+        }()
+        let agentSnippet: String? = {
+            guard let a = agent, let sum = a.summary, !sum.isEmpty else { return nil }
+            if let t = agentTitle, t.caseInsensitiveCompare(sum) == .orderedSame { return nil }
+            guard a.running || a.status == .waiting || isSelected else { return nil }
+            return sum
+        }()
+        let prTwoLineTitle = isSelected && (prTitle?.count ?? 0) > 38
+
+        return RowPresentation(
+            isSelected: isSelected,
+            prNumber: prNumber,
+            prBadge: prBadge,
+            prBadgeColor: prBadgeColor,
+            prTitle: prTitle,
+            prAdditions: s.githubPR?.additions,
+            prDeletions: s.githubPR?.deletions,
+            prTwoLineTitle: prTwoLineTitle,
+            showMeta: isSelected || agent == nil || build.detail != nil,
+            branchLabel: branchLabel,
+            buildDetail: build.detail,
+            buildColor: build.color,
+            metadataParts: parts,
+            metadataKey: metadataKey,
+            agent: agent,
+            extraActiveAgents: extraActive,
+            agentTitle: agentTitle,
+            agentSnippet: agentSnippet,
+            showOpenPRButton: s.prURL != nil
+        )
+    }
+
+    /// Exact vertical geometry matching `cell(for:)` so card borders hug content evenly with zero dead space.
+    /// Measured card heights by row key and width; a row rebuilt with the same key keeps its height.
+    private var measuredHeights: [String: CGFloat] = [:]
+
+    /// The height the card actually lays out to at this width, so the row always fits it exactly.
+    func rowHeight(for s: Session, width: CGFloat) -> CGFloat {
+        guard width > 0 else { return estimatedRowHeight(for: s) }
+        let key = rowKey(for: s) + "\u{1f}\(Int(width))"
+        if let h = measuredHeights[key] { return h }
+        let view = cell(for: s)
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.widthAnchor.constraint(equalToConstant: width).isActive = true
+        view.layoutSubtreeIfNeeded()
+        let h = max(ceil(view.fittingSize.height), estimatedRowHeight(for: s))
+        if measuredHeights.count > 400 { measuredHeights.removeAll() }
+        measuredHeights[key] = h
+        return h
+    }
+
+    private func estimatedRowHeight(for s: Session) -> CGFloat {
+        let p = presentation(for: s)
+        var h: CGFloat = 6                         // outer wrapper top(3) + bottom(3) card gap
+        h += 14                                    // card inner padding top(7) + bottom(7)
+        h += 17                                    // header row (explicit 17pt)
+        if p.prTitle != nil {
+            h += 4 + (p.prTwoLineTitle ? 32 : 16)  // spacing(4) + 1- or 2-line PR title
+        }
+        if p.showMeta { h += 4 + 14 }              // spacing(4) + metadata row (explicit 14pt)
+        if p.agent != nil, !p.isSelected {
+            h += 4 + 14                            // spacing(4) + one-line agent summary (explicit 14pt)
+        } else if p.agent != nil {
+            h += 6                                 // custom spacing before agent box
+            h += 12                                // agent box padding top(6) + bottom(6)
+            h += 16                                // agent header row (explicit 16pt)
+            if p.agentTitle != nil { h += 3 + 15 } // spacing(3) + agent title (15pt)
+            if p.agentSnippet != nil { h += 2 + 14 } // spacing(2) + snippet (14pt)
+        }
+        if p.isSelected {
+            h += 7 + 25                            // custom spacing(7) + action buttons(25pt)
+        }
+        return h
     }
 
     private func shortcutIndex(for s: Session) -> Int? {
@@ -1170,154 +1322,653 @@ final class SessionsController {
 
     /// Everything a session's row shows, as one string: the sidebar rebuilds a row only when this changed.
     func rowKey(for s: Session) -> String {
+        let p = presentation(for: s)
         let job = buildQueue.job(for: s)
         let jobKey = job.map { "\($0.id)|\($0.state == .queued)|\($0.isActive)|\($0.lastLine ?? "")|\($0.failure ?? "")" } ?? "-"
         let sim = s.simulator.map { $0.state == .running ? "run" : "on" } ?? "off"
-        let c = s.claude.map { "\($0.status)|\($0.running)|\($0.archived)" } ?? "-"
-        let isSelected = (s.simulator != nil && s.simulator === workbench?.selected) ? "sel" : ""
+        let agentKey = p.agent.map {
+            "\($0.source.rawValue)|\($0.status.rawValue)|\($0.rawStatus ?? "")|\($0.running)|\($0.archived)|\($0.settled)|\($0.title ?? "")|\($0.summary ?? "")|\($0.model ?? "")"
+        } ?? "-"
+        let prKey = "\(p.prNumber ?? 0)|\(p.prBadge ?? "")|\(p.prTitle ?? "")|\(p.prAdditions ?? -1)|\(p.prDeletions ?? -1)"
         let shortcut = shortcutIndex(for: s).map(String.init) ?? ""
-        return [s.title, detail(for: s).text, sim, c, jobKey, evidence.badgeKey(for: s), workspace(of: s)?.defaultRecipeName ?? "", isSelected, shortcut].joined(separator: "\u{1f}")
+        return [
+            p.branchLabel, p.metadataKey, prKey, sim, agentKey, "\(p.extraActiveAgents)", "\(s.ahead)",
+            jobKey, evidence.badgeKey(for: s), workspace(of: s)?.defaultRecipeName ?? "",
+            p.isSelected ? "sel" : "", p.showMeta ? "meta" : "", shortcut
+        ].joined(separator: "\u{1f}")
+    }
+
+    private static func makePill(_ text: String, textColor: NSColor, fill: NSColor, border: NSColor? = nil, font: NSFont = .systemFont(ofSize: 10, weight: .semibold)) -> NSView {
+        let label = NSTextField(labelWithString: text)
+        label.font = font
+        label.textColor = textColor
+        label.maximumNumberOfLines = 1
+        label.cell?.usesSingleLineMode = true
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let pill = NSView()
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 4.5
+        pill.layer?.cornerCurve = .continuous
+        pill.layer?.backgroundColor = fill.cgColor
+        if let border {
+            pill.layer?.borderWidth = 0.75
+            pill.layer?.borderColor = border.cgColor
+        }
+        pill.addSubview(label)
+        pill.setContentHuggingPriority(.required, for: .horizontal)
+        pill.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: pill.topAnchor, constant: 1.5),
+            label.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -1.5),
+            label.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -5),
+        ])
+        return pill
+    }
+
+    private static func agentStatusStyle(for agent: ClaudeSession) -> (text: String, symbol: String, color: NSColor, border: NSColor, fill: NSColor) {
+        let agentPurple = NSColor(srgbRed: 0.616, green: 0.569, blue: 1.0, alpha: 1)
+        if agent.status == .waiting {
+            return ("Waiting for you", "exclamationmark.circle.fill", Design.warning,
+                    Design.warning.withAlphaComponent(0.35), Design.warning.withAlphaComponent(0.08))
+        }
+        if agent.running && agent.status == .working {
+            return ("Working", "sparkles", agentPurple,
+                    agentPurple.withAlphaComponent(0.32), agentPurple.withAlphaComponent(0.08))
+        }
+        if agent.rawStatus == "failed" {
+            return ("Failed", "xmark.circle.fill", Design.record,
+                    Design.record.withAlphaComponent(0.30), Design.record.withAlphaComponent(0.07))
+        }
+        if agent.rawStatus == "interrupted" {
+            return ("Interrupted", "pause.circle.fill", Design.warning,
+                    Design.warning.withAlphaComponent(0.28), Design.warning.withAlphaComponent(0.06))
+        }
+        if agent.running {
+            return ("Idle", "circle.fill", Design.mute,
+                    Design.stroke, NSColor(white: 0, alpha: 0.20))
+        }
+        let doneLabel = agent.settled ? "Settled" : (agent.rawStatus == "completed" ? "Done" : "Idle")
+        return (doneLabel, "checkmark.circle", Design.mute.withAlphaComponent(0.85),
+                Design.stroke, NSColor(white: 0, alpha: 0.18))
+    }
+
+    private func openAgent(_ agent: ClaudeSession, in worktree: URL) {
+        if agent.source == .t3 {
+            T3Sessions.open(worktree) { [weak self] why in
+                if let why {
+                    if let link = agent.link { NSWorkspace.shared.open(link) }
+                    else { self?.workbench?.toast.show(why, problem: true) }
+                }
+            }
+        } else {
+            if !ClaudeSessions.openInClaude(agent) {
+                workbench?.toast.show("Claude is not installed on this Mac", problem: true)
+            }
+        }
+    }
+
+    /// An attributed label ignores the field's own line break mode, so the ellipsis has to be in the text's paragraph style.
+    private static func truncateTail(_ text: NSMutableAttributedString) {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        text.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: text.length))
+    }
+
+    /// The agent on a card that is not selected: one line (source, status, what it is working on) instead of the box.
+    private func buildAgentLine(presentation p: RowPresentation) -> NSView? {
+        guard let agent = p.agent else { return nil }
+        let style = Self.agentStatusStyle(for: agent)
+        let active = agent.running || agent.status == .waiting
+
+        let icon = NSImageView(image: NSImage(systemSymbolName: style.symbol, accessibilityDescription: style.text) ?? NSImage())
+        icon.contentTintColor = style.color
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8.5, weight: .semibold)
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
+        let text = NSMutableAttributedString(
+            string: "\(agent.sourceName) · \(style.text)" + (p.extraActiveAgents > 0 ? " +\(p.extraActiveAgents)" : ""),
+            attributes: [.font: NSFont.systemFont(ofSize: 10.5, weight: .medium), .foregroundColor: style.color]
+        )
+        if let title = p.agentTitle {
+            text.append(NSAttributedString(string: "  " + title, attributes: [
+                .font: font, .foregroundColor: active ? Design.ink.withAlphaComponent(0.85) : NSColor.secondaryLabelColor,
+            ]))
+        }
+        Self.truncateTail(text)
+        let label = NSTextField(labelWithAttributedString: text)
+        label.maximumNumberOfLines = 1
+        label.lineBreakMode = .byTruncatingTail
+        label.cell?.usesSingleLineMode = true
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let line = NSStackView(views: [icon, label])
+        line.orientation = .horizontal
+        line.alignment = .centerY
+        line.spacing = 4
+        line.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        return line
+    }
+
+    private func buildAgentCard(for s: Session, presentation p: RowPresentation) -> NSView? {
+        guard let agent = p.agent else { return nil }
+        let style = Self.agentStatusStyle(for: agent)
+
+        let sourcePill = Self.makePill(
+            agent.sourceName,
+            textColor: style.color,
+            fill: style.color.withAlphaComponent(0.14),
+            border: style.color.withAlphaComponent(0.26),
+            font: .systemFont(ofSize: 9.5, weight: .semibold)
+        )
+
+        let statusIcon = NSImageView(image: NSImage(systemSymbolName: style.symbol, accessibilityDescription: style.text) ?? NSImage())
+        statusIcon.contentTintColor = style.color
+        statusIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        statusIcon.setContentHuggingPriority(.required, for: .horizontal)
+        statusIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let statusLabel = NSTextField(labelWithString: style.text)
+        statusLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        statusLabel.textColor = style.color
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.cell?.usesSingleLineMode = true
+        statusLabel.setContentHuggingPriority(.required, for: .horizontal)
+        statusLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        var headerViews: [NSView] = [sourcePill, statusIcon, statusLabel]
+        if p.extraActiveAgents > 0 {
+            let moreBtn = ClosureButton(title: "+\(p.extraActiveAgents) ▾", tip: "View all active sessions in this worktree") {}
+            moreBtn.font = .systemFont(ofSize: 9.5, weight: .semibold)
+            moreBtn.contentTintColor = Design.ink.withAlphaComponent(0.88)
+            moreBtn.wantsLayer = true
+            moreBtn.layer?.cornerRadius = 4.5
+            moreBtn.layer?.backgroundColor = NSColor(white: 1, alpha: 0.09).cgColor
+            moreBtn.setContentHuggingPriority(.required, for: .horizontal)
+            moreBtn.setContentCompressionResistancePriority(.required, for: .horizontal)
+            moreBtn.handler = { [weak self, weak moreBtn] in
+                guard let self, let moreBtn else { return }
+                let menu = NSMenu()
+                let list = s.activeAgentSessions.isEmpty ? s.agentSessions : s.activeAgentSessions
+                for a in list.prefix(8) {
+                    let st = Self.agentStatusStyle(for: a).text
+                    let label = "\(a.sourceName) · \(st) — \(a.title ?? a.summary ?? "Untitled")"
+                    let item = ClosureMenuItem(label) { [weak self] in self?.openAgent(a, in: s.worktree) }
+                    if let sum = a.summary, sum != a.title { item.toolTip = sum }
+                    menu.addItem(item)
+                }
+                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moreBtn.bounds.height + 2), in: moreBtn)
+            }
+            headerViews.append(moreBtn)
+        }
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        headerViews.append(spacer)
+
+        if let model = agent.shortModel {
+            let modelLabel = NSTextField(labelWithString: model)
+            modelLabel.font = .monospacedSystemFont(ofSize: 9.5, weight: .regular)
+            modelLabel.textColor = .tertiaryLabelColor
+            modelLabel.maximumNumberOfLines = 1
+            modelLabel.lineBreakMode = .byTruncatingMiddle
+            modelLabel.cell?.usesSingleLineMode = true
+            modelLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            headerViews.append(modelLabel)
+        }
+
+        let openBtn = ClosureButton(symbol: "arrow.up.right", tip: "Open in \(agent.sourceName)") { [weak self] in
+            self?.openAgent(agent, in: s.worktree)
+        }
+        openBtn.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        openBtn.contentTintColor = .secondaryLabelColor
+        headerViews.append(openBtn)
+
+        let headerRow = NSStackView(views: headerViews)
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 4
+        headerRow.heightAnchor.constraint(equalToConstant: 16).isActive = true
+
+        var boxLines: [NSView] = [headerRow]
+
+        if let titleText = p.agentTitle {
+            let titleLabel = NSTextField(labelWithString: titleText)
+            titleLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
+            titleLabel.textColor = (agent.running || agent.status == .waiting) ? Design.ink : Design.ink.withAlphaComponent(0.82)
+            titleLabel.alignment = .left
+            titleLabel.maximumNumberOfLines = 1
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.cell?.usesSingleLineMode = true
+            titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            titleLabel.heightAnchor.constraint(equalToConstant: 15).isActive = true
+            boxLines.append(titleLabel)
+        }
+
+        if let snippet = p.agentSnippet {
+            let snippetLabel = NSTextField(labelWithString: snippet)
+            snippetLabel.font = .systemFont(ofSize: 10.5, weight: .regular)
+            snippetLabel.textColor = Design.mute
+            snippetLabel.alignment = .left
+            snippetLabel.maximumNumberOfLines = 1
+            snippetLabel.lineBreakMode = .byTruncatingTail
+            snippetLabel.cell?.usesSingleLineMode = true
+            snippetLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            snippetLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            snippetLabel.heightAnchor.constraint(equalToConstant: 14).isActive = true
+            boxLines.append(snippetLabel)
+        }
+
+        let boxStack = NSStackView(views: boxLines)
+        boxStack.orientation = .vertical
+        boxStack.alignment = .leading
+        boxStack.spacing = 3
+        if boxLines.count == 3 {
+            boxStack.setCustomSpacing(2, after: boxLines[1])
+        }
+        boxStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let box = NSView()
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 7
+        box.layer?.cornerCurve = .continuous
+        box.layer?.backgroundColor = style.fill.cgColor
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = style.border.cgColor
+        box.addSubview(boxStack)
+        var boxConstraints: [NSLayoutConstraint] = [
+            boxStack.topAnchor.constraint(equalTo: box.topAnchor, constant: 6),
+            boxStack.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
+            boxStack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            boxStack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+        ]
+        for line in boxLines {
+            boxConstraints.append(line.widthAnchor.constraint(equalTo: boxStack.widthAnchor))
+        }
+        NSLayoutConstraint.activate(boxConstraints)
+        return box
     }
 
     func cell(for s: Session) -> NSView {
+        let p = presentation(for: s)
         let sim = s.simulator
         let running = sim?.state == .running
-        let isSelected = (sim != nil && sim === workbench?.selected)
-        let icon = NSImageView(image: NSImage(systemSymbolName: sim == nil ? "circle" : (running ? "circle.fill" : "circle.dotted"), accessibilityDescription: nil) ?? NSImage())
-        icon.contentTintColor = running ? Design.accent : .tertiaryLabelColor
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8.5, weight: .regular)
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
-        icon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        let name = NSTextField(labelWithString: s.title)
-        name.font = .systemFont(ofSize: 13, weight: isSelected ? .semibold : .regular)
-        name.maximumNumberOfLines = 1
-        name.lineBreakMode = .byTruncatingTail
-        name.cell?.usesSingleLineMode = true
-        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        name.setContentCompressionResistancePriority(.required, for: .vertical)
-        // The branch, the head's hash and the commits ahead are in the tooltip: the row keeps to what tells it apart.
+
+        // Simulator status indicator (green = simulator running; agent status is separated into its own labeled box).
+        let simDot = NSImageView(image: NSImage(systemSymbolName: sim == nil ? "circle" : (running ? "circle.fill" : "circle.dotted"), accessibilityDescription: running ? "Simulator running" : "Simulator stopped") ?? NSImage())
+        simDot.contentTintColor = running ? Design.accent : .tertiaryLabelColor
+        simDot.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8.5, weight: .regular)
+        simDot.toolTip = running ? "Simulator running" : (sim != nil ? "Simulator starting" : "Click to launch simulator")
+        simDot.setContentHuggingPriority(.required, for: .horizontal)
+        simDot.setContentCompressionResistancePriority(.required, for: .horizontal)
+        simDot.widthAnchor.constraint(equalToConstant: 10).isActive = true
+
+        var headerViews: [NSView] = [simDot]
+
+        if let num = p.prNumber {
+            headerViews.append(Self.makePill(
+                "#\(num)",
+                textColor: p.prBadgeColor,
+                fill: p.prBadgeColor.withAlphaComponent(0.15),
+                border: p.prBadgeColor.withAlphaComponent(0.28),
+                font: .monospacedSystemFont(ofSize: 10.5, weight: .semibold)
+            ))
+            if let badge = p.prBadge {
+                headerViews.append(Self.makePill(
+                    badge,
+                    textColor: p.prBadgeColor,
+                    fill: p.prBadgeColor.withAlphaComponent(0.10),
+                    font: .systemFont(ofSize: 10, weight: .medium)
+                ))
+            }
+            if let add = p.prAdditions, let del = p.prDeletions, (add > 0 || del > 0) {
+                let diffText = NSMutableAttributedString(
+                    string: "+\(add)",
+                    attributes: [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium), .foregroundColor: Design.accent.withAlphaComponent(0.9)]
+                )
+                diffText.append(NSAttributedString(
+                    string: " -\(del)",
+                    attributes: [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium), .foregroundColor: Design.record.withAlphaComponent(0.85)]
+                ))
+                let diffLabel = NSTextField(labelWithAttributedString: diffText)
+                diffLabel.maximumNumberOfLines = 1
+                diffLabel.cell?.usesSingleLineMode = true
+                diffLabel.setContentHuggingPriority(.required, for: .horizontal)
+                diffLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+                headerViews.append(diffLabel)
+            }
+        } else {
+            let branchTitle = NSTextField(labelWithString: p.branchLabel)
+            branchTitle.font = .systemFont(ofSize: 13, weight: p.isSelected ? .semibold : .medium)
+            branchTitle.textColor = Design.ink
+            branchTitle.alignment = .left
+            branchTitle.maximumNumberOfLines = 1
+            branchTitle.lineBreakMode = .byTruncatingTail
+            branchTitle.cell?.usesSingleLineMode = true
+            branchTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            headerViews.append(branchTitle)
+            if s.ahead > 0 {
+                headerViews.append(Self.makePill(
+                    "↑\(s.ahead)",
+                    textColor: Design.mute,
+                    fill: NSColor(white: 1, alpha: 0.07),
+                    font: .monospacedSystemFont(ofSize: 9.5, weight: .medium)
+                ))
+            }
+        }
+
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        headerViews.append(headerSpacer)
+
+        // Active build progress stays visible in header; hover-only controls fade in as a trailing overlay so nothing jumps.
         let build = buildAccessories(for: s)
-        let line = detail(for: s)
-        let rawSub = build.detail ?? line.text
-        let mainPrefix = (s.isMain && s.title != (s.branch ?? "main")) ? "\(s.branch ?? "main") · " : ""
-        let sub = NSTextField(labelWithString: mainPrefix + rawSub)
-        sub.font = .systemFont(ofSize: 10)
-        sub.textColor = build.color ?? (s.isStale && s.builtAt != nil ? .systemOrange : .secondaryLabelColor)
-        sub.maximumNumberOfLines = 1
-        sub.lineBreakMode = .byTruncatingTail
-        sub.cell?.usesSingleLineMode = true
-        sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        sub.setContentCompressionResistancePriority(.required, for: .vertical)
-        let text = NSStackView(views: [name, sub])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 1
-        text.setContentCompressionResistancePriority(.init(700), for: .horizontal)
-        text.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
-        var topViews: [NSView] = [icon, text]
-        if let dot = ClaudeUI.dot(for: s.claude), s.claude?.running == true || s.claude?.status == .waiting { topViews.append(dot) }   // a finished session's dot said nothing
-        if !isSelected, let walk = evidence.badge(for: s) { topViews.append(walk) }   // selected row gives full width to title
-        // A build under way keeps its spinner and cancel in sight; the hammer, the log and the cross show on hover.
-        let active = buildQueue.job(for: s)?.isActive ?? false
-        var hover: [NSView] = []
+        let activeBuild = buildQueue.job(for: s)?.isActive ?? false
+        var overlayButtons: [NSView] = []
         for v in build.views {
-            if active, v is NSProgressIndicator || (v as? ClosureButton)?.toolTip?.hasPrefix("Cancel") == true { topViews.append(v) } else { hover.append(v); topViews.append(v) }
+            if activeBuild, v is NSProgressIndicator || (v as? ClosureButton)?.toolTip?.hasPrefix("Cancel") == true {
+                headerViews.append(v)
+            } else {
+                overlayButtons.append(v)
+            }
         }
         let remove = ClosureButton(symbol: "xmark", tip: "Remove from the sidebar (the + menu brings it back)") { [weak self] in self?.remove(s) }
         remove.contentTintColor = .tertiaryLabelColor
-        hover.append(remove)
-        topViews.append(remove)
+        overlayButtons.append(remove)
+
+        var shortcutBadge: NSTextField?
         if let n = shortcutIndex(for: s) {
             let badge = NSTextField(labelWithString: "⌘\(n)")
             badge.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
             badge.textColor = .tertiaryLabelColor
             badge.setContentHuggingPriority(.required, for: .horizontal)
             badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-            topViews.append(badge)
+            headerViews.append(badge)
+            shortcutBadge = badge
         }
 
-        var tip = [s.branch ?? "detached", s.shortHead + (s.ahead > 0 ? ", \(s.ahead) ahead" : ""), (s.worktree.path as NSString).abbreviatingWithTildeInPath]
-        if let pr = s.githubPR {
-            let tag = pr.isDraft ? "draft" : pr.state.lowercased()
-            tip.append("#\(pr.number) \(pr.title) (\(tag))" + (pr.url.map { "\n" + $0.absoluteString } ?? ""))
+        let headerStack = NSStackView(views: headerViews)
+        headerStack.orientation = .horizontal
+        headerStack.alignment = .centerY
+        headerStack.spacing = 5
+        headerStack.translatesAutoresizingMaskIntoConstraints = false
+
+        // Each hover button gets a real hit target; at their bare symbol size they crowd into an unreadable sliver.
+        for case let button as ClosureButton in overlayButtons {
+            button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+            button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
         }
-        if s.claude?.source == .t3 { tip.append("T3 Code thread" + (s.claude?.title.map { ": " + $0 } ?? "")) }
-        for pr in s.pullRequests where pr.number != s.githubPR?.number { tip.append(pr.url.absoluteString + (pr.state.map { " (\($0.rawValue.lowercased()))" } ?? "")) }
-        if s.pullRequests.isEmpty, s.githubPR == nil, let pr = s.claude?.pullRequest { tip.append(pr.absoluteString) }
+        let hoverOverlay = NSStackView(views: overlayButtons)
+        hoverOverlay.orientation = .horizontal
+        hoverOverlay.alignment = .centerY
+        hoverOverlay.spacing = 4
+        hoverOverlay.edgeInsets = NSEdgeInsets(top: 3, left: 4, bottom: 3, right: 4)
+        hoverOverlay.wantsLayer = true
+        hoverOverlay.layer?.cornerRadius = 7
+        hoverOverlay.layer?.cornerCurve = .continuous
+        hoverOverlay.layer?.backgroundColor = NSColor(srgbRed: 0.145, green: 0.153, blue: 0.172, alpha: 0.96).cgColor
+        hoverOverlay.layer?.borderWidth = 0.75
+        hoverOverlay.layer?.borderColor = Design.stroke.cgColor
+        hoverOverlay.translatesAutoresizingMaskIntoConstraints = false
+        hoverOverlay.isHidden = true
+
+        let headerContainer = NSView()
+        headerContainer.addSubview(headerStack)
+        NSLayoutConstraint.activate([
+            headerContainer.heightAnchor.constraint(equalToConstant: 17),
+            headerStack.topAnchor.constraint(equalTo: headerContainer.topAnchor),
+            headerStack.bottomAnchor.constraint(equalTo: headerContainer.bottomAnchor),
+            headerStack.leadingAnchor.constraint(equalTo: headerContainer.leadingAnchor),
+            headerStack.trailingAnchor.constraint(equalTo: headerContainer.trailingAnchor),
+        ])
+
+        var cardRows: [NSView] = [headerContainer]
+
+        // Full-width PR title row (always flush left, never fights with badges, shortcut, or evidence counts).
+        if let prTitle = p.prTitle {
+            let titleField = NSTextField(wrappingLabelWithString: prTitle)
+            titleField.font = .systemFont(ofSize: 12.5, weight: p.isSelected ? .semibold : .medium)
+            titleField.textColor = p.isSelected ? Design.ink : Design.ink.withAlphaComponent(0.78)
+            titleField.alignment = .left
+            titleField.maximumNumberOfLines = p.prTwoLineTitle ? 2 : 1
+            // Truncating-tail mode keeps a label on one line; word wrap plus truncatesLastVisibleLine gives two lines and an ellipsis.
+            titleField.lineBreakMode = p.prTwoLineTitle ? .byWordWrapping : .byTruncatingTail
+            titleField.cell?.usesSingleLineMode = !p.prTwoLineTitle
+            titleField.cell?.truncatesLastVisibleLine = true
+            titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            titleField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            // A fixed height either way: a wrapping label left to size itself collapses to one line and the
+            // agent box below swallows the slack, spilling past the row.
+            titleField.heightAnchor.constraint(equalToConstant: p.prTwoLineTitle ? 32 : 16).isActive = true
+            cardRows.append(titleField)
+        }
+
+        // Branch / commit / build status + right-aligned Screen Map / Changes badge.
+        let metaLabel: NSTextField
+        if let detailText = p.buildDetail {
+            metaLabel = NSTextField(labelWithString: detailText)
+            metaLabel.font = .systemFont(ofSize: 10.5, weight: .regular)
+            metaLabel.textColor = p.buildColor ?? .secondaryLabelColor
+        } else {
+            let attr = NSMutableAttributedString()
+            let font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
+            let sep = NSAttributedString(string: " · ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor])
+            for (i, part) in p.metadataParts.enumerated() {
+                if i > 0 { attr.append(sep) }
+                attr.append(NSAttributedString(string: part.text, attributes: [.font: font, .foregroundColor: part.color]))
+            }
+            Self.truncateTail(attr)
+            metaLabel = NSTextField(labelWithAttributedString: attr)
+        }
+        metaLabel.alignment = .left
+        metaLabel.maximumNumberOfLines = 1
+        metaLabel.lineBreakMode = .byTruncatingTail
+        metaLabel.cell?.usesSingleLineMode = true
+        metaLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let metaSpacer = NSView()
+        metaSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        var metaViews: [NSView] = [metaLabel, metaSpacer]
+        if let walk = evidence.badge(for: s) {
+            metaViews.append(walk)
+        }
+        let metaRow = NSStackView(views: metaViews)
+        metaRow.orientation = .horizontal
+        metaRow.alignment = .centerY
+        metaRow.spacing = 6
+        metaRow.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        if p.showMeta { cardRows.append(metaRow) }
+
+        // The selected card gets the full labeled T3 Code / Claude Code box; the others a one-line summary,
+        // so the selected session is the one that stands out.
+        var agentCardView: NSView?
+        if !p.isSelected {
+            if let line = buildAgentLine(presentation: p) { cardRows.append(line) }
+        } else if let agentCard = buildAgentCard(for: s, presentation: p) {
+            cardRows.append(agentCard)
+            agentCardView = agentCard
+        }
+
+        // Action bar when selected.
+        var actionRowView: NSView?
+        if p.isSelected {
+            let rebuildButton = GlassButton(symbol: "hammer", title: "Build", label: "Rebuild this session", style: .well, target: nil, action: nil)
+            rebuildButton.image = NSImage(systemSymbolName: "hammer", accessibilityDescription: "Build")?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+            rebuildButton.font = .systemFont(ofSize: 11, weight: .medium)
+            rebuildButton.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            rebuildButton.layer?.cornerRadius = 7
+            rebuildButton.onPress = { [weak self] in self?.build(s) }
+
+            let changesButton = GlassButton(symbol: "plusminus", title: "Changes", label: "Show changes for this session", style: .well, target: nil, action: nil)
+            changesButton.image = NSImage(systemSymbolName: "plusminus", accessibilityDescription: "Changes")?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+            changesButton.font = .systemFont(ofSize: 11, weight: .medium)
+            changesButton.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            changesButton.layer?.cornerRadius = 7
+            changesButton.onPress = { [weak self] in self?.workbench?.showChanges(of: s) }
+
+            var actions: [NSView] = [rebuildButton, changesButton]
+            if let prURL = s.prURL {
+                let prButton = GlassButton(symbol: "arrow.up.right", title: "PR", label: "Open pull request on GitHub", style: .well, target: nil, action: nil)
+                prButton.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: "Open PR")?
+                    .withSymbolConfiguration(.init(pointSize: 9.5, weight: .medium))
+                prButton.font = .systemFont(ofSize: 11, weight: .medium)
+                prButton.heightAnchor.constraint(equalToConstant: 25).isActive = true
+                prButton.layer?.cornerRadius = 7
+                prButton.onPress = { NSWorkspace.shared.open(prURL) }
+                actions.append(prButton)
+            }
+
+            let actionRow = NSStackView(views: actions)
+            actionRow.orientation = .horizontal
+            actionRow.alignment = .centerY
+            actionRow.distribution = .fillEqually
+            actionRow.spacing = 6
+            actionRow.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            cardRows.append(actionRow)
+            actionRowView = actionRow
+        }
+
+        // Rich tooltip with complete PR, Git, and all T3 Code / Claude sessions on this worktree.
+        var tip: [String] = []
+        if let pr = s.githubPR {
+            var line = "PR #\(pr.number): \(pr.title) (\(pr.statusBadge))"
+            if let base = pr.baseBranch { line += " → \(base)" }
+            if let a = pr.additions, let d = pr.deletions {
+                let files = pr.changedFiles.map { ", \($0) file\($0 == 1 ? "" : "s")" } ?? ""
+                line += " [+\(a) -\(d)\(files)]"
+            }
+            tip.append(line)
+            if let url = pr.url { tip.append(url.absoluteString) }
+        }
+        tip.append("Branch: \(p.branchLabel) (\(s.shortHead)\(s.ahead > 0 ? ", \(s.ahead) ahead" : "")\(s.dirty ? ", edited" : ""))")
+        tip.append("Worktree: \((s.worktree.path as NSString).abbreviatingWithTildeInPath)")
+        let allAgents = s.agentSessions.isEmpty ? [s.claude].compactMap { $0 } : s.agentSessions
+        for a in allAgents.prefix(4) {
+            let st = Self.agentStatusStyle(for: a).text
+            let modelStr = a.shortModel.map { " [\($0)]" } ?? ""
+            var line = "\(a.sourceName) (\(st))\(modelStr): \(a.title ?? "Untitled")"
+            if let sum = a.summary, sum != a.title { line += "\n  \"\(sum)\"" }
+            tip.append(line)
+        }
+        for pr in s.pullRequests where pr.number != s.githubPR?.number {
+            tip.append(pr.url.absoluteString + (pr.state.map { " (\($0.rawValue.lowercased()))" } ?? ""))
+        }
         let tooltipText = tip.joined(separator: "\n")
 
-        if !isSelected {
-            let stack = HoverRow(views: topViews)
-            stack.hoverOnly = hover
-            stack.spacing = 6
-            stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 6)
-            stack.toolTip = tooltipText
-            return stack
+        let contentStack = NSStackView(views: cardRows)
+        contentStack.orientation = .vertical
+        contentStack.alignment = .leading
+        contentStack.spacing = 4
+        if agentCardView != nil, p.showMeta {
+            contentStack.setCustomSpacing(6, after: metaRow)
         }
+        if let actionRowView, let prev = cardRows.dropLast().last, prev !== actionRowView {
+            contentStack.setCustomSpacing(7, after: prev)
+        }
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let topRow = NSStackView(views: topViews)
-        topRow.orientation = .horizontal
-        topRow.alignment = .centerY
-        topRow.spacing = 6
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 8.5
+        card.layer?.cornerCurve = .continuous
+        if !p.isSelected {
+            card.layer?.backgroundColor = NSColor(white: 1, alpha: 0.02).cgColor
+            card.layer?.borderWidth = 1
+            card.layer?.borderColor = NSColor(white: 1, alpha: 0.05).cgColor
+        } else {
+            // SourceList already draws the native macOS rounded selection highlight around the row.
+            card.layer?.backgroundColor = NSColor.clear.cgColor
+            card.layer?.borderWidth = 0
+        }
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(contentStack)
+        card.addSubview(hoverOverlay)
 
-        let rebuildButton = GlassButton(symbol: "hammer", title: "Build", label: "Rebuild this session", style: .well, target: nil, action: nil)
-        rebuildButton.image = NSImage(systemSymbolName: "hammer", accessibilityDescription: "Build")?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
-        rebuildButton.font = .systemFont(ofSize: 11, weight: .medium)
-        rebuildButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        rebuildButton.layer?.cornerRadius = 7
-        rebuildButton.onPress = { [weak self] in self?.build(s) }
+        var constraints: [NSLayoutConstraint] = [
+            contentStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 7),
+            contentStack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -7),
+            contentStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+            contentStack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+            hoverOverlay.centerYAnchor.constraint(equalTo: headerContainer.centerYAnchor),
+            hoverOverlay.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -5),
+        ]
+        for rowView in cardRows {
+            constraints.append(rowView.widthAnchor.constraint(equalTo: contentStack.widthAnchor))
+        }
+        NSLayoutConstraint.activate(constraints)
 
-        let changesButton = GlassButton(symbol: "plusminus", title: "Changes", label: "Show changes for this session", style: .well, target: nil, action: nil)
-        changesButton.image = NSImage(systemSymbolName: "plusminus", accessibilityDescription: "Changes")?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
-        changesButton.font = .systemFont(ofSize: 11, weight: .medium)
-        changesButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        changesButton.layer?.cornerRadius = 7
-        changesButton.onPress = { [weak self] in self?.workbench?.showChanges(of: s) }
-
-        let actionRow = NSStackView(views: [rebuildButton, changesButton])
-        actionRow.orientation = .horizontal
-        actionRow.alignment = .centerY
-        actionRow.distribution = .fillEqually
-        actionRow.spacing = 6
-
-        let card = HoverRow(views: [topRow, actionRow])
-        card.orientation = .vertical
-        card.alignment = .width
-        card.hoverOnly = hover
-        card.spacing = 7
-        card.edgeInsets = NSEdgeInsets(top: 6, left: 4, bottom: 6, right: 6)
-        card.toolTip = tooltipText
-        return card
+        let wrapper = HoverCardWrapper()
+        wrapper.overlay = hoverOverlay
+        wrapper.hideOnHover = shortcutBadge
+        wrapper.toolTip = tooltipText
+        wrapper.autoresizingMask = [.width, .height]   // follows its row when the row's height changes
+        wrapper.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 3),
+            card.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -3),
+            card.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: 1),
+            card.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor, constant: -1),
+        ])
+        return wrapper
     }
 
-    /// A suggested session: one line, with + to add it and a cross to stop suggesting it.
+    /// A suggested session: clear 2-line preview with PR/agent context, + to add it and × to dismiss.
     func suggestionCell(for s: Session) -> NSView {
-        let add = ClosureButton(symbol: "plus.circle", tip: "Add to the sidebar") { [weak self] in self?.show(s) }
+        let add = ClosureButton(symbol: "plus.circle.fill", tip: "Add to the sidebar") { [weak self] in self?.show(s) }
         add.contentTintColor = .controlAccentColor
+        add.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .medium)
+
         let name = NSTextField(labelWithString: s.title)
-        name.font = .systemFont(ofSize: 12)
-        name.textColor = .secondaryLabelColor
+        name.font = .systemFont(ofSize: 12, weight: .medium)
+        name.textColor = Design.ink.withAlphaComponent(0.88)
+        name.maximumNumberOfLines = 1
         name.lineBreakMode = .byTruncatingTail
+        name.cell?.usesSingleLineMode = true
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        var why = ""
-        if s.claude?.status == .waiting { why = "waiting" }
-        else if s.claude?.running == true && s.claude?.status == .working { why = "working" }
-        else if let n = s.pullRequests.first(where: { $0.state == .open })?.number { why = "#\(n)" }
-        else if s.claude?.running == true { why = "open" }
-        let tag = NSTextField(labelWithString: why)
-        tag.font = .systemFont(ofSize: 10)
-        tag.textColor = s.claude?.status == .waiting ? .systemOrange : .tertiaryLabelColor
-        tag.setContentHuggingPriority(.required, for: .horizontal)
-        tag.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        var subBits: [String] = []
+        if let pr = s.githubPR {
+            subBits.append("#\(pr.number) \(pr.statusBadge)")
+        } else if let n = s.pullRequests.first(where: { $0.state == .open })?.number {
+            subBits.append("#\(n) Open")
+        }
+        if let agent = s.displayAgent ?? s.claude {
+            let st = Self.agentStatusStyle(for: agent).text
+            subBits.append("\(agent.sourceName) · \(st)")
+        }
+        if let b = s.branch, b != s.title { subBits.append(b) }
+        let subText = subBits.isEmpty ? (s.branch ?? s.shortHead) : subBits.joined(separator: " · ")
+
+        let sub = NSTextField(labelWithString: subText)
+        sub.font = .systemFont(ofSize: 10)
+        sub.textColor = (s.displayAgent?.status == .waiting || s.claude?.status == .waiting) ? Design.warning : .secondaryLabelColor
+        sub.maximumNumberOfLines = 1
+        sub.lineBreakMode = .byTruncatingTail
+        sub.cell?.usesSingleLineMode = true
+        sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let text = NSStackView(views: [name, sub])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         let dismiss = ClosureButton(symbol: "xmark", tip: "Don't suggest this one again") { [weak self] in self?.dismiss(s) }
         dismiss.contentTintColor = .tertiaryLabelColor
-        let stack = HoverRow(views: [add, name, tag, dismiss])
+        let stack = HoverRow(views: [add, text, dismiss])
         stack.hoverOnly = [dismiss]
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 2, bottom: 0, right: 6)
+        stack.alignment = .centerY
+        stack.spacing = 7
+        stack.edgeInsets = NSEdgeInsets(top: 3, left: 6, bottom: 3, right: 6)
         stack.toolTip = [s.branch ?? "detached", (s.worktree.path as NSString).abbreviatingWithTildeInPath].joined(separator: "\n")
         return stack
     }
@@ -1332,7 +1983,14 @@ final class SessionsController {
 
     /// The suggestion row's key, like `rowKey`.
     func suggestionKey(for s: Session) -> String {
-        [s.title, "\(s.claude?.status as Any)", "\(s.claude?.running as Any)", s.pullRequests.first(where: { $0.state == .open })?.url.absoluteString ?? ""].joined(separator: "\u{1f}")
+        let agent = s.displayAgent ?? s.claude
+        return [
+            s.title,
+            s.branch ?? "",
+            s.githubPR.map { "\($0.number)|\($0.statusBadge)" } ?? "",
+            agent.map { "\($0.source.rawValue)|\($0.status.rawValue)|\($0.rawStatus ?? "")|\($0.running)" } ?? "",
+            s.pullRequests.first(where: { $0.state == .open })?.url.absoluteString ?? "",
+        ].joined(separator: "\u{1f}")
     }
 
     private static func modified(_ file: URL) -> Date {
@@ -1375,5 +2033,53 @@ final class HoverRow: NSStackView {
         guard on != inside else { return }
         inside = on
         hoverOnly.forEach { $0.isHidden = !on }
+    }
+}
+
+/// Wrapper for session cards that reveals a trailing hover action overlay without shifting any text or layout.
+final class HoverCardWrapper: NSView {
+    weak var overlay: NSView?
+    weak var hideOnHover: NSView?
+    private var inside = false
+    private var area: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let a = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(a)
+        area = a
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setInside(bounds.contains(p), animated: false)
+    }
+
+    override func mouseEntered(with event: NSEvent) { setInside(true, animated: true) }
+    override func mouseExited(with event: NSEvent) { setInside(false, animated: true) }
+
+    private func setInside(_ on: Bool, animated: Bool) {
+        guard on != inside else { return }
+        inside = on
+        if on { overlay?.isHidden = false }
+        let apply = {
+            self.overlay?.alphaValue = on ? 1 : 0
+            self.hideOnHover?.alphaValue = on ? 0 : 1
+        }
+        if animated && !Design.reduceMotion {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.12
+                self.overlay?.animator().alphaValue = on ? 1 : 0
+                self.hideOnHover?.animator().alphaValue = on ? 0 : 1
+            }, completionHandler: { [weak self] in
+                if self?.inside == false { self?.overlay?.isHidden = true }
+            })
+        } else {
+            apply()
+            if !on { overlay?.isHidden = true }
+        }
     }
 }

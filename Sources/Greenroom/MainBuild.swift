@@ -646,8 +646,8 @@ extension SessionsController {
         }
         let stack = HoverRow(views: views)
         stack.hoverOnly = hover
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 6)
+        stack.spacing = 7
+        stack.edgeInsets = NSEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
         var tip = ["The newest \(row.name), a debug build Greenroom keeps up to date by itself. Click to run it."]
         if let sha = row.sha { tip.append(sha) }
         if let b = row.newest { tip.append("\(b.source.rawValue) build \(b.key)") }

@@ -199,6 +199,9 @@ extension SessionsController {
         if let pr = s.githubPR, let url = pr.url {
             items.append(ClosureMenuItem("Open PR #\(pr.number)\(pr.isDraft ? " (Draft)" : "") on GitHub") { NSWorkspace.shared.open(url) })
             items.append(.separator())
+        } else if let n = s.prNumber, let url = s.prURL {
+            items.append(ClosureMenuItem("Open PR #\(n) on GitHub") { NSWorkspace.shared.open(url) })
+            items.append(.separator())
         }
         let active = buildQueue.job(for: s)?.isActive ?? false
         if active {

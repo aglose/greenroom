@@ -133,10 +133,27 @@ enum GH {
         var state: String
         var isDraft: Bool
         var url: URL?
+        var baseBranch: String? = nil
+        var reviewDecision: String? = nil
+        var additions: Int? = nil
+        var deletions: Int? = nil
+        var changedFiles: Int? = nil
 
         var isOpen: Bool { state.uppercased() == "OPEN" }
         var isMerged: Bool { state.uppercased() == "MERGED" }
         var isClosed: Bool { state.uppercased() == "CLOSED" }
+
+        /// Compact status word combining draft, state, and review decision.
+        var statusBadge: String {
+            if isDraft { return "Draft" }
+            if isMerged { return "Merged" }
+            if isClosed { return "Closed" }
+            switch reviewDecision?.uppercased() {
+            case "APPROVED": return "Approved"
+            case "CHANGES_REQUESTED": return "Changes"
+            default: return "Open"
+            }
+        }
     }
 
     /// `gh pr view N -R SLUG --json headRefOid,headRefName,title` in the repository `dir` is in (`slug` nil: gh's own guess).
@@ -150,14 +167,20 @@ enum GH {
 
     /// `gh pr list --state all --limit 50 --json ...`, keyed by `headRefName` (open PRs win over closed/merged, then highest number).
     static func pullsByBranch(in dir: URL, slug: String? = nil) async -> [String: BranchPull] {
-        let r = await run(["pr", "list", "--state", "all", "--limit", "50"] + (slug.map { ["-R", $0] } ?? []) + ["--json", "number,title,headRefName,state,isDraft,url"], in: dir, timeout: 20)
+        let fields = "number,title,headRefName,baseRefName,state,isDraft,url,reviewDecision,additions,deletions,changedFiles"
+        let r = await run(["pr", "list", "--state", "all", "--limit", "50"] + (slug.map { ["-R", $0] } ?? []) + ["--json", fields], in: dir, timeout: 20)
         guard r.status == 0, let arr = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [[String: Any]] else { return [:] }
         var out: [String: BranchPull] = [:]
         for obj in arr {
             guard let number = obj["number"] as? Int, let branch = obj["headRefName"] as? String, !branch.isEmpty else { continue }
+            let review = (obj["reviewDecision"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let base = (obj["baseRefName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let pr = BranchPull(number: number, title: obj["title"] as? String ?? "", branch: branch,
                                 state: obj["state"] as? String ?? "OPEN", isDraft: obj["isDraft"] as? Bool ?? false,
-                                url: (obj["url"] as? String).flatMap(URL.init(string:)))
+                                url: (obj["url"] as? String).flatMap(URL.init(string:)),
+                                baseBranch: base, reviewDecision: review,
+                                additions: obj["additions"] as? Int, deletions: obj["deletions"] as? Int,
+                                changedFiles: obj["changedFiles"] as? Int)
             if let have = out[branch] {
                 if pr.isOpen != have.isOpen { if pr.isOpen { out[branch] = pr } }
                 else if pr.number > have.number { out[branch] = pr }
