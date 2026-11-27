@@ -29,6 +29,7 @@ which Xcode makes by itself, is not enough). The account holder of the Apple Dev
    | `NOTARY_KEY_ID` | the key's ID |
    | `NOTARY_ISSUER_ID` | the issuer ID |
    | `SPARKLE_ED_PRIVATE_KEY` | the update-signing key: `generate_keys --account greenroom -x key.txt`, then `gh secret set SPARKLE_ED_PRIVATE_KEY < key.txt` |
+   | `TAP_DEPLOY_KEY` | private half of a deploy key with write access to `aglose/homebrew-apksim` only (optional: without it the Homebrew cask is not updated) |
 
 4. **Update-signing key.** Sparkle's `generate_keys` (in `.build/artifacts/sparkle/Sparkle/bin` after a build) made
    it once and keeps it in the login keychain under the account `greenroom`; its public half is `SUPublicEDKey` in
@@ -61,6 +62,19 @@ NOTARY_PROFILE=greenroom scripts/dmg.sh --identity "Developer ID Application" --
    produce `appcast.xml` and binary `.delta` updates (typically ~1–2 MB instead of the full ~346 MB DMG). The release
    job attaches the disk image, its SHA-256, the `.dSYM.zip`, `appcast.xml`, and the `.delta` files to the draft
    release.
+
+## Homebrew
+
+Publishing a release runs the `tap` job of `release.yml`: it fills `packaging/homebrew/greenroom.rb` with the
+version and the DMG's SHA-256 and pushes it to the `aglose/homebrew-apksim` tap as `Casks/greenroom.rb`, beside
+apksim's cask. A draft never reaches the tap. The cask says `auto_updates true`, so Homebrew leaves updates to Sparkle.
+To make the deploy key once:
+
+```bash
+ssh-keygen -t ed25519 -N '' -C greenroom-tap -f tap_key
+gh repo deploy-key add tap_key.pub -R aglose/homebrew-apksim --allow-write -t "greenroom release workflow"
+gh secret set TAP_DEPLOY_KEY -R aglose/greenroom < tap_key && rm tap_key tap_key.pub
+```
 
 ## Updates
 

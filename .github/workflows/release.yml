@@ -1,13 +1,18 @@
 # A v* tag builds Greenroom, signs it with the Developer ID identity, has Apple notarize it and attaches the disk
-# image to a draft release. docs/RELEASING.md lists the secrets.
+# image to a draft release. Publishing the draft (scripts/release.sh publish) runs the `tap` job, which writes
+# packaging/homebrew/greenroom.rb with the release's version and checksum into the aglose/homebrew-apksim tap. It pushes
+# with the TAP_DEPLOY_KEY secret and is skipped without one. docs/RELEASING.md lists the secrets.
 name: release
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
 permissions:
   contents: write
 jobs:
   dmg:
+    if: github.event_name == 'push'
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -76,3 +81,37 @@ jobs:
       - name: Remove the keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+
+  tap:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: packaging
+      - name: Update the Homebrew tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ -z "$TAP_DEPLOY_KEY" ]]; then echo "no TAP_DEPLOY_KEY secret: the tap is not updated"; exit 0; fi
+          V="${TAG#v}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p "Greenroom-$V.dmg.sha256"
+          SHA=$(awk -v f="Greenroom-$V.dmg" '$2 == f || $2 == "*" f {print $1}' "Greenroom-$V.dmg.sha256")
+          [[ "$SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no checksum for Greenroom-$V.dmg"; exit 1; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/tap && chmod 600 ~/.ssh/tap
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tap -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:aglose/homebrew-apksim.git tap
+          mkdir -p tap/Casks
+          sed -e "s/@VERSION@/$V/g" -e "s/@SHA256@/$SHA/" packaging/homebrew/greenroom.rb > tap/Casks/greenroom.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/greenroom.rb
+          git diff --cached --quiet && { echo "the tap already has Greenroom $V"; exit 0; }
+          git commit -m "greenroom $V"
+          git push

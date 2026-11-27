@@ -67,9 +67,11 @@ scripts/release.sh publish VERSION notes.md
 ```
 Checks the draft has the DMG, its SHA-256, the dSYM zip and a signed appcast carrying VERSION, publishes it with the
 notes, and checks the live update feed (`releases/latest/download/appcast.xml`) now serves VERSION. Installed copies
-update from that feed. Re-read the notes against the privacy rule before running.
+update from that feed. Publishing also runs the `tap` job, which puts the version in the Homebrew cask
+(`aglose/homebrew-apksim`, `Casks/greenroom.rb`); check it with `gh run list --workflow release.yml --event release -L 1`.
+Re-read the notes against the privacy rule before running.
 
 ## 7. Report
 Version and release URL; PRs merged (links); PRs left open and why; docs changed; whether the feed serves the new
-version; what was not verified (no Mac-side install or update was run; `scripts/update-check.sh IDENTITY` does that).
+version and the tap job passed; what was not verified (no Mac-side install or update was run; `scripts/update-check.sh IDENTITY` does that).
 Remove the temporary worktrees.
