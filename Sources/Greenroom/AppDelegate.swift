@@ -606,6 +606,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        // Gone from the screen and the Dock at once: the cleanup below can take a few seconds (simulators, the engine's
+        // standbys, recipes), and a frozen window during it reads as the app refusing to quit.
+        for window in NSApp.windows { window.orderOut(nil) }
+        NSApp.setActivationPolicy(.prohibited)
+        CATransaction.flush()
         Reports.shared.saveUsage()
         agent.stop()
         TestRun.terminateAll()
