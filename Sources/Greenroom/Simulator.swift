@@ -71,6 +71,9 @@ final class Simulator {
     private(set) var options: [String] = []
     /// The worktree of the session an agent opened this simulator for (main thread only), whatever data it runs on.
     var agentSession: String?
+    /// The worktree whose agent opened this simulator for an APK that is not the session's build (the sample app,
+    /// another file): not the session's, but what its agent shows, so the person can pin a comment to it.
+    var openedFrom: String?
 
     var name: String { apk.deletingPathExtension().lastPathComponent }
     /// A human-readable label identifying the branch, PR, or build this simulator runs (e.g. `main · 753faed` or

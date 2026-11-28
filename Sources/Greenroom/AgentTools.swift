@@ -585,7 +585,15 @@ final class AgentTools {
         guard let sim = opened else { throw Failure(message: "Greenroom could not start \(name)") }
         currentSim = sim
         // Marked as the session's, on whatever slot it runs.
-        if let session, mark { DispatchQueue.main.sync { sim.agentSession = session.worktree.path } }
+        if let session {
+            DispatchQueue.main.sync {
+                if mark { sim.agentSession = session.worktree.path; return }
+                // Not the session's build, but what its agent shows: the caption says whose it is.
+                sim.openedFrom = session.worktree.path
+                sim.displayLabel = "\(sim.name) · from \(session.branch ?? session.shortHead)"
+                self.workbench?.refreshCaptions()
+            }
+        }
         let deadline = Date().addingTimeInterval(150)
         while Date() < deadline {
             let state = DispatchQueue.main.sync { sim.state }

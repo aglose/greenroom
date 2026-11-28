@@ -253,7 +253,7 @@ final class ReviewController {
         var st = SessionPanelState(worktree: path, title: s.branch ?? s.shortHead, repository: s.workspace.lastPathComponent,
                                    mark: harness?.letters ?? "·", group: attention.group, line: attention.line, verdict: SessionPanelState.Verdict.none,
                                    headline: "", summary: "", answerNote: "", canAnswer: true)
-        st.hasSimulator = sessions.simulator(for: s)?.state == .running
+        st.hasSimulator = sessions.reviewSimulator(for: s)?.state == .running
         // Where it stands, and whether the person's answer is still wanted.
         let stands = work.review.flatMap { r -> Work.Review? in
             guard r.answer != nil, attention.group != .ready else { return nil }
@@ -374,7 +374,7 @@ final class ReviewController {
 
     /// The next click on the session's device picks what the comment is about.
     func beginPin() {
-        guard let s = session, let sim = sessions.simulator(for: s), sim.state == .running else {
+        guard let s = session, let sim = sessions.reviewSimulator(for: s), sim.state == .running else {
             workbench.say("Start the session's simulator to pin a comment to its screen", problem: true)
             return
         }
