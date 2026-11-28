@@ -333,6 +333,9 @@ The loop has two ends an agent declares. Both need a session (a worktree of an a
   `changes requested:` followed by the person's comments, one a line; a pinned comment adds
   `pinned to "Total" [left,top,right,bottom] on CartActivity (picture 1)` and the picture is an image block of the
   same answer. When the wait ends first it answers `still waiting: ...`; calling it again joins the same request.
+  A comment the person writes while the call waits, without answering, ends the wait with
+  `the person has not answered yet, but wrote: ...`: the request stays open, and the agent calls `review` again
+  when it has dealt with it.
   An approval is for the commit the session was at: an agent that commits more and asks again is asked about
   anew. If the person marks the session reviewed without answering, the call says the request was dismissed.
 - **`feedback`** answers what the person said that the agent has not been given (`nothing new from the person`

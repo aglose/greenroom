@@ -229,7 +229,8 @@ enum ReviewCheck {
             expect(given.map { WorkStore.words($0).text } == "changes requested:\n- The nights are missing under the dates", "the agent is given the answer and the comment")
             expect(store.deliver(tripPath, via: "review") == nil, "... once")
             wb.reloadReview()
-            expect(state()?.answerNote == "The agent has been told." && state()?.comments.first?.status == "Given just now, with the answer to its review", "and the panel says it was told: \(state()?.comments.first?.status ?? "-")")
+            expect(state()?.answerNote == "The agent has been told." && state()?.comments.first?.status == "Given just now, with the answer to its review" && state()?.canAnswer == true,
+                   "and the panel says it was told, with Approve there for what comes of it: \(state()?.comments.first?.status ?? "-")")
             let id = store.work(tripPath).comments.first?.id ?? ""
             store.removeComment(tripPath, id: id)
             expect(store.work(tripPath).comments.count == 1, "a comment the agent was given cannot be taken back")
@@ -288,7 +289,12 @@ enum ReviewCheck {
             choose(total)
             _ = await wait("no pull request") { asked().contains { $0.hasPrefix("pr view feat/total-rounding") } }
             await settle()
-            expect(review.model.merge == MergeLine(), "a branch with no pull request shows no Merge")
+            _ = await wait("no pull request known") { review.model.merge.none }
+            expect(review.model.merge == MergeLine(none: true) && !review.model.merge.canMerge, "a branch with no pull request shows no Merge, and says there is none")
+            review.askForPull()
+            review.askForPull()
+            expect(store.work(totalPath).pending.map(\.text) == ["Please open a pull request for this branch."], "... and the agent can be asked for one, once")
+            _ = store.deliver(totalPath, via: "tool answer")
             writePR(head: trip.head)
             clock = clock.addingTimeInterval(120)
             choose(trip)

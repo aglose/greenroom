@@ -130,7 +130,9 @@ final class CIWatch {
     /// Whether a session is one to ask GitHub about now.
     private func due(_ s: Session, now: Date) -> Bool {
         let path = s.worktree.path
-        guard s.branch != nil, !s.head.isEmpty, s.ahead == 0, !asking.contains(path), GitHubRemote.has(s.workspace) else { return false }
+        guard let branch = s.branch, !s.head.isEmpty, s.ahead == 0, !asking.contains(path), GitHubRemote.has(s.workspace) else { return false }
+        // The base branch is nobody's work in progress (Keep main built looks after it).
+        if let base = sessions.workspace(of: s)?.baseRef, branch == base || base.hasSuffix("/" + branch) { return false }
         guard let e = entries[path], e.sha == s.head else { return true }
         if e.over { return false }
         guard let asked = e.asked else { return true }

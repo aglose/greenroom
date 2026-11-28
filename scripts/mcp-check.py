@@ -579,6 +579,16 @@ def review_loop(exe, env, a, b, trees, other, state_dir, expect, wait, Shim):
     expect("... and a picture of it", len(pictures) == 1 and base64.b64decode(pictures[0]["data"])[:8] == b"\x89PNG\r\n\x1a\n" and pictures[0]["mimeType"] == "image/png",
            str([(c["type"], len(c.get("data", ""))) for c in content]))
     expect("... session says changes were asked for", session_line("review: ") == "review: changes requested", a.call("session")[0])
+    # A comment written while a review waits, with no answer: handed over at once, and the request stays open.
+    th = threading.Thread(target=ask, args=("third",), kwargs={"summary": "Third time.", "timeout_s": 90})
+    th.start()
+    wait(lambda: filed().startswith("ready for review"), 20)
+    person(comment="Before I answer: what about tablets?")
+    th.join(30)
+    text = "\n".join(c["text"] for c in got.get("third", ([], False))[0] if c["type"] == "text")
+    expect("a comment written while review waits ends the wait with it, the request still open",
+           not th.is_alive() and text == "the person has not answered yet, but wrote:\n- Before I answer: what about tablets?\nYour request stays open: deal with this, then call review again.", text)
+    expect("... and the session is still ready for review", filed().startswith("ready for review"), filed())
     # Nobody waiting when the answer comes: the turn's end carries it, in the harness's own form.
     t, err = a.call("review", timeout_s=10)
     expect("a review nobody answers in time says it is still waiting", not err and t.startswith("still waiting: the person has not answered after 10 s"), t)

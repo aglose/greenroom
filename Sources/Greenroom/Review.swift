@@ -65,6 +65,8 @@ struct MergeLine: Equatable {
     var canMerge = false
     var busy = false
     var merged = false
+    /// The branch is on a GitHub repository and has no pull request (GitHub was asked).
+    var none = false
 }
 
 final class SessionPanelModel: ObservableObject {
@@ -80,6 +82,7 @@ final class SessionPanelModel: ObservableObject {
     var onPin: (() -> Void)?
     var onRemove: ((String) -> Void)?
     var onMerge: (() -> Void)?
+    var onAskForPull: (() -> Void)?
     var onPlay: ((SessionPanelState.Criterion) -> Void)?
     var onOpen: ((String) -> Void)?
     var onOpenPull: (() -> Void)?
@@ -105,9 +108,15 @@ final class ReviewController {
     private unowned let workbench: Workbench
     let model = SessionPanelModel()
     let strip = LoopStripModel()
-    private(set) lazy var panelView: NSView = NSHostingView(rootView: SessionPanelView(model: model))
+    // Neither view sizes the window: the pane's and the strip's constraints say how large they are.
+    private(set) lazy var panelView: NSView = {
+        let v = NSHostingView(rootView: SessionPanelView(model: model))
+        v.sizingOptions = []
+        return v
+    }()
     private(set) lazy var stripView: NSView = {
         let v = NSHostingView(rootView: LoopStripView(model: strip))
+        v.sizingOptions = []
         v.isHidden = true
         return v
     }()
@@ -130,6 +139,7 @@ final class ReviewController {
         model.onPin = { [weak self] in self?.togglePin() }
         model.onRemove = { [weak self] id in self?.remove(id) }
         model.onMerge = { [weak self] in self?.merge() }
+        model.onAskForPull = { [weak self] in self?.askForPull() }
         model.onPlay = { [weak self] c in self?.play(c) }
         model.onOpen = { raw in if let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) } }
         model.onOpenPull = { [weak self] in
@@ -258,7 +268,8 @@ final class ReviewController {
             st.headline = (r.answer == .approved ? "Approved" : "Changes requested") + " · " + Self.ago(at)
             st.summary = r.summary
             st.answerNote = r.delivered ? "The agent has been told." : "The agent hears it with its next call, or when its turn ends."
-            st.canAnswer = false
+            // After asking for changes the person can still approve what came of it, asked again or not.
+            st.canAnswer = r.answer == .changes && r.delivered
         } else if attention.group == .ready {
             st.verdict = .ready
             st.headline = "Ready for review"
@@ -504,7 +515,7 @@ final class ReviewController {
         case .failure(let f):
             return MergeLine(number: s.githubPR?.number, title: s.githubPR?.title ?? "", detail: "", blocked: f.message)
         case .success(nil):
-            return MergeLine()
+            return MergeLine(none: true)
         case .success(let info?):
             var line = MergeLine(number: info.number, title: info.title)
             line.busy = merging == path
@@ -517,6 +528,15 @@ final class ReviewController {
             }
             return line
         }
+    }
+
+    /// A session with no pull request: the person asks its agent for one, as a comment like any other.
+    func askForPull() {
+        guard let s = session else { return }
+        let text = "Please open a pull request for this branch."
+        guard !WorkStore.shared.work(s.worktree.path).pending.contains(where: { $0.text == text }) else { return }
+        WorkStore.shared.addComment(s.worktree.path, text: text)
+        workbench.say("Asked \(s.branch ?? s.shortHead)'s agent for a pull request: it hears with its next call or its turn's end")
     }
 
     func merge() {

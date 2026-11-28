@@ -139,17 +139,26 @@ extension AgentTools {
             mainSync { self.workbench?.agentChanged() }
             let end = Date().addingTimeInterval(wait)
             while Date() < end {
-                if mainSync({ WorkStore.shared.work(path).answerWaiting != nil }) { break }
+                // Their answer ends the wait; so does a comment written meanwhile, which is handed over at once.
+                if mainSync({ let w = WorkStore.shared.work(path); return w.answerWaiting != nil || !w.pending.isEmpty }) { break }
                 // The person can also take the request back by marking the session reviewed.
                 if mainSync({ WorkStore.shared.work(path).review == nil }) { return text("the person dismissed the request without an answer") }
                 Thread.sleep(forTimeInterval: Engine.agentCheck ? 0.05 : 0.3)
             }
         }
-        guard let given = mainSync({ WorkStore.shared.deliver(path, via: "review") }), given.answer != nil else {
-            return text("still waiting: the person has not answered after \(Int(wait)) s. The session stays ready for review in Greenroom. "
-                + "End your turn: their answer reaches you with your next call or your turn's end; or call review again to keep waiting.")
+        let given = mainSync { WorkStore.shared.deliver(path, via: "review") }
+        if let given, given.answer != nil { return Self.blocks(given) }
+        if let given {
+            // A comment with no answer yet: the request stays open, and the session ready for review.
+            var out = Self.blocks(given)
+            if let first = out.first?["text"] as? String {
+                out[0] = ["type": "text", "text": "the person has not answered yet, but wrote:\n" + first.split(separator: "\n", omittingEmptySubsequences: false).dropFirst().joined(separator: "\n")
+                    + "\nYour request stays open: deal with this, then call review again."]
+            }
+            return out
         }
-        return Self.blocks(given)
+        return text("still waiting: the person has not answered after \(Int(wait)) s. The session stays ready for review in Greenroom. "
+            + "End your turn: their answer reaches you with your next call or your turn's end; or call review again to keep waiting.")
     }
 
     /// What the person said, as content blocks: the words, then the pictures of the pinned comments.

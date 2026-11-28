@@ -52,7 +52,7 @@ struct SessionPanelView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 10) {
                         verdict(s)
-                        if model.merge.number != nil || !model.merge.blocked.isEmpty { pull }
+                        if model.merge.number != nil || !model.merge.blocked.isEmpty { pull } else if model.merge.none { noPull }
                         spec(s)
                         tell(s)
                         if !s.calls.isEmpty { activity(s) }
@@ -127,6 +127,9 @@ struct SessionPanelView: View {
                 Text(s.summary).font(.system(size: 12)).foregroundStyle(SettingsTheme.ink.opacity(0.86)).fixedSize(horizontal: false, vertical: true)
             }
             LoopPipsRow(steps: s.steps)
+            if !s.answerNote.isEmpty {
+                Text(s.answerNote).font(.system(size: 11)).foregroundStyle(SettingsTheme.mute)
+            }
             if s.canAnswer {
                 HStack(spacing: 8) {
                     Button("Approve") { model.onApprove?() }
@@ -137,8 +140,6 @@ struct SessionPanelView: View {
                         .help("Tell the agent what to change: your comments below go with it")
                 }
                 .padding(.top, 2)
-            } else if !s.answerNote.isEmpty {
-                Text(s.answerNote).font(.system(size: 11)).foregroundStyle(SettingsTheme.mute)
             }
         }
     }
@@ -169,6 +170,17 @@ struct SessionPanelView: View {
                     .disabled(model.merge.busy)
                     .help("Merge this pull request as your GitHub account. Only you can: no agent tool does.")
             }
+        }
+    }
+
+    private var noPull: some View {
+        Card {
+            heading("Pull request")
+            Text("This branch has no pull request yet, so there is nothing to merge.").font(.system(size: 11.5)).foregroundStyle(SettingsTheme.mute)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Ask the Agent for One") { model.onAskForPull?() }
+                .buttonStyle(PanelButton())
+                .help("Sends the agent a comment asking it to open a pull request for this branch")
         }
     }
 

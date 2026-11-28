@@ -315,7 +315,7 @@ agent's actions for this session only (today's pause is all agents at once) unti
   an open pull request at the session's own commit that is not a draft and has no conflicts, and it asks first,
   saying what is not right (checks failed or running on GitHub, a reviewer's changes, no approval here for this
   commit, criteria failed or unchecked, uncommitted changes). The commit is passed to `gh` so it merges nothing
-  else. A session with no pull request shows no Merge; offering to ask the agent for one is not built.
+  else. A session whose branch has no pull request says so, with "Ask the Agent for One", which sends that as a comment.
 - **Spec**: the criteria with a tick, a cross or nothing, when, and "on an older build"; a criterion checked while
   the session was recorded has a play button for that second, once the recording is finished (a recording still
   being written cannot be played). The agent's own judgement of a criterion is kept as such in the check's line.
