@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Verify a change to an Android app in Greenroom's simulators - build this worktree, see which screens differ from the base, drive the app and check the result. Use after changing an Android app's code or resources when the greenroom tools are available, or when asked to run, try, screenshot, compare or verify the app or an APK.
+description: Verify a change to an Android app in Greenroom's simulators - say what you set out to do, build this worktree, see which screens differ from the base, drive the app, check each criterion and ask the person to review. Use after changing an Android app's code or resources when the greenroom tools are available, or when asked to run, try, screenshot, compare or verify the app or an APK.
 argument-hint: "[what to verify]"
 ---
 

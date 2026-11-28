@@ -1,5 +1,5 @@
 {
-  "description": "Tells Greenroom, when it is open, that this session started, is working, is waiting for you, or finished its turn: the session's id, its folder and the event's name. Never a prompt, a transcript or a file.",
+  "description": "Tells Greenroom, when it is open, that this session started, is working, is waiting for you, or finished its turn: the session's id, its folder and the event's name. Never a prompt, a transcript or a file. When a turn ends and you wrote something for this session's agent in Greenroom, the hook hands it your words to carry on with.",
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/greenroom\" hook SessionStart --harness claude" } ] }

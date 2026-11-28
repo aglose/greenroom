@@ -4,8 +4,11 @@ A Mac app where coding agents run and verify the Android apps they are working o
 your app and opens it in Greenroom; it is running in under a second, as an ordinary Mac process, on a device you can
 see, click and judge. No emulator, no virtual machine.
 
-Greenroom is being rebuilt around agents ([docs/AGENT-FIRST-SPEC.md](docs/AGENT-FIRST-SPEC.md) is the spec and says
-what is done). Running an APK by hand is still there: File > Run an APK… (⌘O).
+The loop it is built for: the agent says what it set out to do, builds, runs the app, checks each thing it
+promised, and asks you to look; you see what was checked and when, tell it what to change (pointing at the screen
+if you like), approve, and merge. Many agents can do this at once, each in its own git worktree, and the window
+puts the ones that need you on top. [docs/AGENT-FIRST-SPEC.md](docs/AGENT-FIRST-SPEC.md) is the design and says how
+each part was built. Running an APK by hand is still there: File > Run an APK… (⌘O).
 
 Greenroom is the app around [apksim](https://github.com/aglose/apksim), the open-source engine that runs unmodified
 APKs on Apple Silicon. apksim stays a command-line tool with every switch it has; Greenroom bundles a released
@@ -25,6 +28,27 @@ version of it and adds the workbench.
   Sessions (the window says so, with Undo), so nothing is prepared by hand. A repository you removed is never added
   again by an agent, nothing is added while agents are paused, and a repository an agent added does not fetch or
   build its base branch until you turn "Keep main built" on.
+- **Sessions, by what they need from you.** The sidebar files every agent's session under Ready for review, Needs
+  you, Working or Quiet, each card with the harness's mark, six small steps for the loop (Spec, Code, Build, Run,
+  Verify, Review) and one line saying why it is there. A session is ready when its agent asked for a review, or
+  when its turn ended on a current build with at least one check on it. The top bar counts them, the Dock icon
+  carries a badge, a notification tells you when one becomes ready or comes to need you (if you turn that on), and
+  ⌘' goes to the next one. Window > Group Sessions by Repository gives the list by repository back.
+- **What it set out to do, and your answer.** An agent declares a spec (`spec`: a title, the task, its acceptance
+  criteria) and ticks each criterion with a `check`; the session panel (⇧⌘', or Review in the strip over the
+  device) shows them with when each passed or failed, and plays that moment of the recording. `review` says it is
+  done and waits for you. **Approve** or **Request Changes** answers it; a comment can be **pinned to the screen**
+  (click a node on the device: the agent gets its name, where it is and a picture). What you write reaches the
+  agent with the answer to its review, when its turn ends, or on its next call, whichever comes first. **Merge**
+  is beside it: the session's pull request, its checks, and one button that runs `gh pr merge` as you, for the
+  commit you looked at. Only you approve and merge; no agent tool does either.
+- **Take Over.** The strip over a session's device says who is driving it. Take Over makes that one session's
+  agent wait (it can still read the screen) while every other session's goes on; Hand Back lets it act again and
+  tells it so. Agents on different devices never wait for each other.
+- **CI, watched.** When a session's commit is pushed, Greenroom follows its GitHub Actions runs by itself (through
+  `gh`, your sign-in), shows them in the session's loop, fetches the APK for a repository that builds on CI so the
+  session's simulator runs it, and tells the agent how it ended. It never starts a workflow. Settings > Agents
+  turns it off.
 - Run an APK yourself from the APK screen: File > Run an APK… (⌘O) puts it on the stage, with a drop target, a file
   picker, the recent APKs and the sample app; Escape gives the stage back. An APK double-clicked in Finder opens too.
   Each runs as a simulator inside the Greenroom window.
@@ -157,8 +181,8 @@ version of it and adds the workbench.
   engine's trace viewer, as does opening a `.apkrec` file. Bundles replay with `apksim replay`.
 - **Agents** drive the same simulators over the Model Context Protocol: the screen as compact text with stable
   references, every action answered with what changed, checks and waits in one call
-  ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.md)). The toolbar's Agent button shows what an agent did and
-  can pause it. For Claude Code there is a plugin, with the tools, the status hooks and a skill that verifies a change with them:
+  ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.md)). The toolbar's Agent button (⌥⌘A) shows the chosen session's
+  panel, or every agent's calls, and can pause them all. For Claude Code there is a plugin, with the tools, the status hooks and a skill that verifies a change with them:
   `/plugin marketplace add aglose/greenroom`, then `/plugin install greenroom@greenroom`.
 - **From a shell**, the same tools are the `greenroom` command: `greenroom launch app.apk`,
   `greenroom tap --text Add`, `greenroom check Saved` (exit 1 on `FAIL`), `greenroom screenshot --out shot.png`,

@@ -1,6 +1,6 @@
 {
   "name": "greenroom",
-  "description": "Launch, drive and verify Android apps in Greenroom's simulators on this Mac: build a worktree's change, see which screens differ from the base, tap through them and check the result.",
+  "description": "Run and verify the Android app you are changing in Greenroom's simulators on this Mac: say what you set out to do, build the worktree, see which screens differ from the base, check each criterion in the running app, and ask the person at the Mac to review.",
   "author": { "name": "Greenroom" },
   "homepage": "https://github.com/aglose/greenroom",
   "repository": "https://github.com/aglose/greenroom",

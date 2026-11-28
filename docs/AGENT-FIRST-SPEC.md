@@ -1,13 +1,14 @@
 # Greenroom, agent-first: the spec
 
-A spec (2026-11-27). The owner's decisions are at the end. **A1 to A8 are built**: A1 in `AgentAdoption.swift`,
+A spec (2026-11-27). The owner's decisions are at the end. **All nine steps, A1 to A9, are built**: A1 in `AgentAdoption.swift`,
 `WaitingStage.swift` and the APK screen in `EmptyStage.swift`; A2 in `Harnesses.swift`, `ClaudeConnect.swift` and
 `ConnectScreen.swift`; A3 in `CLI.swift`, `Links.swift`, `Skills.swift` and `plugin/bin/greenroom`; A4 in
 `Hooks.swift` and `HookSessions.swift`; A5 in `Attention.swift`, `AttentionUI.swift` and `Work.swift`; A6 in `AgentReviewTools.swift`, `Review.swift`,
 `SessionPanel.swift` and `Merge.swift`; A7 in `AgentTools.swift` (a device taken over) and `AgentServer.swift`
 (the lanes); A8 in `CIWatch.swift` (checked by `--connect-check`, `--waiting-check`, `--attention-check`,
-`--review-check`, `mcp-check.py` and `plugin-check.py`). What a step left
-for later steps is said where it applies. The rest is not built. It changes what Greenroom is for, what a new user sees first, and how the
+`--review-check`, `mcp-check.py` and `plugin-check.py`); A9 is the words outside the app (README, the plugin's
+manifests and skill, the Homebrew cask's description, PRIVACY.md). Where a step built something other than what
+this page first said, an "As An built it" paragraph says what, and what it left undone. The spec changes what Greenroom is for, what a new user sees first, and how the
 window is arranged. The engine, the simulators, the tools in [AGENTS-INTERFACE.md](AGENTS-INTERFACE.md) and the
 sessions model in [SESSIONS-PLAN.md](SESSIONS-PLAN.md) stay; most of this is a new front on what they already do.
 The clickable prototype is [prototype/agent-first.html](prototype/agent-first.html).
