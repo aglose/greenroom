@@ -118,11 +118,19 @@ final class AgentServer {
         if message["method"] as? String == "greenroom/hook" {
             let params = message["params"] as? [String: Any] ?? [:]
             DispatchQueue.main.async { [weak self] in
-                guard let event = HookLog.shared.add(params) else { return }
-                HookSessions.shared.heard(event)
-                self?.tools.workbench?.agentChanged()
+                guard let self, let event = HookLog.shared.add(params) else { self?.respond(connection, 202, ""); return }
+                // A turn's end, from a hook that can pass an answer on (`answers`): what the person said and the
+                // agent has not been given goes back with it, and the harness carries on with the turn.
+                var say: String?
+                if params["answers"] as? Bool == true, HookSessions.kind(event.event) == .turnEnd,
+                   let s = self.tools.workbench?.sessions.session(containing: event.cwd),
+                   let given = WorkStore.shared.deliver(s.worktree.path, via: "turn end") {
+                    say = "The person at the Mac answered in Greenroom.\n" + WorkStore.words(given, paths: true).text
+                }
+                HookSessions.shared.heard(event, continues: say != nil)
+                self.tools.workbench?.agentChanged()
+                if let say { self.respond(connection, 200, json: ["say": say]) } else { self.respond(connection, 202, "") }
             }
-            respond(connection, 202, "")
             return
         }
         // Hints from a local program that already holds the token: they select a row and grant nothing.

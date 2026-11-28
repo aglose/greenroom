@@ -302,6 +302,7 @@ worktrees.
 repository: Ready for review, Needs you, Working, Quiet. What an agent does decides it:
 
 - A turn that runs (its harness's hook), a build, or a call in the last minute: Working.
+- A session whose agent called `review` is **Ready for review** from that call until the person answers.
 - A `check` counts for the session whose simulator it looked at (else the caller's), on the build that session
   then had. When the turn ends with the build still current and at least one check on it, the session is **Ready
   for review**: the person is told (the top bar's count, the Dock badge, a notification if they turned those on)
@@ -313,11 +314,55 @@ repository: Ready for review, Needs you, Working, Quiet. What an agent does deci
 `sessions` says where each is filed. Hooks are what make this work for a harness (see "Session status"): without
 them a session is Working while calls arrive and Quiet after.
 
+## Spec, review, and what the person says
+
+The loop has two ends an agent declares. Both need a session (a worktree of an added repository).
+
+- **`spec`** (`title`, `text`, `criteria`, `link`) says what the session is for, before the work. The person sees
+  it in the session panel, beside the simulator. Calling it again replaces it: a criterion whose words did not
+  change keeps its tick, so a spec can be refined mid-task. With no arguments it answers the spec as it stands,
+  each criterion `[ ]`, `[passed]` or `[FAILED]` (and "on an older build" when the build has changed since).
+- **`check`** takes `criterion`: the criterion's number (1 is the first; `"2,3"` for several) or its words. A
+  `PASS` ticks it and a `FAIL` marks it failed with what was wrong, at that second of the session's recording, so
+  the person can play the moment. A criterion the spec does not have adds a line to the answer and fails nothing.
+  For what texts cannot show, `check` with `criterion`, `passed` and `note` (and no `visible` or `absent`) records
+  the agent's own judgement: its answer reads `PASS | Activity | the agent's word: ...`, and the person is shown
+  it as the agent's word.
+- **`review`** (`summary`, `timeout_s` 10 to 1800, default 200) says the agent is done. The session is filed as
+  Ready for review at once, whatever else is true of it, and the call waits. It answers `approved`, or
+  `changes requested:` followed by the person's comments, one a line; a pinned comment adds
+  `pinned to "Total" [left,top,right,bottom] on CartActivity (picture 1)` and the picture is an image block of the
+  same answer. When the wait ends first it answers `still waiting: ...`; calling it again joins the same request.
+  An approval is for the commit the session was at: an agent that commits more and asks again is asked about
+  anew. If the person marks the session reviewed without answering, the call says the request was dismissed.
+- **`feedback`** answers what the person said that the agent has not been given (`nothing new from the person`
+  when there is nothing), and with `all` the review's answer and every comment again.
+
+What the person writes reaches the agent by the first of these, once:
+
+1. the answer of a `review` call that is waiting;
+2. the turn's end, where the harness's hook can carry words back: `greenroom hook Stop` then prints
+   `{"decision":"block","reason":"..."}` for Claude Code and Codex, and `{"followup_message":"..."}` for Cursor's
+   own `stop` hook, which each harness documents as "carry on, with this as the next instruction". A pinned
+   comment's picture is named by its path. A turn the person stopped (Cursor's `status` not `completed`) is not
+   continued, and Cursor running Claude Code's hooks is not answered through those (its own hook takes it);
+3. the end of the next tool call's answer, as a block that begins `--- from the person at the Mac, in Greenroom`
+   (pictures follow as image blocks).
+
+An agent with no hooks and no `review` call still hears, by 3. Approve given while nobody waits is kept and
+delivered the same way. `spec`, `review` and `feedback` work while agents are paused: they act on no simulator.
+
+Nothing here approves or merges. Approve, Request Changes and Merge are buttons in the session panel; Merge runs
+`gh pr merge NUMBER --squash|--merge|--rebase --match-head-commit SHA` as the person's own GitHub account, for the
+commit the session is at, after asking them (and saying so first when checks failed, when a criterion failed or
+was not checked, or when they have not approved that commit).
+
 ## Verifying a change
 
 From a worktree of a repository added to Greenroom, with the agent started in that folder:
 
-1. `session`: the branch, whether the build is `current` or `stale`, and the base.
+1. `session`: the branch, whether the build is `current` or `stale`, and the base. `spec` says what you are about
+   to verify, so the person can follow it.
 2. `build`: runs the workspace's recipe and waits. It answers `built <key> ...`, or the last error lines of the log
    to fix. The session's simulator reloads on the new build with its data kept.
 3. `changes`: what differs from the base, screen by screen. A `~` line says why: a pixel count is a screen that looks
@@ -325,7 +370,8 @@ From a worktree of a repository added to Greenroom, with the agent started in th
    redirected control). `history` lists the maps stored for earlier commits and one screen's lineage over time; `screenshot` with its `screen` id and `side: diff` shows where. `+` and `-` are screens the change
    added or removed.
 4. `launch` (with no `apk`), then `tap`, `type`, `check` and `screenshot` on the screens the change touched.
-   `check` answers `PASS` or says what is missing.
+   `check` answers `PASS` or says what is missing; with `criterion` it ticks the spec.
+5. `review`, with a summary: the person approves or says what to change.
 
 ## What `build` and `changes` can and cannot start
 

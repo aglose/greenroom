@@ -46,7 +46,9 @@ final class AgentTools {
     static let releaseInstructions = "Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. "
         + "launch an APK, then tap/type/key/swipe: each action answers with the nodes that changed (+ added, - removed, "
         + "~ changed; refs like e3 stay the same while a node is on screen), so call screen or screenshot only when you "
-        + "need all of it. check verifies texts in one call. APKs and their data stay on this Mac. "
+        + "need all of it. check verifies texts in one call. In a worktree: spec says what you set out to do, check with "
+        + "criterion ticks it for the person, review asks them to look and waits for approved or their comments; a block "
+        + "that begins \"--- from the person\" at the end of an answer is theirs. APKs and their data stay on this Mac. "
         + "Sign-ins are the owner's: never ask for or type passwords. To sign in, run_script a script the owner allowed "
         + "(scripts lists them): it types their stored credentials, which you never see."
 
@@ -112,12 +114,12 @@ final class AgentTools {
                                        "network", "network_rule", "perf", "accessibility", "background", "clipboard", "inspect"]
 
     /// Tools that wait for builds and walks: they run on their own queue so the others still answer meanwhile.
-    static let slow: Set<String> = ["build", "changes", "replay", "tests", "snapshots"]
+    static let slow: Set<String> = ["build", "changes", "replay", "tests", "snapshots", "review"]
 
     static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session", "scripts", "history",
-                                        "network", "perf", "accessibility", "inspect", "sessions", "agent_activity"]
+                                        "network", "perf", "accessibility", "inspect", "sessions", "agent_activity", "feedback"]
 
-    static let tools: [(name: String, description: String, schema: [String: Any])] = core + debugTools + appTools
+    static let tools: [(name: String, description: String, schema: [String: Any])] = core + reviewTools + debugTools + appTools
 
     static let core: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
@@ -158,8 +160,14 @@ final class AgentTools {
          schema(["setting": ["type": "string", "enum": settings.keys.sorted()], "value": str], required: ["setting"])),
         ("screen", "The whole screen as compact lines: ref \"label\" click|field. text keeps lines containing it.",
          schema(["text": str, "bounds": bool])),
-        ("check", "Verify the screen in one call: every text in visible must be on screen, none in absent. Answers PASS or FAIL with what is wrong.",
-         schema(["visible": strings, "absent": strings])),
+        ("check", "Verify the screen in one call: every text in visible must be on screen, none in absent. Answers PASS or FAIL with what is wrong. "
+            + "criterion says which of the spec's criteria this check is about: a pass ticks it for the person, a fail marks it failed, "
+            + "with the moment in the recording. For a criterion texts cannot show (a colour, a layout you looked at in a screenshot) "
+            + "give criterion with passed and note instead of visible and absent: it is shown as your word.",
+         schema(["visible": strings, "absent": strings,
+                 "criterion": ["type": "string", "description": "the criterion's number in the spec (1 is the first; several as \"2,3\") or its text"],
+                 "passed": ["type": "boolean", "description": "with criterion and no visible or absent: your own judgement"],
+                 "note": ["type": "string", "description": "with passed: what you saw, in a few words"]])),
         ("wait_for", "Wait until a text is on screen (or, with gone, no longer is). Answers with what changed.",
          schema(["text": str, "gone": bool, "timeout_ms": int], required: ["text"])),
         ("screenshot", "A picture of the screen, for what the nodes do not show. annotate draws each tappable node's ref on it. "
@@ -217,7 +225,7 @@ final class AgentTools {
     func call(_ name: String, _ args: [String: Any], connection: Connection = Connection()) throws -> [[String: Any]] {
         Reports.shared.count(.agentTool)
         guard AgentTools.tools.contains(where: { $0.name == name }) else { throw Failure(message: "unknown tool \(name)") }
-        if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readsOnly(name, args) {
+        if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readsOnly(name, args), !AgentTools.talk.contains(name) {
             throw Failure(message: "The person at the Mac has paused the agent in Greenroom. Ask them to resume it.")
         }
         // build and changes wait for minutes and run beside the other tools (AgentServer): they touch no simulator and no recording.
@@ -231,7 +239,7 @@ final class AgentTools {
             beginRecording(s)
         }
         do {
-            let content: [[String: Any]]
+            var content: [[String: Any]]
             switch name {
             case "session": content = text(try sessionTool(connection))
             case "build": content = text(try buildTool(args, connection))
@@ -258,11 +266,13 @@ final class AgentTools {
             case "run_script": content = text(try runScript(args))
             case "compare": content = try compare(args)
             default:
-                guard let extra = try debugCall(name, args, connection) ?? appCall(name, args, connection) else { throw Failure(message: "unknown tool \(name)") }
+                guard let extra = try reviewCall(name, args, connection) ?? debugCall(name, args, connection) ?? appCall(name, args, connection) else { throw Failure(message: "unknown tool \(name)") }
                 content = extra
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
-            if name == "check" { noteCheck(first, connection) }
+            if name == "check", let more = noteCheck(first, args, connection) { content = text((content.first?["text"] as? String ?? first) + "\n" + more) }
+            // What the person said since the agent last heard from them rides on the answer (review and feedback hand it over themselves).
+            if !AgentTools.talk.contains(name), let said = handOver(connection) { content += said }
             if recorded, name == "launch", let s = currentSim { beginRecording(s) }
             if recorded { noteRecording(name, args, failed: false) }
             report(name, first, failed: false, connection)
@@ -318,17 +328,6 @@ final class AgentTools {
         let screen = answer(s, head: head, before: before)
         let output = tail.isEmpty ? "(no output)" : (o.output.count > tail.count ? "[…]\n" : "") + tail.joined(separator: "\n")
         return screen + "\n--- output\n" + output
-    }
-
-    /// A `check` answered: it counts for the session whose simulator it looked at, else the caller's (WorkStore). It
-    /// is what lets a session be ready for review when its agent's turn ends.
-    private func noteCheck(_ line: String, _ connection: Connection) {
-        let sim = currentSim ?? (try? self.sim([:]))
-        DispatchQueue.main.async {
-            guard let sessions = self.workbench?.sessions else { return }
-            guard let s = sim.flatMap({ sessions.session(forSimulator: $0) }) ?? connection.session else { return }
-            WorkStore.shared.noteCheck(s.worktree.path, passed: line.hasPrefix("PASS"), summary: line, build: sessions.currentBuild(of: s)?.key)
-        }
     }
 
     private func report(_ tool: String, _ summary: String, failed: Bool, _ connection: Connection) {
@@ -706,11 +705,19 @@ final class AgentTools {
 
     private func check(_ args: [String: Any]) throws -> String {
         let s = try sim(args)
+        let visible = args["visible"] as? [String] ?? [], absent = args["absent"] as? [String] ?? []
+        // The agent's own judgement of a criterion that texts cannot show: said as its word, never as seen on screen.
+        if visible.isEmpty, absent.isEmpty, let passed = args["passed"] as? Bool {
+            guard args["criterion"] != nil else { throw Failure(message: "passed goes with criterion: say which of the spec's criteria you judged") }
+            let note = (args["note"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "\(passed ? "PASS" : "FAIL") | \(activity(s)) | the agent's word" + (note.isEmpty ? "" : ": " + String(note.prefix(300)))
+        }
+        if visible.isEmpty, absent.isEmpty { throw Failure(message: "check needs visible or absent texts (or, for a criterion texts cannot show, criterion with passed)") }
         _ = s.sendSync("settle 2500 150", timeout: 10)
         let labels = nodes(s).map(\.label).filter { !$0.isEmpty }
         func on(_ t: String) -> Bool { labels.contains { $0.localizedCaseInsensitiveContains(t) } }
-        let missing = (args["visible"] as? [String] ?? []).filter { !on($0) }
-        let present = (args["absent"] as? [String] ?? []).filter { on($0) }
+        let missing = visible.filter { !on($0) }
+        let present = absent.filter { on($0) }
         if missing.isEmpty, present.isEmpty { return "PASS | \(activity(s))" }
         var parts: [String] = []
         if !missing.isEmpty { parts.append("not on screen: " + missing.map(ScreenNode.quote).joined(separator: ", ")) }

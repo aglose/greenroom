@@ -107,6 +107,7 @@ extension AgentTools {
         }
         let taking = mainSync { recording.recording(for: s.worktree.path) }
         if let r = taking, r.live { lines.append("recording: your session is being recorded for the person (\(r.file.lastPathComponent))") }
+        lines += reviewLines(s)
         return lines.joined(separator: "\n")
     }
 

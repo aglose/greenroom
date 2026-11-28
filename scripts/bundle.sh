@@ -137,8 +137,8 @@ if [[ -n "$CHECK" ]]; then
   # The workbench's path: the screen streamed to the app as H.264 and decoded, input over the control channel.
   "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
   # The agent interface, as an agent uses it.
-  CONNECT_DIR=; PLAIN_STATE=; SCRIPTS_DIR=; WAITING_DIR=; ATTENTION_DIR=
-  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE" "$SCRIPTS_DIR" "$WAITING_DIR" "$ATTENTION_DIR"' EXIT   # the temporary folders go on failure too
+  CONNECT_DIR=; PLAIN_STATE=; SCRIPTS_DIR=; WAITING_DIR=; ATTENTION_DIR=; REVIEW_DIR=
+  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE" "$SCRIPTS_DIR" "$WAITING_DIR" "$ATTENTION_DIR" "$REVIEW_DIR"' EXIT   # the temporary folders go on failure too
   # Per-device app data, variables (in memory) and scripts with gr, against real simulators, in a state folder of its own.
   SCRIPTS_DIR=$(mktemp -d /tmp/grscripts.XXXXXX)
   scripts_out=$("$C/MacOS/Greenroom" --background --scripts-check "$SCRIPTS_DIR" "$C/Resources/engine-testapp.apk" | grep '^\[greenroom\] scripts:' || true)
@@ -159,6 +159,9 @@ if [[ -n "$CHECK" ]]; then
   # The sidebar by what sessions need: groups, counts, the Dock badge and the notification, from stand-in sessions.
   ATTENTION_DIR=$(mktemp -d /tmp/grattention.XXXXXX)
   GREENROOM_STATE="$ATTENTION_DIR/state" "$C/MacOS/Greenroom" --background --agent-check --attention-check "$ATTENTION_DIR" | tail -1
+  # The review side: the session panel in each state, Approve and Request Changes, and Merge through a stand-in gh.
+  REVIEW_DIR=$(mktemp -d /tmp/grreview.XXXXXX)
+  GREENROOM_STATE="$REVIEW_DIR/state" "$C/MacOS/Greenroom" --background --agent-check --review-check "$REVIEW_DIR" | tail -1
   # The agent tied to its worktree's session: two worktrees, a state folder of its own.
   "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk" --sessions
   # The Claude Code plugin: its manifests, and its launcher script serving MCP through this app.

@@ -70,6 +70,16 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
     private var agentPanel: AgentPanel?
     private let agentHost = NSView()
+    /// The review side: the session panel that shares the agent pane, the loop strip, pins and Merge (Review.swift).
+    private(set) lazy var review = ReviewController(workbench: self)
+    /// The agent pane shows every agent's calls (the old panel) instead of the chosen session.
+    private(set) var agentPaneAll = false
+    private var gridTop: NSLayoutConstraint!
+    /// The chosen simulator, for the review side.
+    var chosen: Simulator? { selected }
+    func say(_ text: String, problem: Bool = false) { lastSaid = text; toast.show(text, problem: problem) }
+    /// The last thing the review side said in the toast (for a check).
+    private(set) var lastSaid = ""
     private let status = NSTextField(wrappingLabelWithString: "")
     // The floating chrome: a glass bar along the top, a badged rail on the right, override pills & Agent HUD on stage.
     private let header = GlassView()
@@ -213,7 +223,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         let content = NSViewController()
         let stack = StageBackground()
-        for v in [grid, waitingStage, connectStage, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        let loopStrip = review.stripView
+        for v in [grid, waitingStage, connectStage, emptyStage, loopStrip, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        // The loop strip sits over the devices of the chosen session, and the stage makes room for it.
+        gridTop = grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8)
+        review.onStrip = { [weak self] on in self?.gridTop.constant = Design.barHeight + 8 + (on ? 44 : 0) }
         emptyStage.isHidden = true
         connectStage.isHidden = true
         connectStage.flow.onDone = { [weak self] in self?.leaveConnectScreen() }
@@ -237,7 +251,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
         buildAgentHud()
         NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
+            gridTop,
+            loopStrip.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
+            loopStrip.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
+            loopStrip.trailingAnchor.constraint(equalTo: grid.trailingAnchor, constant: -14),
+            loopStrip.heightAnchor.constraint(equalToConstant: 38),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
             gridTrailing,
             grid.bottomAnchor.constraint(equalTo: bottomDock.topAnchor, constant: -6),
@@ -472,8 +490,17 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         for v in grid.views { if let sim = v.simulator, case .ended(let code) = sim.state { v.setMessage(Self.ended(sim, code)) } }
         for v in grid.views {
-            v.inspecting = inspecting && v.simulator === selected
-            v.onPoint = { [weak self] x, y in self?.inspector.pick(atDeviceX: x, y: y) }
+            // Pinning a comment picks a node too, on the session's own device, with the Inspector closed.
+            let pinning = review.isPinning(v.simulator)
+            v.inspecting = (inspecting && v.simulator === selected) || pinning
+            v.onPoint = { [weak self, weak v] x, y in
+                guard let self else { return }
+                if let sim = v?.simulator, self.review.isPinning(sim) { self.review.point(sim, x: x, y: y) } else { self.inspector.pick(atDeviceX: x, y: y) }
+            }
+            v.onPick = { [weak self, weak v] x, y in
+                guard let self, let sim = v?.simulator else { return }
+                self.review.pick(sim, x: x, y: y)
+            }
         }
     }
 
@@ -543,6 +570,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if !groups.isEmpty && ClaudeUI.offersTitles { rows.append(.claudeTitles) }   // rows read as branches, and nothing is suggested, until it is on
         sessions.noteAttention()   // which group each session is in, since when, and the news of it
         attentionChip.show(sessions.lastCounts)
+        reloadReview()
         if sessions.groupByRepository {
             for group in groups {
                 guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
@@ -741,13 +769,53 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     private func mountAgentPanel() {
         agentHost.subviews.forEach { $0.removeFromSuperview() }
-        guard let v = agentPanel?.view else { return }
-        v.translatesAutoresizingMaskIntoConstraints = false
-        agentHost.addSubview(v)
-        NSLayoutConstraint.activate([
-            v.topAnchor.constraint(equalTo: agentHost.topAnchor), v.bottomAnchor.constraint(equalTo: agentHost.bottomAnchor),
-            v.leadingAnchor.constraint(equalTo: agentHost.leadingAnchor), v.trailingAnchor.constraint(equalTo: agentHost.trailingAnchor),
-        ])
+        review.model.onClose = { [weak self] in self?.show(nil, closing: .agent) }
+        review.model.onAllAgents = { [weak self] in self?.setAgentPaneAll(true) }
+        agentPanel?.onSession = { [weak self] in self?.setAgentPaneAll(false) }
+        for v in [agentPanel?.view, review.panelView].compactMap({ $0 }) {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            agentHost.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.topAnchor.constraint(equalTo: agentHost.topAnchor), v.bottomAnchor.constraint(equalTo: agentHost.bottomAnchor),
+                v.leadingAnchor.constraint(equalTo: agentHost.leadingAnchor), v.trailingAnchor.constraint(equalTo: agentHost.trailingAnchor),
+            ])
+        }
+        layoutAgentPane()
+    }
+
+    /// Which of the pane's two panels shows: the chosen session's, or every agent's calls when there is no session
+    /// chosen or the person asked for them.
+    private func layoutAgentPane() {
+        let all = agentPaneAll || review.session == nil
+        agentPanel?.view.isHidden = !all
+        review.panelView.isHidden = all
+    }
+
+    func setAgentPaneAll(_ all: Bool) {
+        agentPaneAll = all
+        layoutAgentPane()
+        if all { agentPanel?.refresh() } else { review.reload() }
+    }
+
+    /// The session panel, on the session the person chose.
+    @objc func showSession(_ sender: Any? = nil) {
+        guard agentPanel != nil else { return }
+        agentPaneAll = false
+        review.reload()
+        layoutAgentPane()
+        if !showingAgent { show(.agent) }
+    }
+
+    /// Whether the session panel is what the agent pane shows (for a check).
+    var sessionPanelShown: Bool { showingAgent && !review.panelView.isHidden }
+
+    /// A comment began or stopped being pinned: the device's clicks pick a node meanwhile.
+    func pinChanged() { refreshGrid() }
+
+    /// The review side follows the session the person chose.
+    func reloadReview() {
+        review.reload()
+        layoutAgentPane()
     }
 
     /// An edge of a full-stage sheet that gives way to the window: a sheet that needs more room than a narrow window
@@ -1691,6 +1759,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
         add("pane.inspect", inspecting ? "Stop inspecting" : "Inspect the screen", "Panes", "cursorarrow.rays", "⌥⌘I", keywords: "nodes accessibility tree") { [weak self] in self?.toggleInspector(nil) }
         add("pane.agent", "Agent activity", "Panes", "sparkles", "⌥⌘A", keywords: "claude mcp") { [weak self] in self?.showAgent(nil) }
+        add("pane.session", "Review this session", "Panes", "checkmark.seal", "⇧⌘'", keywords: "spec criteria approve request changes comment pin merge review") { [weak self] in self?.showSession(nil) }
         add("snapshots.run", "Run screenshot tests…", "Panes", "photo.stack", keywords: "golden snapshot visual regression compare") { [weak self] in self?.showSnapshots(run: true) }
         add("snapshots.show", "Show screenshot test results", "Panes", "photo.stack", keywords: "golden snapshot visual regression review") { [weak self] in self?.showSnapshots() }
         add("map.walk", "Map the app's screens…", "Map", "point.3.connected.trianglepath.dotted", keywords: "crawl explore walk graph screens") { [weak self] in self?.showMap(walk: true) }
@@ -1788,7 +1857,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .tests: testsPane.setActive(on)
         case .diagnostics: diagnosticsPane.follow(on ? selected : nil)
         case .recordings: recordingsPane.setShown(on, folder: recordings)
-        case .agent: if on { agentPanel?.refresh() }
+        case .agent:
+            if on { agentPanel?.refresh(); reloadReview() } else { review.endPin() }
         }
     }
 
@@ -2934,6 +3004,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         reloadWaitingStage()
         if showingConnect { reloadConnectStage() }
         agentPanel?.refresh()
+        reloadReview()
         updateAgentHud()
         updateChrome()
     }

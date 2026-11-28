@@ -1,10 +1,11 @@
 # Greenroom, agent-first: the spec
 
-A spec (2026-11-27). The owner's decisions are at the end. **A1 to A5 are built**: A1 in `AgentAdoption.swift`,
+A spec (2026-11-27). The owner's decisions are at the end. **A1 to A6 are built**: A1 in `AgentAdoption.swift`,
 `WaitingStage.swift` and the APK screen in `EmptyStage.swift`; A2 in `Harnesses.swift`, `ClaudeConnect.swift` and
 `ConnectScreen.swift`; A3 in `CLI.swift`, `Links.swift`, `Skills.swift` and `plugin/bin/greenroom`; A4 in
-`Hooks.swift` and `HookSessions.swift`; A5 in `Attention.swift`, `AttentionUI.swift` and `Work.swift` (checked by
-`--connect-check`, `--waiting-check`, `--attention-check`, `mcp-check.py` and `plugin-check.py`). What a step left
+`Hooks.swift` and `HookSessions.swift`; A5 in `Attention.swift`, `AttentionUI.swift` and `Work.swift`; A6 in `AgentReviewTools.swift`, `Review.swift`,
+`SessionPanel.swift` and `Merge.swift` (checked by `--connect-check`, `--waiting-check`, `--attention-check`,
+`--review-check`, `mcp-check.py` and `plugin-check.py`). What a step left
 for later steps is said where it applies. The rest is not built. It changes what Greenroom is for, what a new user sees first, and how the
 window is arranged. The engine, the simulators, the tools in [AGENTS-INTERFACE.md](AGENTS-INTERFACE.md) and the
 sessions model in [SESSIONS-PLAN.md](SESSIONS-PLAN.md) stay; most of this is a new front on what they already do.
@@ -147,6 +148,13 @@ connecting, then goes.
 - What no harness's hooks say (A4): that a permission was granted (a session shows as waiting until its tool
   finishes) and, outside Claude Code's idle notification a minute later, that the person interrupted (it shows as
   working until 15 minutes pass with no hook).
+- A turn's end that carries the person's words back (A6). Read from each harness's documentation on 2026-11-27,
+  and not run on a real harness: Claude Code and Codex continue the turn when a `Stop` hook prints
+  `{"decision":"block","reason":"..."}` (Codex: "it tells Codex to continue and automatically creates a new
+  continuation prompt ... using your `reason` as that prompt text", and plain text on stdout is invalid for
+  `Stop`, so the hook prints JSON or nothing); Cursor submits `followup_message` from its `stop` hook as the next
+  user message, five times in a row at most by default. How Cursor reads `decision` from a Claude Code hook it
+  runs is not documented, so that path is not used. Codex still runs only hooks the person trusted.
 - Antigravity's file names and skills folder: sources disagree.
 - Whether Cursor and VS Code show pictures from a tool result. Only Claude Code documents it.
 - MCP Tasks in a second client. If only Claude Code has them, `review` and the CI wait stay blocking calls.
@@ -290,6 +298,34 @@ agent's actions for this session only (today's pause is all agents at once) unti
   queued and delivered by the first of: the `review` call that is waiting, the turn-end hook, the next tool call's
   answer. The panel says which ("delivered when its turn ends").
 
+**As A6 built it** (`Review.swift`, `SessionPanel.swift`, `Merge.swift`):
+
+- The panel shares the right slot with the old feed (⌥⌘A, the ✦ button): with a session chosen it is that
+  session's panel, and "All agents" gives the feed of every agent's calls, with pause and recording, back
+  ("Session" returns). **Window > Review This Session** is ⇧⌘'. Going to a session that waits for a review opens
+  it, when the right side is free.
+- Its first card says where the session stands (Ready for review with the agent's summary, Approved or Changes
+  requested and whether the agent has been told, else its group's line) over the loop's six marks, with **Approve**
+  and **Request Changes**. Request Changes sends what is written in the comment box with it, and asks for a
+  comment when there is none. An approval is for the commit the session is at; more commits and the buttons are
+  back. "Mark as reviewed" stays on the card, and takes a waiting request back without an answer.
+- **Merge** is not gated on Approve (decision 6 puts it beside): it is offered whenever the session's branch has
+  an open pull request at the session's own commit that is not a draft and has no conflicts, and it asks first,
+  saying what is not right (checks failed or running on GitHub, a reviewer's changes, no approval here for this
+  commit, criteria failed or unchecked, uncommitted changes). The commit is passed to `gh` so it merges nothing
+  else. A session with no pull request shows no Merge; offering to ask the agent for one is not built.
+- **Spec**: the criteria with a tick, a cross or nothing, when, and "on an older build"; a criterion checked while
+  the session was recorded has a play button for that second, once the recording is finished (a recording still
+  being written cannot be played). The agent's own judgement of a criterion is kept as such in the check's line.
+- **Tell the agent**: comments with whether and how each was given; one not yet given can be taken back. **Pin to
+  Screen** makes the next click on the session's device pick a node (the Inspector need not be open): the comment
+  then carries the node's label, its frame, the screen's name and a picture of that part of the screen with the
+  node outlined.
+- **Last calls**: the session's last twelve calls. The comments are in their own card, not interleaved.
+- **The loop strip** shows over the stage when the chosen simulator is the chosen session's: the six steps with
+  their line of detail and a button (Review, or Session) that opens the panel. Its steps do not open their own
+  detail yet.
+
 Changes, Screen Map, Jobs, Log, Network and the Device drawer are where they are.
 
 ## What agents get
@@ -303,8 +339,10 @@ Four additions; everything else is the existing tool list.
 | `review` | says the agent is done: `summary`. Moves the session to Ready and waits, as `build` does (200 s, then "still waiting"; calling again joins). Answers `approved`, or `changes requested:` with the person's comments and, for a pinned one, the node and a picture of it |
 | `feedback` | the person's comments not yet delivered, for an agent that did not call `review` |
 
-Every tool answer also ends with a line when comments are waiting ("1 comment from the person: call feedback"),
-so an agent in a harness with no hooks still hears.
+Every tool answer also ends with what the person said when comments are waiting, so an agent in a harness with
+no hooks still hears. (As built: the comments themselves ride on the answer, not a line asking for `feedback`,
+which saves the call. `check` also takes `passed` and `note` for a criterion texts cannot show, kept as the
+agent's word; and `review` may wait up to 1800 s.)
 
 The skill's loop becomes: `spec`, `build`, `changes`, `launch`, drive and `check` each criterion, `review`. An
 agent that calls none of the new tools still works as today; its session shows its calls and checks without

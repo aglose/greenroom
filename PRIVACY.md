@@ -93,7 +93,15 @@ the line each hook runs are shown on the Connect screen. Codex asks you to trust
 
 The sidebar files each session by what it needs from you. For that Greenroom keeps, in its state folder on this
 Mac (`work/`, a small file a session), the first line of each `check` an agent ran ("PASS | MainActivity"), when it
-ran and on which build, and when the agent's turn last ended. If you say yes (first run's last step, or Settings >
+ran and on which build, and when the agent's turn last ended. The same file holds what an agent declared with
+`spec` (the task's title, text and criteria, and how each check of them went), the summary it gave when it asked
+for your review, your answer, and the comments you wrote for it; a comment pinned to the screen has a small picture
+of that part of the screen beside the file. Your answer and your comments go to the agent that works in that
+session, over the connection it already has, and nowhere else: with the answer to its `review` call, at the end of
+its next tool call's answer, or, where its harness's hook can carry it, when its turn ends (then the hook Greenroom
+installed prints your words for the harness to continue with). Removing the session removes the file and the
+pictures. Merge runs `gh pr merge` as the GitHub account you signed `gh` in with, only when you press it and say
+yes. If you say yes (first run's last step, or Settings >
 Agents), Greenroom posts a notification on this Mac when a session becomes ready for review or comes to need you
 while Greenroom is not in front: its text is the session's title, the count of its checks and the repository's
 name. It is macOS's own notification, off until you turn it on, and nothing about it leaves this Mac.

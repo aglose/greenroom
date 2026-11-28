@@ -874,6 +874,12 @@ final class SessionsController {
     }
 
     /// The session whose worktree is `folder` (a path `git rev-parse --show-toplevel` gave), symlinks resolved.
+    /// The session whose worktree FOLDER is, or is inside of (a harness's hook names the folder its agent works in).
+    func session(containing folder: URL) -> Session? {
+        guard let path = ClaudeSessions.owner(of: folder, among: sessions.map(\.worktree)) else { return nil }
+        return sessions.first { $0.worktree.resolvingSymlinksInPath().path == path }
+    }
+
     func session(atWorktree folder: URL) -> Session? {
         let want = folder.resolvingSymlinksInPath().path
         return sessions.first { $0.worktree.resolvingSymlinksInPath().path == want }

@@ -66,8 +66,9 @@ final class HookSessions {
         harness + "\n" + (session.isEmpty ? folder.path : session)
     }
 
-    /// One hook, as HookLog kept it.
-    func heard(_ e: HookLog.Event) {
+    /// One hook, as HookLog kept it. `continues`: a turn's end that was answered with what the person said, so
+    /// the harness goes on with the same turn (it is still working, and no turn ended).
+    func heard(_ e: HookLog.Event, continues: Bool = false) {
         let harness = ConnectModel.displayName(client: e.harness)
         let folder = e.cwd.resolvingSymlinksInPath()
         let k = Self.key(harness, e.session, folder)
@@ -85,6 +86,7 @@ final class HookSessions {
         case .working: entry.state = .working
         case .waiting: entry.state = .waiting
         case .idle: entry.state = .idle
+        case .turnEnd where continues: entry.state = .working
         case .turnEnd:
             // A harness that runs two hooks for one turn's end (Cursor also runs Claude Code's) ends one turn.
             ended = entry.turnEnded.map { now.timeIntervalSince($0) > 2 } ?? true

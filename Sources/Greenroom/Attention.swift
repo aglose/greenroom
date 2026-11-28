@@ -383,15 +383,26 @@ extension SessionsController {
     }
 }
 
-// MARK: - What A6 declares
+// MARK: - What the agent declared, and what the person answered (Work.swift)
 
 extension SessionsController {
     /// The summary of a `review` call that waits for the person's answer (nil: none does).
-    func reviewAsked(_ worktree: String) -> String? { nil }
+    func reviewAsked(_ worktree: String) -> String? { WorkStore.shared.work(worktree).reviewWaiting?.summary }
     /// The session's spec in a few words ("5 criteria"), when its agent declared one.
-    func specSummary(_ worktree: String) -> String? { nil }
-    /// The person's last answer to a review, while it stands.
-    func reviewVerdict(_ worktree: String) -> (approved: Bool, at: Date)? { nil }
+    func specSummary(_ worktree: String) -> String? {
+        guard let spec = WorkStore.shared.work(worktree).spec else { return nil }
+        return spec.criteria.isEmpty ? "declared" : "\(spec.criteria.count) criteri\(spec.criteria.count == 1 ? "on" : "a")"
+    }
+    /// The person's last answer to a review.
+    func reviewVerdict(_ worktree: String) -> (approved: Bool, at: Date)? {
+        guard let r = WorkStore.shared.work(worktree).review, let a = r.answer, let at = r.answered else { return nil }
+        return (a == .approved, at)
+    }
+    /// Whether the person's approval stands: it was given on the commit the session is still at.
+    func approvalStands(_ s: Session) -> Bool {
+        guard let r = WorkStore.shared.work(s.worktree.path).review, r.answer == .approved else { return false }
+        return r.head == nil || r.head == s.head
+    }
 }
 
 // MARK: - Notifications and the Dock badge

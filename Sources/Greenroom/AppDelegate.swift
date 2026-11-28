@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainCheckIfAsked()
         waitingCheckIfAsked()
         attentionCheckIfAsked()
+        reviewCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
         recipesCheckIfAsked()
@@ -542,6 +543,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AttentionCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
     }
 
+    /// `Greenroom --review-check DIR`: see ReviewCheck. Only with a state folder of its own, as the attention check.
+    private func reviewCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--review-check"), i + 1 < args.count else { return }
+        guard Engine.agentCheck, ProcessInfo.processInfo.environment["GREENROOM_STATE"]?.hasPrefix("/") == true else {
+            print("review check: run it with --agent-check and GREENROOM_STATE set to an empty folder, never on your own state")
+            exit(2)
+        }
+        ReviewCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
+    }
+
     /// `Greenroom --main-check DIR APK`: see MainCheck.
     private func mainCheckIfAsked() {
         let args = CommandLine.arguments
@@ -757,6 +769,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.addItem(to(workbench: #selector(Workbench.showJobs(_:)), "Jobs", "j", [.command, .option]))
         win.addItem(.separator())
         win.addItem(to(workbench: #selector(Workbench.nextNeedingYou(_:)), "Next Session That Needs You", "'"))
+        win.addItem(to(workbench: #selector(Workbench.showSession(_:)), "Review This Session", "'", [.command, .shift]))
         win.addItem(to(workbench: #selector(Workbench.toggleGroupByRepository(_:)), "Group Sessions by Repository", ""))
 
         let help = NSMenu(title: "Help")

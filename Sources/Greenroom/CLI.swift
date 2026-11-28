@@ -390,7 +390,9 @@ enum CLI {
                     + "For a harness's hooks. Tells the running Greenroom that EVENT happened: the harness's name, its\n"
                     + "session id and working folder (read from the JSON on stdin, or given here) and the event's name.\n"
                     + "Never a prompt, a transcript or a file's content. Exits 0, app open or not. Prints nothing,\n"
-                    + "except for Cursor, which reads a hook's answer: {\"continue\":true} or {}.")
+                    + "except for Cursor, which reads a hook's answer ({\"continue\":true} or {}), and at a turn's end\n"
+                    + "when the person said something in Greenroom the agent has not been given: then it prints what\n"
+                    + "makes the harness carry on with those words (decision block and reason; Cursor: followup_message).")
                 exit(0)
             default: if event == nil, !a.hasPrefix("-") { event = a }
             }
@@ -404,6 +406,7 @@ enum CLI {
         // The answer follows the hook file the command was written into (its --harness), so it is the same whether
         // or not the app is there to hear it: Cursor running Claude Code's hooks is answered as Claude Code is.
         let cursor = harness.lowercased() == "cursor"
+        let flag = harness   // as the hooks file wrote it: `harness` below may become what the input says
         // No app: nothing to tell, and none is started.
         guard let e = AgentShim.endpoint() else { done(cursor: cursor, event ?? "") }
         let input = (try? JSONSerialization.jsonObject(with: stdin(seconds: 0.25, limit: 4 << 20))) as? [String: Any] ?? [:]
@@ -412,11 +415,27 @@ enum CLI {
         if input["cursor_version"] != nil { harness = "cursor" }
         let name = event ?? text("hook_event_name", "event", "type") ?? ""
         let folder = cwd ?? text("cwd") ?? (input["workspace_roots"] as? [String])?.first ?? FileManager.default.currentDirectoryPath
-        let params: [String: Any] = ["harness": harness, "event": name, "cwd": folder,
+        var params: [String: Any] = ["harness": harness, "event": name, "cwd": folder,
                                      "session": session ?? text("session_id", "conversation_id", "thread_id") ?? ""]
+        // A turn's end can be answered with what the person said in Greenroom, where this command knows how the
+        // harness reads an answer: Claude Code and Codex by their own hooks, Cursor by its own (not when it runs
+        // Claude Code's, whose answer it may read differently), and not for a turn the person stopped.
+        let turnEnd = name.lowercased().filter(\.isLetter) == "stop"
+        let written = flag.lowercased()
+        let knows = cursor ? true : (["claude", "claude-code", "codex"].contains(written) && input["cursor_version"] == nil)
+        let stopped = (input["status"] as? String).map { $0 != "completed" } ?? false
+        let answers = turnEnd && knows && !stopped
+        if answers { params["answers"] = true }
         let message: [String: Any] = ["jsonrpc": "2.0", "method": "greenroom/hook", "params": params]
         if !name.isEmpty, let body = try? JSONSerialization.data(withJSONObject: message) {
-            _ = AgentShim.post(body, to: e, cwdOverride: folder.hasPrefix("/") ? folder : nil, timeout: 1)
+            let got = AgentShim.post(body, to: e, cwdOverride: folder.hasPrefix("/") ? folder : nil, timeout: answers ? 3 : 1)
+            if answers, let got, got.status == 200, let say = ((try? JSONSerialization.jsonObject(with: got.data)) as? [String: Any])?["say"] as? String, !say.isEmpty {
+                let out: [String: Any] = cursor ? ["followup_message": say] : ["decision": "block", "reason": say]
+                if let data = try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys]) {
+                    print(String(decoding: data, as: UTF8.self))
+                    exit(0)
+                }
+            }
         }
         done(cursor: cursor, name)
     }

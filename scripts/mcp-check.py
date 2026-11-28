@@ -222,6 +222,7 @@ cp "{built_apk}" "$GREENROOM_OUT"
             session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up)
         more_tools(a, away, trees, state_dir, apk, expect)
         command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait)
+        review_loop(exe, env, a, trees, other, state_dir, expect, wait, Shim)
         adoption(repo3, repo4, state_dir, Shim, expect)
     finally:
         for s in shims:
@@ -471,6 +472,158 @@ def command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait):
            code == 0 and started is not None and "launched" in out and sum(1 for l in now.split("\n") if re.match(r"s\d+ ", l)) == count + 1, f"{code} {out} {err}\n{now}")
     if started:
         a.call("close", sim=started.group(1))
+
+
+def review_loop(exe, env, a, trees, other, state_dir, expect, wait, Shim):
+    """The loop's two ends (A6): spec says what a session is for, check ticks its criteria, review waits for the
+    person's answer, and what the person says reaches the agent: with the review's answer, on the next tool's answer,
+    by feedback, and when a turn ends (the hook's answer, in each harness's own form). The person is played through
+    review-person-check.json, which the app reads only with --agent-check and acts on with the panel's own functions."""
+    import threading, base64
+    def cli(*args, cwd=trees["a"], stdin=None):
+        p = subprocess.run([exe, "--agent-check", "--cli", *args], cwd=cwd, env=env, input=stdin if stdin is not None else "", capture_output=True, text=True, timeout=60)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    def person(**what):
+        done = state_dir + "/review-person-check.json.done"
+        if os.path.exists(done):
+            os.remove(done)
+        tmp = state_dir + "/review-person-check.tmp"
+        json.dump(dict(what, worktree=trees["a"]), open(tmp, "w"))
+        os.rename(tmp, state_dir + "/review-person-check.json")
+        return wait(lambda: open(done).read() if os.path.exists(done) else None, 60)
+    def blocks(shim, tool, **args):
+        r = shim.rpc("tools/call", {"name": tool, "arguments": args}).get("result", {})
+        return r.get("content", []), bool(r.get("isError"))
+    def session_line(start):
+        return next((l for l in a.call("session")[0].split("\n") if l.startswith(start)), "")
+    def filed():
+        line = next((l for l in a.call("sessions")[0].split("\n") if l.strip().split(" | ")[0] == "feat-a"), "")
+        return next((p for p in line.split(" | ") if p.split(":")[0] in ("ready for review", "needs you", "working")), "quiet")
+    m = re.search(r"simulator: (s\d+) running", a.call("session")[0])
+    sim = m.group(1) if m else "s1"
+    listed = {t["name"] for t in a.rpc("tools/list")["result"]["tools"]}
+    expect("tools/list has spec, review and feedback", {"spec", "review", "feedback"} <= listed, sorted(listed))
+    t, err = a.call("spec")
+    expect("spec with nothing declared says so", not err and t.startswith("no spec yet"), t)
+    away = Shim(other)
+    t, err = away.call("spec", title="Nowhere")
+    expect("spec outside a session is refused", err and "not a worktree" in t, t)
+    t, err = a.call("spec", text="No title")
+    expect("a first spec needs a title", err and "title" in t, t)
+    t, err = a.call("spec", title="Count the taps", text="Each tap on Add is counted.", link="https://example.invalid/issues/7",
+                    criteria=["The counter shows the taps", "No sign-in is asked for", "The header is green"])
+    expect("spec declares the task and its criteria, numbered and unticked",
+           not err and t.startswith("the person now sees: Count the taps") and "1. [ ] The counter shows the taps" in t and "3. [ ] The header is green" in t and "tick each with check" in t, t)
+    expect("session says the spec", session_line("spec: ") == 'spec: "Count the taps", 0 of 3 criteria passed', a.call("session")[0])
+    t, err = a.call("check", sim=sim, visible=["FAB clicks"], criterion="1")
+    expect("check with a criterion ticks it", not err and t.startswith("PASS") and "criterion 1 passed: The counter shows the taps" in t and "2 not checked yet" in t, t)
+    t, err = a.call("check", sim=sim, absent=["FAB clicks"], criterion="No sign-in is asked for")
+    expect("... named by its words, a failed check marks it failed", t.startswith("FAIL") and "criterion 2 FAILED: No sign-in is asked for" in t and "1 not checked yet, 1 failed" in t, t)
+    t, err = a.call("spec")
+    expect("spec answers how each stands, the failed one with why", "1. [passed] The counter" in t and "2. [FAILED] No sign-in is asked for (on screen but should not be" in t, t)
+    t, err = a.call("check", sim=sim, absent=["Sign in to continue"], criterion="2")
+    expect("... and passing it later ticks it", t.startswith("PASS") and "criterion 2 passed" in t, t)
+    t, err = a.call("check", sim=sim, visible=["FAB clicks"], criterion="9")
+    expect("a criterion the spec does not have is said, and the check still answers", t.startswith("PASS") and 'no criterion "9": the spec has 3' in t, t)
+    t, err = a.call("check", sim=sim, passed=True)
+    expect("the agent's own judgement needs a criterion", err and "criterion" in t, t)
+    t, err = a.call("check", sim=sim)
+    expect("check with nothing to verify is refused", err and "visible or absent" in t, t)
+    t, err = a.call("check", sim=sim, criterion="3", passed=True, note="green in the screenshot")
+    expect("a criterion texts cannot show is the agent's word, and said to be",
+           t.startswith("PASS") and "the agent's word: green in the screenshot" in t and "criterion 3 passed" in t and "every criterion has passed: call review" in t, t)
+    t, err = a.call("spec", title="Count the taps", criteria=["The counter shows the taps", "Nothing asks for a sign-in", "The header is green"])
+    expect("a spec declared again keeps the ticks of criteria whose words did not change",
+           "1. [passed] The counter" in t and "2. [ ] Nothing asks for a sign-in" in t and "3. [passed] The header is green" in t and "Each tap on Add is counted." in t, t)
+    a.call("check", sim=sim, absent=["Sign in to continue"], criterion="2")
+    # review waits for the person; their answer is the call's answer.
+    a2 = Shim(trees["a"])
+    got = {}
+    def ask(key, **args):
+        got[key] = blocks(a2, "review", **args)
+    th = threading.Thread(target=ask, args=("first",), kwargs={"summary": "Counted the taps and checked all three.", "timeout_s": 90})
+    th.start()
+    expect("a session that asked for a review is ready for review while its call waits", wait(lambda: filed().startswith("ready for review"), 20), filed())
+    expect("... and session says it waits", session_line("review: ") == "review: waiting for the person", a.call("session")[0])
+    expect("the person approves", person(answer="approved") == "ok", "")
+    th.join(30)
+    text = "\n".join(c["text"] for c in got.get("first", ([], False))[0] if c["type"] == "text")
+    expect("review answers approved", not th.is_alive() and text == "approved", text)
+    expect("... session says so, for the commit it was given on", re.fullmatch(r"review: approved at [0-9a-f]{7}", session_line("review: ")), a.call("session")[0])
+    expect("... and the session is no longer waiting for a review", wait(lambda: not filed().startswith("ready for review"), 10), filed())
+    # A comment with nobody waiting rides on the next tool's answer, once.
+    expect("the person writes a comment", person(comment="Make the counter bold") == "ok", "")
+    t, err = a.call("screen", sim=sim)
+    expect("the next tool's answer carries what the person said", t.rstrip().endswith("--- from the person at the Mac, in Greenroom\n1 comment from the person:\n- Make the counter bold"), t[-300:])
+    t, err = a.call("screen", sim=sim)
+    expect("... once", "from the person" not in t, t[-300:])
+    t, err = a.call("feedback")
+    expect("feedback with nothing new says so", not err and t == "nothing new from the person", t)
+    t, err = a.call("feedback", all=True)
+    expect("feedback all answers the review and every comment again", "review: approved" in t and "- Make the counter bold" in t, t)
+    # Changes requested, with a comment pinned to a node: its name, where it is, and a picture.
+    t, _ = a.call("screen", sim=sim, bounds=True, text="Add")
+    box = re.search(r"\[(\d+),(\d+),(\d+),(\d+)\]", t)
+    x, y = ((int(box.group(1)) + int(box.group(3))) // 2, (int(box.group(2)) + int(box.group(4))) // 2) if box else (100, 100)
+    th = threading.Thread(target=ask, args=("second",), kwargs={"summary": "Again.", "timeout_s": 90})
+    th.start()
+    wait(lambda: filed().startswith("ready for review"), 20)
+    said = person(comment="This says Add: it should say Add a tap", pin=[x, y], answer="changes")
+    expect("the person pins a comment to a node of the screen and asks for changes", said == "ok", str(said) + " " + t[:200])
+    th.join(30)
+    content = got.get("second", ([], False))[0]
+    text = "\n".join(c["text"] for c in content if c["type"] == "text")
+    pictures = [c for c in content if c["type"] == "image"]
+    expect("review answers changes requested, with the comment and the node it is pinned to",
+           text.startswith("changes requested:\n- This says Add: it should say Add a tap\n  pinned to \"Add\" [") and "(picture 1)" in text, text)
+    expect("... and a picture of it", len(pictures) == 1 and base64.b64decode(pictures[0]["data"])[:8] == b"\x89PNG\r\n\x1a\n" and pictures[0]["mimeType"] == "image/png",
+           str([(c["type"], len(c.get("data", ""))) for c in content]))
+    expect("... session says changes were asked for", session_line("review: ") == "review: changes requested", a.call("session")[0])
+    # Nobody waiting when the answer comes: the turn's end carries it, in the harness's own form.
+    t, err = a.call("review", timeout_s=10)
+    expect("a review nobody answers in time says it is still waiting", not err and t.startswith("still waiting: the person has not answered after 10 s"), t)
+    person(answer="approved")
+    code, out, errs = cli("hook", "Stop", "--harness", "codex", "--session", "rev-1", "--cwd", trees["a"], cwd=other)
+    try:
+        said = json.loads(out)
+    except Exception:
+        said = {}
+    expect("Codex's turn-end hook is answered with what the person said, as a reason to go on",
+           code == 0 and said.get("decision") == "block" and said.get("reason", "").endswith("approved") and "in Greenroom" in said.get("reason", ""), f"{code} {out!r} {errs!r}")
+    def agent_line():
+        return session_line("agent session: ")
+    expect("... and the session is still working: the turn goes on", wait(lambda: agent_line() == "agent session: Codex (working)", 10), agent_line())
+    code, out, errs = cli("hook", "Stop", "--harness", "codex", "--session", "rev-1", "--cwd", trees["a"], cwd=other)
+    expect("with nothing more to say the turn's end prints nothing, and the turn ends", code == 0 and out == "" and wait(lambda: agent_line() == "agent session: Codex (idle)", 10), f"{code} {out!r} {agent_line()}")
+    cli("hook", "SessionEnd", "--harness", "codex", "--session", "rev-1", "--cwd", trees["a"], cwd=other)
+    # Cursor: a turn the person stopped carries nothing; Claude Code's hook run by Cursor carries nothing; its own does.
+    person(comment="And make it blue")
+    def cursor(event, harness="cursor", status="completed"):
+        body = json.dumps({"conversation_id": "rev-2", "workspace_roots": [trees["a"]], "hook_event_name": event, "cursor_version": "9.9", "status": status})
+        return cli("hook", event, "--harness", harness, stdin=body, cwd=other)
+    code, out, errs = cursor("stop", status="aborted")
+    expect("a turn the person stopped in Cursor is not continued", code == 0 and out == "{}", f"{code} {out!r}")
+    code, out, errs = cursor("Stop", harness="claude")
+    expect("Claude Code's hook run by Cursor does not take the comment (Cursor's own hook does)", code == 0 and out == "", f"{code} {out!r}")
+    code, out, errs = cursor("stop")
+    try:
+        said = json.loads(out)
+    except Exception:
+        said = {}
+    expect("Cursor's turn-end hook is answered with a follow-up message", code == 0 and list(said) == ["followup_message"] and said["followup_message"].endswith("1 comment from the person:\n- And make it blue"), f"{code} {out!r}")
+    code, out, errs = cursor("stop")
+    expect("... once", code == 0 and out == "{}", f"{code} {out!r}")
+    cli("hook", "sessionEnd", "--harness", "cursor", "--session", "rev-2", "--cwd", trees["a"], cwd=other)
+    # A paused agent may still say what it is doing and hear the person.
+    open(state_dir + "/agent-paused-check", "w").write("1")
+    try:
+        t, err = a.call("spec")
+        t2, err2 = a.call("feedback")
+        expect("paused: spec and feedback still answer", not err and not err2 and "Count the taps" in t, t + " | " + t2)
+    finally:
+        os.remove(state_dir + "/agent-paused-check")
+    hits = subprocess.run(["grep", "-rl", "Make the counter bold", state_dir], capture_output=True, text=True).stdout.strip().split("\n")
+    expect("what the person wrote is kept in the session's work file only", all("/work/" in h for h in hits) and hits != [""], str(hits))
 
 
 def more_tools(a, away, trees, state_dir, apk, expect):
@@ -970,7 +1123,9 @@ try:
     words, title = r["result"].get("instructions", ""), r["result"].get("serverInfo", {}).get("title")
     release_words = ("Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. launch an APK, then tap/type/key/swipe: "
                      "each action answers with the nodes that changed (+ added, - removed, ~ changed; refs like e3 stay the same while a node is on screen), "
-                     "so call screen or screenshot only when you need all of it. check verifies texts in one call. APKs and their data stay on this Mac. "
+                     "so call screen or screenshot only when you need all of it. check verifies texts in one call. In a worktree: spec says what you set out to do, "
+                     "check with criterion ticks it for the person, review asks them to look and waits for approved or their comments; a block that begins "
+                     "\"--- from the person\" at the end of an answer is theirs. APKs and their data stay on this Mac. "
                      "Sign-ins are the owner's: never ask for or type passwords. To sign in, run_script a script the owner allowed (scripts lists them): "
                      "it types their stored credentials, which you never see.")
     try:

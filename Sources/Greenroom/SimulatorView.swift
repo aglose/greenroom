@@ -57,6 +57,8 @@ final class SimulatorView: NSView {
     /// While inspecting, the pointer picks nodes and touches are not sent to the app.
     var inspecting = false { didSet { updateTracking() } }
     var onPoint: ((Int, Int) -> Void)?
+    /// While inspecting: a click, after `onPoint` (a comment is pinned to what was clicked).
+    var onPick: ((Int, Int) -> Void)?
     /// Extra text at the end of the caption (the Diagnostics pane's live fps); empty for none.
     var captionExtra = "" { didSet { if captionExtra != oldValue { updateCaption() } } }
     /// The quick sign-in this screen offers (SignInOffers), shown as a button over the screen's bottom; nil for none.
@@ -679,9 +681,10 @@ final class SimulatorView: NSView {
     /// The pointer came onto the view (true) or left it (false).
     var onHover: ((SimulatorView, Bool) -> Void)?
 
-    private func point(_ event: NSEvent) {
+    private func point(_ event: NSEvent, picked: Bool = false) {
         guard let f = fraction(event), let size = simulator?.deviceSize, pictureRect.contains(convert(event.locationInWindow, from: nil)) else { return }
         onPoint?(Int(f.x * size.width), Int(f.y * size.height))
+        if picked { onPick?(Int(f.x * size.width), Int(f.y * size.height)) }
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -703,7 +706,7 @@ final class SimulatorView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         onSelect?(self)
-        if inspecting { point(event); return }
+        if inspecting { point(event, picked: true); return }
         let p = convert(event.locationInWindow, from: nil)
         if arrangeable { arranger?.raise(self) }
         if arrangeable, onGrip(p) || !pictureRect.contains(p) {
