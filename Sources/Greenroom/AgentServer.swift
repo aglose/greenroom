@@ -77,6 +77,11 @@ final class AgentServer {
 
     func stop() {
         listener?.cancel()
+        // Only this copy's own word is taken back: another copy on the same state folder may have published since,
+        // and agents reach that one.
+        if let data = try? Data(contentsOf: AgentServer.file),
+           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let pid = json["pid"] as? Int, pid != Int(ProcessInfo.processInfo.processIdentifier) { return }
         try? FileManager.default.removeItem(at: AgentServer.file)
     }
 
@@ -377,9 +382,18 @@ enum AgentShim {
         return Endpoint(port: port, token: token, pid: Int32(pid))
     }
 
-    /// The running app's endpoint, starting the app (in the background) when there is none.
+    /// The running app's endpoint, starting the app (in the background) when there is none. Not under a check: a
+    /// check starts the copy it tests itself, in its own state folder, and an app started here would be an ordinary
+    /// one on the person's real state folder, left running after the check. It waits for the check's copy instead.
     static func connect() -> Endpoint? {
         if let e = endpoint() { return e }
+        if Engine.agentCheck {
+            for _ in 0..<150 {
+                Thread.sleep(forTimeInterval: 0.1)
+                if let e = endpoint() { return e }
+            }
+            return nil
+        }
         let p = Process()
         let bundle = Bundle.main.bundleURL
         if bundle.pathExtension == "app" {
