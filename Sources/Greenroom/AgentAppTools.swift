@@ -466,7 +466,8 @@ extension AgentTools {
                 }()
                 let pct = j.fraction.map { " \(Int($0 * 100))%" } ?? ""
                 let took = j.elapsed.map { " \(Int($0)) s" } ?? ""
-                return "\(Self.jobID(j)) \(j.kind) \(state)\(pct)\(took) | \(j.title) | \(j.statusLine)"
+                let measure = j.measure.map { " | " + $0 } ?? ""
+                return "\(Self.jobID(j)) \(j.kind) \(state)\(pct)\(took) | \(j.title)\(measure) | \(j.statusLine)"
             }
             lines += active.map(line)
             if !recent.isEmpty { lines.append("recent:"); lines += recent.map { "  " + line($0) } }

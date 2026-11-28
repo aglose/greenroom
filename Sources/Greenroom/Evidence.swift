@@ -942,7 +942,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         switch e {
         case .level(_, _, let known): job.known = max(job.known, known)
         case .capturing(let screens, _):
-            JobQueue.shared.update(t, detail: "capturing \(screens) screen\(screens == 1 ? "" : "s")")
+            // Every screen is opened; what is left is drawing them, which the engine does not count.
+            JobQueue.shared.update(t, detail: "capturing \(screens) screen\(screens == 1 ? "" : "s")", progress: .some(nil))
             return
         case .screen(_, _, _, let explored):
             guard explored else { return }
@@ -951,8 +952,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
         }
         guard job.known > 0 else { return }
         let left = job.explored > 0 && job.explored < job.known ? ", \(job.known - job.explored) to open" : ""
+        // The share of the screens found so far that are opened: it can go back as more are found.
         JobQueue.shared.update(t, detail: "\(job.known) screen\(job.known == 1 ? "" : "s") found" + left,
-                               fraction: .some(job.explored > 0 ? min(1, Double(job.explored) / Double(job.known)) : nil))
+                               progress: .some(job.explored > 0 ? JobProgress(Double(min(job.explored, job.known)), of: Double(job.known), .screens) : nil))
     }
 
     private func cancel(_ job: Job) {

@@ -117,6 +117,10 @@ enum PRFetchScript {
         #        GREENROOM_APK=/path/to/your/app-pr.apk
         #      (optionally also print GREENROOM_PR=123 to tag/link it to a specific PR number).
         #
+        # To give the job a progress bar in Greenroom's job list, print how far you are as you go (these lines are
+        # kept out of the log):
+        #   echo "greenroom: progress 1048576/52428800 bytes"   # also: 3/12 steps, 7/? files, 40%, and - to clear
+        #
         # You can also link a local APK to a PR from outside Greenroom at any time:
         #   /Applications/Greenroom.app/Contents/MacOS/Greenroom --link-apk /path/to/app.apk --pr 123
         set -euo pipefail

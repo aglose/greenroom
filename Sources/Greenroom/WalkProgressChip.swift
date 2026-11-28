@@ -7,6 +7,8 @@ struct WalkProgress: Equatable {
     var fraction: Double?
     /// The full line the sheet shows, for the tooltip.
     var detail: String
+    /// The same share as a count, for the job list: the screens opened, of those found so far.
+    var counted: JobProgress? = nil
 }
 
 /// The running walk in the top bar: a spinner, how far it has got and a thin bar under it. It stays while the walk

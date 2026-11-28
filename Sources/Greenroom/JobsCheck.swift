@@ -3,7 +3,8 @@ import AppKit
 /// `Greenroom --jobs-check`: the job queue (`JobQueue`) on stand-in jobs that do nothing: lanes run one job at a time,
 /// the "at once" limit holds the rest back, a held job keeps its place without starting, `prioritize` moves a job to
 /// the front, a paused job keeps its lane and frees its place, a job sent back to the queue frees both, a gate is
-/// asked again, and a job that ends inside its own start does not stall the queue. One `[greenroom] jobs: ok|FAIL ...`
+/// asked again, and a job that ends inside its own start does not stall the queue; then how far a job has got
+/// (`JobProgress`): what a recipe's lines say, the words, a download's speed, the task count a build is held against. One `[greenroom] jobs: ok|FAIL ...`
 /// line per step, then `jobs check: PASS|FAIL`; exits 0 or 1. No engine. With a DIR, the list and the chip are drawn
 /// with stand-in jobs in every state and written there as `jobs-list.png` and `jobs-chip.png`, to look at.
 enum JobsCheck {
@@ -147,6 +148,84 @@ enum JobsCheck {
         q.clearRecent()
         expect(q.jobs.isEmpty, "Clear Finished empties it")
 
+        // How far a job has got: what a recipe's output says.
+        var reader = RecipeProgressReader(expectedTasks: 4)
+        var said = reader.read("> Task :app:preBuild UP-TO-DATE")
+        expect(!said.hidden && said.changed && reader.progress == JobProgress(1, of: 4, .tasks, estimated: true), "a Gradle task is counted against the last build's count, and stays in the log")
+        said = reader.read("> Task :app:preBuild")
+        expect(!said.changed && reader.tasks == 1, "a task named twice is one task")
+        _ = reader.read("> Task :app:compileDebugKotlin"); _ = reader.read("> Task :app:dexDebug"); _ = reader.read("> Task :app:packageDebug")
+        expect(reader.progress?.fraction == 0.97 && reader.progress?.words == "4 tasks", "a guessed total never fills the bar, and is dropped from the words once passed (\(reader.progress?.words ?? "nothing"))")
+        said = reader.read("greenroom: progress 1048576/52428800 bytes")
+        expect(said.hidden && said.changed && reader.progress == JobProgress(1_048_576, of: 52_428_800, .bytes), "a progress line is read and kept out of the log")
+        _ = reader.read("greenroom: progress 3/12")
+        expect(reader.progress == JobProgress(3, of: 12, .steps), "a count without a word is steps")
+        _ = reader.read("greenroom: progress 7/? modules")
+        expect(reader.progress?.fraction == nil && reader.progress?.words == "7 modules", "an unknown total is a count with no share (\(reader.progress?.words ?? "nothing"))")
+        _ = reader.read("greenroom: progress 7/~19 steps")
+        expect(reader.progress?.words == "7 of about 19 steps" && reader.progress?.estimated == true, "a total that may grow is said as about that many (\(reader.progress?.words ?? "nothing"))")
+        _ = reader.read("greenroom: progress 40%")
+        expect(reader.progress?.fraction == 0.4 && reader.progress?.words == "40%", "a percentage is a share")
+        said = reader.read("greenroom: progress nonsense")
+        expect(said.hidden && !said.changed, "a progress line that says nothing is dropped and changes nothing")
+        said = reader.read("greenroom: progress -")
+        expect(said.hidden && said.changed && reader.progress == nil, "a recipe can take its progress back")
+        said = reader.read("greenroom: sandbox-created sb-1")
+        expect(!said.hidden && !said.changed, "Greenroom's other lines are left alone")
+        var first = RecipeProgressReader()
+        _ = first.read("> Task :app:preBuild")
+        expect(first.progress?.fraction == nil && first.progress?.words == "1 task", "a first build counts its tasks with no end known")
+
+        // The words.
+        expect(JobProgress(23_100_000, of: 48_000_000, .bytes).words == "23.1 of 48.0 MB", "bytes are said in the total's unit (\(JobProgress(23_100_000, of: 48_000_000, .bytes).words))")
+        expect(JobProgress(512_000, .bytes).words == "512 KB" && JobProgress(1_500_000_000, of: 2_000_000_000, .bytes).words == "1.50 of 2.00 GB", "small and large downloads read well")
+        expect(JobProgress(214, of: 530, .tasks, estimated: true).words == "214 of about 530 tasks" && JobProgress(9, of: 23, .screens).words == "9 of 23 screens", "counts say what they count")
+        expect(JobProgress(30, of: 20, .screens).fraction == 1, "a share is never more than all of it")
+
+        // A download's speed, measured between updates.
+        fresh()
+        let load = job("load", lane: nil, kind: .fetch)
+        q.adopt(load)
+        let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+        q.update(load, progress: .some(JobProgress(0, of: 48_000_000, .bytes)), at: t0)
+        expect(load.progress?.rate == nil && load.fraction == 0, "a download that just began has no speed yet")
+        q.update(load, progress: .some(JobProgress(1_000_000, of: 48_000_000, .bytes)), at: t0.addingTimeInterval(0.4))
+        expect(load.progress?.rate == nil, "less than a second is too short to measure")
+        q.update(load, progress: .some(JobProgress(6_000_000, of: 48_000_000, .bytes)), at: t0.addingTimeInterval(2))
+        expect(load.progress?.rate == 3_000_000 && load.measure == "6.0 of 48.0 MB · 3.0 MB/s", "its speed is what arrived over the time it took (\(load.measure ?? "nothing"))")
+        q.update(load, progress: .some(JobProgress(7_000_000, of: 48_000_000, .bytes)), at: t0.addingTimeInterval(3))
+        expect(load.progress?.rate == 2_000_000, "and is evened out from one measure to the next")
+        q.update(load, progress: .some(JobProgress(9, of: 23, .steps)), at: t0.addingTimeInterval(4))
+        q.update(load, progress: .some(JobProgress(100, of: 48_000_000, .bytes)), at: t0.addingTimeInterval(5))
+        expect(load.progress?.rate == nil, "a new download starts its measure again")
+        q.update(load, progress: .some(nil))
+        expect(load.progress == nil && load.fraction == nil && load.measure == nil, "progress can be taken back")
+        q.update(load, progress: .some(JobProgress(5, of: 10, .steps)))
+        q.finish(load, .done)
+        expect(load.progress == nil, "a finished job has none")
+        let half = job("half", lane: nil), unknown = job("unknown", lane: nil)
+        q.adopt(half); q.adopt(unknown)
+        q.update(half, progress: .some(JobProgress(1, of: 2, .steps)))
+        expect(JobsChip.fraction(of: q.running) == nil, "the chip has no share while a running job cannot say its own")
+        q.update(unknown, progress: .some(JobProgress(1, of: 4, .steps)))
+        expect(JobsChip.fraction(of: q.running) == 0.375, "and the mean of them when they all can")
+
+        // The task count a build is held against, in settings of its own.
+        let suite = "greenroom.jobs-check.\(ProcessInfo.processInfo.processIdentifier)"
+        if let defaults = UserDefaults(suiteName: suite) {
+            let here = FileManager.default.currentDirectoryPath
+            let name = BuildTaskCounts.name(workspace: here, recipe: "local", module: "app", variant: "debug")
+            expect(BuildTaskCounts.expected(name, in: defaults) == nil, "a build never made has no count")
+            BuildTaskCounts.note(0, for: name, in: defaults)
+            expect(BuildTaskCounts.expected(name, in: defaults) == nil, "a build that ran no task leaves none")
+            BuildTaskCounts.note(531, for: name, in: defaults)
+            BuildTaskCounts.note(12, for: BuildTaskCounts.name(workspace: "/nowhere/greenroom-gone", recipe: "local", module: "app", variant: "debug"), in: defaults)
+            BuildTaskCounts.note(88, for: BuildTaskCounts.name(workspace: here, recipe: "local", module: "app", variant: "release"), in: defaults)
+            expect(BuildTaskCounts.expected(name, in: defaults) == 531, "a build that ended well is remembered by workspace, recipe, module and variant")
+            expect(BuildTaskCounts.expected(BuildTaskCounts.name(workspace: "/nowhere/greenroom-gone", recipe: "local", module: "app", variant: "debug"), in: defaults) == nil, "a workspace that is gone is forgotten")
+            defaults.removePersistentDomain(forName: suite)
+        }
+
         // The list and the chip, with jobs in every state.
         if let dir {
             _ = NSApplication.shared
@@ -154,18 +233,26 @@ enum JobsCheck {
             fresh()
             let build = job("Build fix-login", lane: "build:a"), queued = job("Build checkout-redesign", lane: "build:a"), held = job("Build main", lane: "build:a")
             let walk = job("Map onboarding-copy", lane: "walk", kind: .walk), compare = job("Compare fix-login with main", lane: "walk", kind: .compare)
-            let fetch = job("Fetch the build of pull request #42", lane: nil, kind: .fetch), failed = job("Build settings-crash", lane: "build:b"), done = job("Map fix-login", lane: "walk2", kind: .walk)
+            let fetch = job("Fetch the build of pull request #42", lane: nil, kind: .fetch), waitingCI = job("Fetch the build of main", lane: nil, kind: .fetch)
+            let first = job("Build new-module", lane: "build:c"), verify = job("Verify checkout-redesign", lane: "walk3", kind: .verify), failed = job("Build settings-crash", lane: "build:b"), done = job("Map fix-login", lane: "walk2", kind: .walk)
             walk.onPause = { q.suspended(walk); return nil }
             for j in [done, failed] { q.submit(j) }
             q.finish(done, .done, detail: "41 screens")
             q.finish(failed, .failed("Execution failed for task ':app:compileDebugKotlin'.\ne: SettingsFragment.kt:42:17 Unresolved reference: prefs"))
-            for j in [build, queued, held, walk, compare] { q.submit(j) }
-            q.adopt(fetch)
-            q.update(build, detail: "> Task :app:compileDebugKotlin")
-            q.update(walk, detail: "23 screens found, 9 to open", fraction: .some(0.6))
-            q.update(fetch, detail: "downloading app-debug.apk from run 8123")
+            for j in [build, queued, held, walk, compare, first, verify] { q.submit(j) }
+            q.adopt(fetch); q.adopt(waitingCI)
+            // Each kind of work, counted in what it works on; one job that cannot count yet.
+            q.update(build, detail: "> Task :app:compileDebugKotlin", progress: .some(JobProgress(214, of: 530, .tasks, estimated: true)))
+            q.update(first, detail: "> Task :feature:search:kspDebugKotlin", progress: .some(JobProgress(37, .tasks)))
+            q.update(walk, detail: "23 screens found, 9 to open", progress: .some(JobProgress(14, of: 23, .screens)))
+            let began = Date().addingTimeInterval(-3)
+            q.update(fetch, detail: "downloading app-debug from run 8123", progress: .some(JobProgress(13_500_000, of: 48_000_000, .bytes)), at: began)
+            q.update(fetch, progress: .some(JobProgress(23_100_000, of: 48_000_000, .bytes)), at: began.addingTimeInterval(3))
+            q.update(waitingCI, detail: "waiting for CI run 8131: Unit tests", progress: .some(JobProgress(7, of: 19, .steps, estimated: true)))
+            q.update(verify, detail: "starting the simulator")
             q.pause(walk)
             q.pause(held)
+            JobsPopover.tallest = 2000   // the whole list in the picture, not what fits before it scrolls
             let list = JobsPopover()
             expect(write(list.view, to: dir.appendingPathComponent("jobs-list.png")), "the list is drawn with jobs in every state")
             let chip = JobsChip()

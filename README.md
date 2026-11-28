@@ -138,7 +138,13 @@ version of it and adds the workbench.
   one that waits can be held in its place or moved to the front; a running walk can be paused where it is (its
   hidden simulators are frozen and use no processor) and a running build is stopped and built again when resumed.
   "At once" sets how many jobs run at the same time across the app; one build per repository and one walk at a time
-  hold whatever it says.
+  hold whatever it says. Every running job has a bar that follows the work itself, with the count beside it: a
+  build's Gradle tasks against how many the last build like it ran ("214 of about 530 tasks"), the megabytes of a
+  CI artifact as it downloads and its speed, the steps of a CI run that is waited for, the screens a walk has
+  opened of those it has found. A job that has nothing to count yet has a bar that moves without filling. A script
+  of your own gets the same bar by printing `greenroom: progress DONE/TOTAL UNIT` (`greenroom: progress
+  1048576/52428800 bytes`, `3/12 steps`, `7/? files` for an unknown total, `7/~19 steps` for one that may grow,
+  `40%`, and `-` to take it back); those lines stay out of the log.
 - **Inspector** (⌥⌘I): the nodes on the chosen simulator's screen in a pane; point at the picture to pick one and
   see its text, kind, size and the box that takes its tap. While it is open, clicks pick instead of tapping.
 - **Log** (⇧⌘L): the chosen simulator's log as it is written, with a filter.
