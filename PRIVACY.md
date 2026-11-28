@@ -71,6 +71,22 @@ changes that program's own list of servers on this Mac, or adds the `greenroom` 
 leaves the rest of that file's contents as they were. The command or the change is shown before it happens, and
 nothing is connected until you press the button. None of it is sent anywhere.
 
+Connecting also writes a skill, a text file that teaches the agent Greenroom's loop: `~/.agents/skills/greenroom/SKILL.md`
+for Codex and Cursor, `~/.claude/skills/greenroom/SKILL.md` for Claude Code when it is connected without the
+plugin. It is the text in `plugin/skills/verify/SKILL.md` and holds nothing about you or your apps. Its last line
+says Greenroom wrote it; Greenroom rewrites and removes only files with that line, keeps one it wrote up to date
+when it looks, and removes it when you disconnect the last harness that asked for it. "The greenroom command" on
+the same screen makes one symbolic link, in a folder on your PATH, to a script inside the app; the line it runs is
+shown first, and the same row removes it.
+
+The `greenroom` command talks to the running app over the same connection as an agent, and to nothing else. A
+harness's hook that runs `greenroom hook` tells the app four things: the harness's name, its session id, the
+working folder and the event's name. It does not read the transcript, the prompt or a tool's input, the app keeps
+the newest 200 in memory only (never in a file), and none of it is sent anywhere. Greenroom installs no hook yet.
+
+A `greenroom://` link (which macOS hands to Greenroom from a browser, a chat or a terminal) only shows a place
+in the window. It cannot add a repository, run an APK or change a setting.
+
 ## Repositories an agent brings
 
 When an agent you connected calls Greenroom from a folder, Greenroom runs `git` in that folder (read-only) to find

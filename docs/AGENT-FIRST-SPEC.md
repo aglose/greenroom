@@ -1,8 +1,9 @@
 # Greenroom, agent-first: the spec
 
-A spec (2026-11-27). The owner's decisions are at the end. **A1 and A2 are built**: A1 in `AgentAdoption.swift`,
+A spec (2026-11-27). The owner's decisions are at the end. **A1, A2 and A3 are built**: A1 in `AgentAdoption.swift`,
 `WaitingStage.swift` and the APK screen in `EmptyStage.swift`; A2 in `Harnesses.swift`, `ClaudeConnect.swift` and
-`ConnectScreen.swift` (checked by `--connect-check`, `--waiting-check` and `mcp-check.py`). What A2 left for later
+`ConnectScreen.swift`; A3 in `CLI.swift`, `Links.swift`, `Skills.swift` and `plugin/bin/greenroom` (checked by
+`--connect-check`, `--waiting-check`, `mcp-check.py` and `plugin-check.py`). What a step left for later
 steps is said where it applies. The rest is not built. It changes what Greenroom is for, what a new user sees first, and how the
 window is arranged. The engine, the simulators, the tools in [AGENTS-INTERFACE.md](AGENTS-INTERFACE.md) and the
 sessions model in [SESSIONS-PLAN.md](SESSIONS-PLAN.md) stay; most of this is a new front on what they already do.
@@ -62,7 +63,7 @@ arrived at the same shape.
 | Way in | What it is for | Reaches | Today |
 | --- | --- | --- | --- |
 | **MCP server** (stdio shim to the running app) | the tools; a process per agent, which is how a call is tied to a worktree | every harness | built (`Greenroom --mcp`) |
-| **`greenroom` CLI and one skill** | the same tools from a shell: for harnesses with weak MCP, for scripts and CI, and for hooks to call. The skill teaches the loop | any harness with a shell; skills in Claude Code, Codex, Cursor, Copilot, opencode, Antigravity | `gr` exists for sign-in scripts only; the skill ships in the Claude Code plugin only |
+| **`greenroom` CLI and one skill** | the same tools from a shell: for harnesses with weak MCP, for scripts and CI, and for hooks to call. The skill teaches the loop | any harness with a shell; skills in Claude Code, Codex, Cursor, Copilot, opencode, Antigravity | built in A3: `greenroom` (inside the app and in the plugin's `bin/`), and the skill written to `~/.agents/skills/greenroom` and `~/.claude/skills/greenroom` |
 | **Hooks** | session start and end, turn finished, waiting for permission, file edited: what the sidebar's status needs, without the agent calling anything. A turn-end hook can also hand the agent the person's queued comments | Claude Code, Codex, Cursor, Antigravity | missing. Status comes from reading Claude Code's and T3 Code's private files, which neither promises to keep |
 | **Per-harness package** | installs the three above in one step | Claude Code plugin; Agent Plugins 1.0 for Codex, Copilot, VS Code | Claude Code plugin with the MCP server and skill |
 
@@ -88,15 +89,17 @@ shown before it runs. It writes a config file only where there is no command.
 
 Built in A2: the Tools column for Claude Code (`claude mcp add`; an enabled plugin counts as connected and is not
 installed by Greenroom), Codex (`codex mcp add`) and Cursor (`~/.cursor/mcp.json`: the install link cannot be seen
-to have worked, so the file is written, with every other entry kept). The Status and Skill columns are A3 and A4,
-so a row says "Adds Greenroom's tools" and no more. Every other harness found is named under "Another agent", with
-the stdio command and the JSON to paste.
+to have worked, so the file is written, with every other entry kept). Built in A3: the Skill column for the same
+three, so a row says "Adds Greenroom's tools and a skill"; "Another agent" has "Add the Skill" for the shared
+folder, and the screen has a row that links the `greenroom` command into a folder on the PATH. The Status column
+is A4: `greenroom hook` exists and the app hears it, and nothing installs a hook yet. Every other harness found is
+named under "Another agent", with the stdio command and the JSON to paste.
 
 | Harness | Tools | Status (hooks) | Skill |
 | --- | --- | --- | --- |
-| Claude Code | the plugin (`claude plugin install`), or `claude mcp add` | the plugin's `hooks/hooks.json` | in the plugin |
+| Claude Code | the plugin (`claude plugin install`), or `claude mcp add` | the plugin's `hooks/hooks.json` | in the plugin; `~/.claude/skills/greenroom` when connected with `claude mcp add` |
 | Codex (CLI, IDE, desktop) | `codex mcp add greenroom -- <shim>` | `~/.codex/hooks.json` (the person trusts it once with `/hooks`) | `~/.agents/skills/greenroom` |
-| Cursor | the `cursor://…/mcp/install` link, else `~/.cursor/mcp.json` | `~/.cursor/hooks.json` | `~/.cursor/skills/greenroom` |
+| Cursor | the `cursor://…/mcp/install` link, else `~/.cursor/mcp.json` | `~/.cursor/hooks.json` | `~/.agents/skills/greenroom`, which Cursor reads too: one file for Codex and Cursor |
 | Antigravity, Gemini CLI | `~/.gemini/config/mcp_config.json`; `gemini mcp add` | `~/.gemini/config/hooks.json` | its skills folder |
 | VS Code Copilot, Copilot CLI | the `vscode:mcp/install` link; `~/.copilot/mcp-config.json` | Copilot CLI hooks | `~/.agents/skills/greenroom` |
 | opencode | `opencode mcp add` | none | `~/.config/opencode/skills` |
@@ -112,13 +115,15 @@ build, a `review` asked for) and nothing about the time between.
 `greenroom hook <event>` posts the harness's name, its session id, the working folder and the event to the
 running app over the same loopback channel as the shim, and exits in a few milliseconds whether or not the app is
 open. It never reads the transcript and never sends a prompt or a file's content. PRIVACY.md changes with it.
+(Built in A3: the command, and the app keeping the newest 200 for `agent_activity`. It never starts the app.)
 Once hooks are in, reading Claude Code's and T3 Code's files becomes the fallback for sessions started before
 connecting, then goes.
 
 ### To check before building
 
 - Whether a Claude Code plugin's hooks and `bin/` load for a plugin installed by `claude plugin install` from our
-  marketplace as documented. (`claude mcp get` and `claude plugin list` were read from a real Claude Code 2.1 in A2
+  marketplace as documented. (A3 ships `plugin/bin/greenroom` on that documentation; it was not seen on a real
+  Claude Code's PATH.) (`claude mcp get` and `claude plugin list` were read from a real Claude Code 2.1 in A2
   and answer as `ClaudeConnect.swift` expects; `mcp add` and `mcp remove` are still only run against a stand-in.)
 - Codex's `mcp add`, `mcp get --json` and `mcp remove` against a real Codex: A2 took them from its documentation,
   which does not give the JSON's shape or what `get` answers for a missing server. `CodexConnect` reads `command`
@@ -303,7 +308,8 @@ Each step ends in a build that can be installed, and each has its own `--…-che
 | A8 | CI runs watched for pushed sessions | 10 |
 | A9 | README, docs, plugin, cask, PRIVACY.md | 14 |
 
-A1 and A2 are the redesign of onboarding and can ship alone. A6 is the reason to keep the window open.
+A1 and A2 are the redesign of onboarding and can ship alone. A3 adds ways in and changes no screen but the
+Connect screen's rows. A6 is the reason to keep the window open.
 
 ## Decisions (the owner's, 2026-11-27)
 

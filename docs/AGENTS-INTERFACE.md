@@ -18,7 +18,8 @@ hand as `/greenroom:verify`. This repository is its own marketplace; inside Clau
 (From a shell: `claude plugin marketplace add aglose/greenroom`, then `claude plugin install greenroom@greenroom`.)
 The plugin's server is a script, `plugin/scripts/greenroom-mcp.sh`, that runs `Greenroom --mcp` from
 `/Applications/Greenroom.app`, else `~/Applications`, else the copy Spotlight finds by bundle id, and says so on
-standard error when there is none. `GREENROOM_APP` names another copy (a build of your own). Its tools are named
+standard error when there is none. `GREENROOM_APP` names another copy (a build of your own). The plugin's `bin/`
+holds the `greenroom` command (below), which Claude Code puts on its Bash tool's PATH. Its tools are named
 `mcp__plugin_greenroom_greenroom__launch` and so on. The Connect screen shows the two lines; Greenroom does not
 run them, but it counts an enabled plugin as connected (`claude plugin list`) and does not offer to add the server
 a second time. `scripts/plugin-check.py` checks the manifests and runs
@@ -59,6 +60,69 @@ testing an Android app use the greenroom server."
 `Greenroom --mcp` holds no simulators itself. It passes each message to the running app, starting Greenroom in
 the background if it is not open, so what an agent launches appears in the window and what the person opened is
 there for the agent.
+
+### The `greenroom` command
+
+The same tools from a shell: for a harness that has a shell and weak MCP, for scripts, and for a harness's hooks.
+It is a script inside the app (`Greenroom.app/Contents/Resources/bin/greenroom`) that runs the app's own program;
+the Connect screen's "The greenroom command" row links it into a folder on your PATH (`~/.local/bin`, `~/bin`,
+`/usr/local/bin` or `/opt/homebrew/bin`, the first that is on your login shell's PATH and can be written), shows
+the `ln -sf` line before it runs, and removes the link again. A file there that is not Greenroom's link is left
+alone, and when no folder can be written the row shows the `sudo ln -sf` line to run yourself.
+
+```
+greenroom session                      any tool, by its name
+greenroom launch app.apk --fresh       the first arguments can go without their flag
+greenroom tap --text Add --sim s2
+greenroom check Saved --absent Error   exit 0 for PASS, 1 for FAIL
+greenroom screenshot --out shot.png    a picture is saved and its path printed
+greenroom tools                        the tools, one line each
+greenroom help check                   one tool's arguments
+greenroom -C ../other-worktree build   as if run from that folder
+greenroom mcp                          the stdio MCP server (what a harness's config runs)
+greenroom open [APK | DIR | LINK]      the window; an APK run in it; a worktree's session; a link
+greenroom hook EVENT                   for a harness's hooks (below)
+```
+
+A flag is the tool's argument, with `-` for `_` (`--sim s2`, `--timeout-ms=3000`); one that takes a list is repeated; `--json '{…}'`
+gives the arguments as the tool takes them over MCP. A call is tied to the worktree it is run from, as an MCP
+call is tied to its agent's. The answer is printed as the tool gives it, a failure on standard error. The exit
+status is 0, 1 when the tool failed or `check` answered `FAIL`, 2 for a wrong argument, and 3 when Greenroom could
+not be reached. A tool call starts Greenroom in the background if it is not open, as `--mcp` does. The pause
+switch holds for the command as for any agent.
+
+**`greenroom hook EVENT`** is what a harness's hook runs (`--harness NAME`, and `--session ID` and `--cwd DIR`
+where the harness does not write them as JSON to the hook's standard input). It tells the running app four
+things: the harness's name, its session id, the working folder and the event's name. It reads nothing else from
+what the harness hands it (no prompt, no tool input, no transcript), prints nothing, always exits 0, and when
+Greenroom is not open it does nothing: a hook never starts the app and never holds up an agent's turn. The app
+keeps the newest 200 in memory and lists them in `agent_activity` (those of the caller's worktree; `all: true` for
+every one). Nothing installs a hook into a harness yet: that, and the session status built from them, is the next
+step of [AGENT-FIRST-SPEC.md](AGENT-FIRST-SPEC.md).
+
+**Links.** `greenroom://` opens a place in the window, from a terminal (`greenroom open LINK`, `open LINK`), a pull
+request's description or a chat: `greenroom://open` (the window), `greenroom://connect` (the Connect screen),
+`greenroom://apk` (the APK screen) and `greenroom://session?path=DIR` (the session of that worktree, when
+Greenroom has it). A link only navigates: it adds no repository, runs no APK and changes no setting, because a
+link can come from anywhere. `greenroom open DIR` and `greenroom open app.apk` do add and run, as a command you
+typed. The Debug copy's links are `greenroom-debug://`, so a `greenroom://` link always opens the release.
+
+**The skill.** The loop under "Verifying a change" is one text, `plugin/skills/verify/SKILL.md`. Claude Code gets
+it from the plugin. For the rest the Connect screen writes it as a file, when a harness is connected and with
+"Add the Skill":
+
+| Harness | Where the skill is |
+| --- | --- |
+| Claude Code with the plugin | in the plugin (`/greenroom:verify`); Greenroom writes none |
+| Claude Code connected with `claude mcp add` | `~/.claude/skills/greenroom/SKILL.md` |
+| Codex, Cursor | `~/.agents/skills/greenroom/SKILL.md`, one file for both |
+| any other that reads `~/.agents/skills` (Copilot CLI, opencode, Gemini CLI, Goose, Amp) | the same file, with "Add the Skill" under "Another agent" |
+
+The file ends with a line saying Greenroom wrote it and for which harnesses. Greenroom rewrites and removes only
+a file with that line: a `SKILL.md` of your own in the same place is never touched, and the row says it is there.
+Disconnecting a harness takes its name off; the file goes when the last name does. Looking (opening the screen,
+launching the app) creates no file; it brings one Greenroom wrote up to date after an update. The Debug copy
+writes no skill and links no command.
 
 ## How it is meant to be used
 
@@ -276,7 +340,9 @@ reason, never the value. The agent's view is unchanged: names only, output maske
 The app listens on the loopback interface only, on a port the system picks, and answers only requests carrying a
 token it writes to `~/Library/Application Support/Greenroom/agent.json` (readable by you alone). A request with an
 `Origin` header, which a browser adds to any page's cross-site request, is refused, as is one whose `Host` is not
-this address: a web page cannot drive it. `scripts/mcp-check.py` runs a session as an agent would (`--tools` checks the tools above).
+this address: a web page cannot drive it. The `greenroom` command reaches the app the same way, with the same
+token. `scripts/mcp-check.py` runs a session as an agent would (`--tools` checks the tools above and the command);
+`--connect-check` covers the skill files and the link on the PATH, in a home folder of its own.
 
 An agent you connect sees the screens and logs of the apps you run, as you asked it to. Greenroom itself sends
 nothing anywhere ([PRIVACY.md](../PRIVACY.md)).

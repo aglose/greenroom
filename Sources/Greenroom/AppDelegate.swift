@@ -613,7 +613,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         guard workbench != nil else { openedEarly += urls; return }
         for url in urls {
-            if url.pathExtension.lowercased() == "apkrec" { workbench.view(recording: url) } else { workbench.open(url) }
+            if Links.handles(url) { Links.opened(url, in: workbench) }   // greenroom://: a place in the window
+            else if !url.isFileURL { continue }
+            else if url.pathExtension.lowercased() == "apkrec" { workbench.view(recording: url) } else { workbench.open(url) }
         }
     }
 

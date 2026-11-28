@@ -78,6 +78,7 @@ enum ConnectCheck {
         ClaudeConnect.pathOverride = bin.path + ":/usr/bin:/bin"
         Harnesses.home = base.appendingPathComponent("home")
         Harnesses.appFolders = [base.appendingPathComponent("apps")]
+        CommandLink.systemFolders = []   // the command is never linked into /usr/local/bin or /opt/homebrew/bin by a check
     }
 
     private static func body(dir: URL) -> Never {
@@ -375,6 +376,158 @@ enum ConnectCheck {
         wait { model.connectTicked(then: $0) }
         expect(onMain { model.connectedNames } == ["Claude Code", "Codex", "Cursor"] && onMain { model.pending.isEmpty }, "ticked again, Cursor is connected too", "\(onMain { model.connectedNames })")
         expect(WaitingStage.statusText(client: nil, listening: true, connected: onMain { model.connectedNames }) == "Listening · Claude Code, Codex and Cursor connected", "the waiting stage names what is connected")
+
+        // --- The skill and the command (docs/AGENT-FIRST-SPEC.md, A3) ---
+        let home = base.appendingPathComponent("home")
+        let shared = Skills.Place.agents, claudes = Skills.Place.claude
+        func read(_ f: URL) -> String { (try? String(contentsOf: f, encoding: .utf8)) ?? "" }
+        expect(shared.file.path == home.path + "/.agents/skills/greenroom/SKILL.md" && claudes.file.path == home.path + "/.claude/skills/greenroom/SKILL.md",
+               "the check's skills are in a home of its own", shared.file.path)
+        // What the model just did: Codex and Cursor each brought the skill, and Claude Code's is the plugin's.
+        expect(Skills.state(shared) == .ours(asked: ["codex", "cursor"], current: true), "connecting Codex and Cursor wrote one skill, asked for by both", "\(Skills.state(shared))")
+        expect(Skills.state(claudes) == .none, "Claude Code through the plugin gets no second skill")
+        expect(onMain { model.rows.first { $0.id == "codex" }?.skill } == .ours(asked: ["codex", "cursor"], current: true) && onMain { model.rows.first { $0.id == "claude" }?.skillPlace } == nil,
+               "the rows say so", "\(onMain { model.rows.map { "\($0.id): \(String(describing: $0.skill))" } })")
+        expect(onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" }.contains("~/.agents/skills/greenroom/SKILL.md"), "connecting says where the skill is", onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" })
+
+        // The text: the plugin's, without what only the plugin has.
+        let skillText = Skills.text() ?? ""
+        expect(skillText.hasPrefix("---\nname: greenroom\ndescription: "), "the skill is named greenroom, as its folder is", String(skillText.prefix(40)))
+        expect(!skillText.contains("$ARGUMENTS") && !skillText.contains("argument-hint") && !skillText.lowercased().contains("plugin"), "it has no plugin argument and does not speak of a plugin")
+        expect(skillText.contains("`greenroom session`") && skillText.contains("`check`") && skillText.contains("Connect Agents"), "it names the tools, the command and where to connect again")
+        expect(Skills.text(from: "---\nname: other\n---\nwords\n") == nil && Skills.text(from: nil) == nil, "a source the rewordings do not fit gives no text, not half of one")
+        let written = read(shared.file)
+        expect(written.hasPrefix(skillText) && written.hasSuffix("Asked for by: codex, cursor. -->\n") && written.components(separatedBy: "greenroom-skill:").count == 2,
+               "the file is the text, then one line saying it is Greenroom's and who asked", String(written.suffix(120)))
+
+        // Who asked: a name is added once, taken off alone, and the file goes with the last.
+        expect(Skills.install(shared, for: "codex") == Skills.Result(ok: true, message: ""), "asking again changes nothing")
+        wait { model.addSharedSkill(then: $0) }
+        expect(Skills.state(shared) == .ours(asked: ["codex", "cursor", "you"], current: true) && onMain { model.sharedMessage } == "Written: ~/.agents/skills/greenroom/SKILL.md."
+               && onMain { model.sharedSkill } == Skills.state(shared), "Add the Skill under another agent adds the person to it", "\(Skills.state(shared)) \(onMain { model.sharedMessage ?? "" })")
+        wait { model.disconnect("codex", then: $0) }
+        expect(Skills.state(shared) == .ours(asked: ["cursor", "you"], current: true) && onMain { model.rows.first { $0.id == "codex" }?.link } == .notConnected,
+               "disconnecting Codex takes its name off and leaves the skill", "\(Skills.state(shared))")
+        expect(onMain { model.rows.first { $0.id == "codex" }?.message ?? "" }.contains("stays: Cursor and you asked for it too"), "... and says who it stays for", onMain { model.rows.first { $0.id == "codex" }?.message ?? "" })
+        expect(onMain { model.rows.first { $0.id == "cursor" }?.skill } == .ours(asked: ["cursor", "you"], current: true), "Cursor's row sees the change")
+        wait { model.addSharedSkill(then: $0) }
+        expect(onMain { model.sharedMessage } == "Already there: ~/.agents/skills/greenroom/SKILL.md." && !onMain { model.sharedFailed }, "... and a second time says it is there")
+        wait { model.removeSharedSkill(then: $0) }
+        expect(Skills.state(shared) == .ours(asked: ["cursor"], current: true) && (onMain { model.sharedMessage } ?? "").hasPrefix("The skill at"), "Remove It takes the person off", onMain { model.sharedMessage } ?? "")
+        wait { model.disconnect("cursor", then: $0) }
+        expect(Skills.state(shared) == .none && !fm.fileExists(atPath: shared.folder.path) && fm.fileExists(atPath: shared.folder.deletingLastPathComponent().path),
+               "with the last name the file and its folder go, and the skills folder stays")
+        expect(onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" }.contains("was removed"), "... and the row says it was removed", onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" })
+
+        // An earlier Greenroom's text is brought up to date; looking never makes a file.
+        wait { model.connect("codex", then: $0) }
+        expect(Skills.state(shared) == .ours(asked: ["codex"], current: true), "connected again, Codex has its skill again")
+        try? fm.removeItem(at: shared.file)
+        wait { model.refresh(then: $0) }
+        expect(Skills.state(shared) == .none && onMain { model.rows.first { $0.id == "codex" }?.skill } == Skills.State.none, "a skill the person deleted is not written back by looking: the row offers it")
+        wait { model.addSkill("codex", then: $0) }
+        expect(Skills.state(shared) == .ours(asked: ["codex"], current: true), "Add the Skill on the row writes it")
+        let old = "---\nname: greenroom\n---\nan earlier text\n\n" + written.components(separatedBy: "\n").filter { $0.hasPrefix("<!-- greenroom-skill:") }.joined().replacingOccurrences(of: "codex, cursor", with: "you") + "\n"
+        try? old.write(to: shared.file, atomically: true, encoding: .utf8)
+        expect(Skills.state(shared) == .ours(asked: ["you"], current: false), "a file with Greenroom's line and other text is an earlier Greenroom's", "\(Skills.state(shared))")
+        wait { model.refresh(then: $0) }
+        expect(Skills.state(shared) == .ours(asked: ["codex", "you"], current: true) && read(shared.file).hasPrefix(skillText), "looking brings it to this copy's text and adds the connected harness", "\(Skills.state(shared))")
+        // Disconnected outside Greenroom: looking takes the name off.
+        codexRegistered(nil)
+        wait { model.refresh(then: $0) }
+        expect(Skills.state(shared) == .ours(asked: ["you"], current: true), "a harness disconnected outside Greenroom loses its name on the skill at the next look", "\(Skills.state(shared))")
+        Skills.remove(shared, for: "you")
+        expect(Skills.state(shared) == .none, "and the person's own goes when they remove it")
+
+        // A skill somebody else wrote there is never touched.
+        let theirs = "---\nname: greenroom\ndescription: mine\n---\nMy own notes.\n"
+        try? fm.createDirectory(at: shared.folder, withIntermediateDirectories: true)
+        try? theirs.write(to: shared.file, atomically: true, encoding: .utf8)
+        expect(Skills.state(shared) == .theirs, "a file without Greenroom's line is somebody else's")
+        let refused = Skills.install(shared, for: "codex")
+        expect(!refused.ok && refused.message.contains("not Greenroom's") && read(shared.file) == theirs, "it is not written over", refused.message)
+        expect(Skills.remove(shared, for: "codex") == Skills.Result(ok: true, message: "") && read(shared.file) == theirs, "... and not removed")
+        Skills.refresh(shared)
+        wait { model.connect("codex", then: $0) }
+        expect(read(shared.file) == theirs && onMain { model.rows.first { $0.id == "codex" }?.link?.isConnected } == true && onMain { model.rows.first { $0.id == "codex" }?.skill } == .theirs
+               && onMain { model.rows.first { $0.id == "codex" }?.message ?? "" }.contains("left as it is"), "connecting Codex beside it connects, leaves the file and says so", onMain { model.rows.first { $0.id == "codex" }?.message ?? "" })
+        wait { model.addSharedSkill(then: $0) }
+        expect(onMain { model.sharedFailed } && read(shared.file) == theirs, "Add the Skill is refused there too")
+        wait { model.disconnect("codex", then: $0) }
+        expect(read(shared.file) == theirs, "disconnecting leaves it as well")
+        try? fm.removeItem(at: shared.folder)
+
+        // Claude Code without the plugin has its skill in ~/.claude/skills; with the plugin, the plugin's.
+        plugin(nil)
+        registered(as: "\(N)")
+        expect(Harnesses.claude.status().isConnected && Harnesses.claude.skill() == .claude, "Claude Code connected without the plugin takes its skill from ~/.claude/skills")
+        expect(Harnesses.settleSkill(Harnesses.claude, .otherCopy("/x")) == nil && Harnesses.settleSkill(Harnesses.claude, .unknown("?")) == nil && Skills.state(claudes) == .none,
+               "a harness on another copy, or one that did not answer, changes no skill")
+        expect(Harnesses.settleSkill(Harnesses.claude, Harnesses.claude.status(), creating: false) == nil && Skills.state(claudes) == .none, "looking at a connected harness makes no file")
+        let cs = Harnesses.settleSkill(Harnesses.claude, Harnesses.claude.status())
+        expect(cs?.ok == true && Skills.state(claudes) == .ours(asked: ["claude"], current: true) && Skills.state(shared) == .none, "connected, it is written there and nowhere else", cs?.message ?? "")
+        plugin("✔ enabled")
+        expect(Harnesses.claude.status().isConnected && Harnesses.claude.skill() == nil, "with the plugin, the plugin has the skill")
+        Harnesses.settleSkill(Harnesses.claude, Harnesses.claude.status(), creating: false)
+        expect(Skills.state(claudes) == .none && !fm.fileExists(atPath: claudes.folder.path), "... and Greenroom's copy in ~/.claude/skills goes at the next look")
+        plugin(nil)
+        Harnesses.settleSkill(Harnesses.claude, Harnesses.claude.status())
+        ClaudeConnect.repositoryOnlyOverride = true
+        expect(Harnesses.settleSkill(Harnesses.claude, .notConnected) == nil && Skills.state(claudes).isOurs, "the Debug copy changes no skill")
+        ClaudeConnect.repositoryOnlyOverride = false
+        registered(as: nil)
+        expect(Harnesses.settleSkill(Harnesses.claude, Harnesses.claude.status())?.message.contains("was removed") == true && Skills.state(claudes) == .none, "disconnected, it goes")
+        plugin("✔ enabled")
+
+        // The greenroom command: a link to the script inside this app, in a folder of the person's on their PATH.
+        let fakeApp = base.appendingPathComponent("apps/Greenroom.app"), otherApp = base.appendingPathComponent("apps/Other Greenroom.app")
+        for app in [fakeApp, otherApp] {
+            let s = app.appendingPathComponent("Contents/Resources/bin/greenroom")
+            try? fm.createDirectory(at: s.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? "#!/bin/sh\necho greenroom \"$@\"\n".write(to: s, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: s.path)
+        }
+        let script = fakeApp.appendingPathComponent("Contents/Resources/bin/greenroom")
+        let localBin = home.appendingPathComponent(".local/bin"), link = localBin.appendingPathComponent("greenroom")
+        func dest() -> String? { try? fm.destinationOfSymbolicLink(atPath: link.path) }
+        CommandLink.scriptOverride = script
+        if case .unavailable(let why) = CommandLink.state() { expect(why.contains("~/.local/bin") && why.contains("PATH") && !why.contains("/usr/local/bin"), "with none of its folders on the PATH the command cannot be added, and the row says why", why) }
+        else { expect(false, "with none of its folders on the PATH the command cannot be added", "\(CommandLink.state())") }
+        expect(!CommandLink.install().ok && !fm.fileExists(atPath: localBin.path), "... and adding it writes nothing")
+        expect(CommandLink.byHand == "sudo ln -sf \"\(script.path)\" /usr/local/bin/greenroom", "what to type instead is shown", CommandLink.byHand)
+        ClaudeConnect.pathOverride = bin.path + ":" + localBin.path + ":/usr/bin:/bin"
+        if case .unavailable = CommandLink.state() {} else { expect(false, "a folder on the PATH that does not exist is not made", "\(CommandLink.state())") }
+        try? fm.createDirectory(at: localBin, withIntermediateDirectories: true)
+        expect(CommandLink.state() == .available(link.path) && CommandLink.displayCommand(.available(link.path)) == "ln -sf \"\(script.path)\" \"\(link.path)\"",
+               "with ~/.local/bin on the PATH it can be added there, and the command is shown first", "\(CommandLink.state())")
+        wait { model.addCommand(then: $0) }
+        expect(onMain { model.command } == .installed(link.path) && dest() == script.path && onMain { model.commandMessage ?? "" }.hasPrefix("Added") && !onMain { model.commandFailed },
+               "Add links it to the script inside this app", "\(String(describing: onMain { model.command })) \(dest() ?? "no link")")
+        let ran = ClaudeConnect.run(link.path, ["tools"], env: ["PATH": "/usr/bin:/bin"])
+        expect(ran.status == 0 && ran.output.contains("greenroom tools"), "... and the link runs it", ran.output)
+        expect(CommandLink.install() == CommandLink.Result(ok: true, message: "Already there: ~/.local/bin/greenroom."), "adding again says it is there", CommandLink.install().message)
+        wait { model.removeCommand(then: $0) }
+        expect(onMain { model.command } == .available(link.path) && dest() == nil && fm.fileExists(atPath: script.path), "Remove takes the link away and leaves the script")
+        // Another program of that name is left alone.
+        try? "#!/bin/sh\necho theirs\n".write(to: link, atomically: true, encoding: .utf8)
+        expect(CommandLink.state() == .taken(link.path), "another program called greenroom on the PATH is seen", "\(CommandLink.state())")
+        expect(!CommandLink.install().ok && !CommandLink.remove().ok && read(link) == "#!/bin/sh\necho theirs\n", "... and neither replaced nor removed")
+        try? fm.removeItem(at: link)
+        // A link into another copy of Greenroom is said so, and Point It Here moves it.
+        let otherScript = otherApp.appendingPathComponent("Contents/Resources/bin/greenroom")
+        try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: otherScript.path)
+        expect(CommandLink.state() == .otherCopy(link.path, otherApp.path), "a link into another Greenroom.app is another copy's", "\(CommandLink.state())")
+        expect(!CommandLink.remove().ok && dest() == otherScript.path, "Remove leaves another copy's link")
+        expect(CommandLink.install().ok && dest() == script.path, "Point It Here moves it to this app", dest() ?? "no link")
+        try? fm.removeItem(at: link)
+        try? fm.removeItem(at: otherApp)
+        try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: otherScript.path)
+        expect(CommandLink.state() == .otherCopy(link.path, otherApp.path), "a link whose Greenroom.app is gone is still seen", "\(CommandLink.state())")
+        expect(CommandLink.install().ok && dest() == script.path, "... and can be pointed here")
+        try? fm.removeItem(at: link)
+        CommandLink.scriptOverride = nil
+        ClaudeConnect.pathOverride = bin.path + ":/usr/bin:/bin"
+
         ClaudeConnect.repositoryOnlyOverride = true
         expect(onMain { model.pending.isEmpty && model.connectedNames.isEmpty }, "the Debug copy's screen offers no harness to connect")
         registered(as: "\(N)")
@@ -382,6 +535,10 @@ enum ConnectCheck {
         expect(onMain { model.debugEntry } == .connected, "the Debug copy's screen sees its entry for every project")
         wait { model.removeDebugEntry(then: $0) }
         expect(onMain { model.debugEntry } == .notConnected && calls().contains("mcp remove --scope user \(N)"), "... and Remove It runs claude mcp remove --scope user \(N)")
+        try? fm.removeItem(at: shared.folder)
+        wait { model.addSharedSkill(then: $0) }
+        wait { model.addCommand(then: $0) }
+        expect(Skills.state(shared) == .none, "the Debug copy writes no skill and adds no command")
         ClaudeConnect.repositoryOnlyOverride = false
         ConnectModel.lookups = false
         expect(ConnectModel.displayName(client: "claude-code") == "Claude Code" && ConnectModel.displayName(client: "codex-mcp-client") == "Codex" && ConnectModel.displayName(client: "my-agent") == "my-agent",

@@ -4,6 +4,9 @@ import AppKit
 // first frame, prints the engine's output, and exits with its status. No window, no app.
 let arguments = CommandLine.arguments
 
+// `Greenroom --cli ...`: the `greenroom` command (bin/greenroom runs this). First, so nothing typed after it is
+// taken for one of the flags below.
+if let i = arguments.firstIndex(of: "--cli") { CLI.run(Array(arguments[(i + 1)...])) }
 // `Greenroom --mcp`: the agent interface on stdin and stdout, passed on to the running app (AgentShim).
 if arguments.contains("--mcp") { AgentShim.run() }
 // `Greenroom --link-apk APK [--pr N] [--worktree DIR] [--open]`: link a local APK to a PR/session in the running app.

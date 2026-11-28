@@ -77,6 +77,16 @@ When something looks wrong, look before you guess:
   change altered behaviour. **`tests`** runs instrumentation tests; **`snapshots`** the owner's screenshot tests.
 - **`sessions`**, **`jobs`**, **`workspace`** and **`app`** show (and change) what Greenroom is doing and how it is set up.
 
+## From a shell
+
+The same tools are the `greenroom` command, when it is on the PATH (`command -v greenroom`): `greenroom session`,
+`greenroom build`, `greenroom launch app.apk`, `greenroom tap --text Add`, `greenroom check --visible Saved`.
+`greenroom tools` lists them and `greenroom help TOOL` gives one tool's arguments. Run it from the worktree, or pass
+`-C DIR`. An answer is printed as the tool gives it; a picture is saved and its path printed (`--out FILE` says
+where). The exit status is 0, 1 when the tool failed or a `check` answered `FAIL`, 2 for a wrong argument and 3 when
+Greenroom could not be reached. Prefer the tools themselves when you have them: the command is for scripts and for
+a harness without them.
+
 ## What you cannot do, and what to do instead
 
 - **Paused.** The person can pause the agent in Greenroom. While paused every action is refused (`build`,

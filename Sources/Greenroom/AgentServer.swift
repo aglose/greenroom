@@ -113,6 +113,17 @@ final class AgentServer {
             respond(connection, 200, json: ["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "parse error"]])
             return
         }
+        // `greenroom hook EVENT`: a harness saying where its turn is. A note, not a call: it registers no
+        // connection, adds no repository and gets no answer.
+        if message["method"] as? String == "greenroom/hook" {
+            let params = message["params"] as? [String: Any] ?? [:]
+            DispatchQueue.main.async { [weak self] in
+                guard HookLog.shared.add(params) != nil else { return }
+                self?.tools.workbench?.agentChanged()
+            }
+            respond(connection, 202, "")
+            return
+        }
         // Hints from a local program that already holds the token: they select a row and grant nothing.
         let hint = AgentServer.hint(headers)
         let isSlow = message["method"] as? String == "tools/call"
@@ -270,6 +281,24 @@ final class AgentServer {
             return result([:])
         case "tools/list":
             return result(["resultType": "complete", "tools": AgentTools.list(), "ttlMs": 3_600_000, "cacheScope": "public"])
+        case "greenroom/open":
+            // `greenroom open`: the window comes forward, on a place a link names. It only navigates (Links).
+            guard let workbench = tools.workbench else { return failure(-32603, "Greenroom is not ready") }
+            var link: URL?
+            if let raw = params["link"] as? String, !raw.isEmpty {
+                guard let url = URL(string: raw), Links.handles(url) else {
+                    return result(["resultType": "complete", "isError": true, "content": [["type": "text", "text": "\(raw) is not a \(Links.scheme):// link"]]])
+                }
+                link = url
+            } else if params["session"] as? Bool == true, let s = connection.session {
+                link = URL(string: Links.session(s.worktree))   // `greenroom open DIR`: the session of the folder it names
+            }
+            let (said, ok) = DispatchQueue.main.sync { () -> (String, Bool) in
+                let answer = link.map { Links.open($0, in: workbench) } ?? ("Greenroom's window", true)
+                Links.bringForward(workbench)
+                return answer
+            }
+            return result(["resultType": "complete", "isError": !ok, "content": [["type": "text", "text": said]]])
         case "tools/call":
             guard let name = params["name"] as? String else { return failure(-32602, "name is required") }
             if let a = params["arguments"], !(a is [String: Any]), !(a is NSNull) { return failure(-32602, "arguments must be an object") }
@@ -290,11 +319,13 @@ final class AgentServer {
 
 /// `Greenroom --mcp`: what an agent runs. Speaks the protocol on stdin and stdout (one JSON message a line) and
 /// passes each message to the running app, starting Greenroom first if it is not open. It holds no state: the
-/// simulators belong to the app, where the person can see them.
+/// simulators belong to the app, where the person can see them. The `greenroom` command (CLI) reaches the app the
+/// same way.
 enum AgentShim {
-    private struct Endpoint { let port: Int; let token: String; let pid: Int32 }
+    struct Endpoint { let port: Int; let token: String; let pid: Int32 }
 
-    private static func endpoint() -> Endpoint? {
+    /// The running app's endpoint, if an app is running.
+    static func endpoint() -> Endpoint? {
         guard let data = try? Data(contentsOf: AgentServer.file),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let port = json["port"] as? Int, let token = json["token"] as? String, let pid = json["pid"] as? Int,
@@ -303,7 +334,7 @@ enum AgentShim {
     }
 
     /// The running app's endpoint, starting the app (in the background) when there is none.
-    private static func connect() -> Endpoint? {
+    static func connect() -> Endpoint? {
         if let e = endpoint() { return e }
         let p = Process()
         let bundle = Bundle.main.bundleURL
@@ -324,11 +355,11 @@ enum AgentShim {
         return nil
     }
 
-    private static func post(_ body: Data, to e: Endpoint, cwdOverride: String? = nil) -> (status: Int, data: Data)? {
+    static func post(_ body: Data, to e: Endpoint, cwdOverride: String? = nil, timeout: TimeInterval = 300) -> (status: Int, data: Data)? {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(e.port)/mcp")!)
         request.httpMethod = "POST"
         request.httpBody = body
-        request.timeoutInterval = 300
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(e.token)", forHTTPHeaderField: "Authorization")
         // Where the agent works and who started this shim: the app ties the connection to a worktree's session.
@@ -342,7 +373,7 @@ enum AgentShim {
         let done = DispatchSemaphore(value: 0)
         var out: (Int, Data)?
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForResource = 300
+        config.timeoutIntervalForResource = timeout
         config.connectionProxyDictionary = [:]   // loopback only: never through a proxy
         URLSession(configuration: config).dataTask(with: request) { data, response, _ in
             if let http = response as? HTTPURLResponse { out = (http.statusCode, data ?? Data()) }

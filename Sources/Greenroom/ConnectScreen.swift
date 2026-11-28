@@ -18,6 +18,9 @@ final class ConnectModel: ObservableObject {
         var busy = false
         var message: String?
         var failed = false
+        /// Connected: where its skill goes, and what is there. nil: it has the skill another way, or is not connected.
+        var skillPlace: Skills.Place?
+        var skill: Skills.State?
         var id: String { harness.id }
     }
 
@@ -27,6 +30,14 @@ final class ConnectModel: ObservableObject {
     /// Found here, and connected through the harness they run.
     @Published private(set) var hosts: [String] = []
     @Published private(set) var working = false
+    /// The skill in the folder most harnesses read (`~/.agents/skills`), for an agent added by hand.
+    @Published private(set) var sharedSkill: Skills.State = .none
+    @Published private(set) var sharedMessage: String?
+    @Published private(set) var sharedFailed = false
+    /// The `greenroom` command on the PATH. nil: not looked at yet.
+    @Published private(set) var command: CommandLink.State?
+    @Published private(set) var commandMessage: String?
+    @Published private(set) var commandFailed = false
     /// The Debug copy: Claude Code's entry for every project, left by an earlier build (see `ClaudeConnect.repositoryOnly`).
     @Published private(set) var debugEntry: ClaudeConnect.State?
     @Published private(set) var debugMessage: String?
@@ -99,11 +110,27 @@ final class ConnectModel: ObservableObject {
             }
             for h in Harnesses.connectable {
                 let link = h.status()
-                DispatchQueue.main.async { self.update(h.id) { $0.link = link } }
+                // Looking makes no skill file (the row offers that). It keeps the ones Greenroom wrote true: this
+                // harness's name on its own, and off them once it is no longer connected.
+                Harnesses.settleSkill(h, link, creating: false)
+                let skill = Self.skill(of: h, link)
+                DispatchQueue.main.async { self.update(h.id) { $0.link = link; $0.skillPlace = skill.place; $0.skill = skill.state } }
             }
+            for place in Skills.Place.allCases { Skills.refresh(place) }
             let also = Harnesses.alsoFound()
-            DispatchQueue.main.async { self.byHand = also.byHand; self.hosts = also.hosts; self.onChange?(); then?() }
+            let shared = Skills.state(.agents), command = CommandLink.state()
+            DispatchQueue.main.async {
+                self.byHand = also.byHand; self.hosts = also.hosts
+                self.sharedSkill = shared; self.command = command
+                self.onChange?(); then?()
+            }
         }
+    }
+
+    /// A connected harness's skill: where it goes and what is there.
+    private static func skill(of h: Harness, _ link: Harness.Link) -> (place: Skills.Place?, state: Skills.State?) {
+        guard link.isConnected, let place = h.skill() else { return (nil, nil) }
+        return (place, Skills.state(place))
     }
 
     private func update(_ id: String, _ change: (inout Row) -> Void) {
@@ -122,17 +149,64 @@ final class ConnectModel: ObservableObject {
                 guard let h = Harnesses.connectable.first(where: { $0.id == id }) else { continue }
                 let r = work(h)
                 let link = h.status()
-                DispatchQueue.main.async { self.update(id) { $0.busy = false; $0.link = link; $0.message = r.message; $0.failed = !r.ok } }
+                // The skill follows the connection: there once the harness is connected, gone with its last one.
+                let followed = Harnesses.settleSkill(h, link)
+                let message = [r.message, followed?.message ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
+                let skill = Self.skill(of: h, link)
+                DispatchQueue.main.async {
+                    self.update(id) { $0.busy = false; $0.link = link; $0.message = message; $0.failed = !r.ok; $0.skillPlace = skill.place; $0.skill = skill.state }
+                }
             }
-            DispatchQueue.main.async { self.working = false; self.onChange?(); then?() }
+            let shared = Skills.state(.agents)
+            DispatchQueue.main.async {
+                // Harnesses that share a skill file see what the others did to it.
+                for row in self.rows where row.skillPlace != nil && !ids.contains(row.id) { self.update(row.id) { $0.skill = Skills.state($0.skillPlace ?? .agents) } }
+                self.working = false; self.sharedSkill = shared; self.onChange?(); then?()
+            }
         }
     }
 
     /// The one button: connects every ticked harness that is found and not connected, one after the other.
     func connectTicked(then: (() -> Void)? = nil) { act(pending.map(\.id), { $0.connect() }, then: then) }
-    func connect(_ id: String) { act([id]) { $0.connect() } }
-    func replace(_ id: String) { act([id]) { $0.replace() } }
-    func disconnect(_ id: String) { act([id]) { $0.disconnect() } }
+    func connect(_ id: String, then: (() -> Void)? = nil) { act([id], { $0.connect() }, then: then) }
+    func replace(_ id: String, then: (() -> Void)? = nil) { act([id], { $0.replace() }, then: then) }
+    func disconnect(_ id: String, then: (() -> Void)? = nil) { act([id], { $0.disconnect() }, then: then) }
+    /// For a harness connected before Greenroom wrote skills, or one whose skill was deleted: settling writes it.
+    func addSkill(_ id: String, then: (() -> Void)? = nil) { act([id], { _ in Harness.Result(ok: true, message: "") }, then: then) }
+
+    /// One thing beside the harnesses (the skill for an agent added by hand, the command), then what is there now.
+    private func aside(_ work: @escaping () -> (ok: Bool, message: String), said: @escaping (ConnectModel, Bool, String) -> Void, then: (() -> Void)?) {
+        guard Self.lookups, !working, !repositoryOnly else { then?(); return }
+        working = true
+        queue.async {
+            let r = work()
+            let shared = Skills.state(.agents), command = CommandLink.state()
+            DispatchQueue.main.async {
+                for row in self.rows where row.skillPlace != nil { self.update(row.id) { $0.skill = Skills.state($0.skillPlace ?? .agents) } }
+                self.working = false; self.sharedSkill = shared; self.command = command
+                said(self, r.ok, r.message)
+                then?()
+            }
+        }
+    }
+
+    /// The skill for an agent the person added by hand: "you" asked for it, so it stays when a harness is disconnected.
+    func addSharedSkill(then: (() -> Void)? = nil) {
+        aside({
+            let r = Skills.install(.agents, for: "you")
+            return (r.ok, !r.ok ? r.message : r.message.isEmpty ? "Already there: \(Skills.Place.agents.shown)." : "Written: \(Skills.Place.agents.shown).")
+        }, said: { $0.sharedFailed = !$1; $0.sharedMessage = $2 }, then: then)
+    }
+    func removeSharedSkill(then: (() -> Void)? = nil) {
+        aside({ let r = Skills.remove(.agents, for: "you"); return (r.ok, r.message.replacingOccurrences(of: "Its skill", with: "The skill")) },
+              said: { $0.sharedFailed = !$1; $0.sharedMessage = $2 }, then: then)
+    }
+    func addCommand(then: (() -> Void)? = nil) {
+        aside({ let r = CommandLink.install(); return (r.ok, r.message) }, said: { $0.commandFailed = !$1; $0.commandMessage = $2 }, then: then)
+    }
+    func removeCommand(then: (() -> Void)? = nil) {
+        aside({ let r = CommandLink.remove(); return (r.ok, r.message) }, said: { $0.commandFailed = !$1; $0.commandMessage = $2 }, then: then)
+    }
 
     /// The Debug copy: takes its entry out of every project (`claude mcp remove --scope user greenroom-debug`).
     func removeDebugEntry(then: (() -> Void)? = nil) {
@@ -263,6 +337,8 @@ struct HarnessList: View {
                     Divider().overlay(SettingsTheme.stroke)
                 }
                 otherRow
+                Divider().overlay(SettingsTheme.stroke)
+                commandRow
             }
         }
     }
@@ -271,7 +347,7 @@ struct HarnessList: View {
         switch row.link {
         case nil: return ConnectModel.lookups ? "Looking…" : "Not looked at"
         case .notInstalled: return "Not found on this Mac"
-        case .notConnected: return "Adds Greenroom's tools"
+        case .notConnected: return "Adds Greenroom's tools and a skill"
         case .connected(let how): return "Connected " + how
         case .otherCopy(let path): return "Its \(ClaudeConnect.serverName) server runs another copy of Greenroom (\(path))"
         case .unknown(let why): return why
@@ -332,6 +408,14 @@ struct HarnessList: View {
             }
             if open == row.id {
                 CopyBox(text: row.harness.how())
+                if let place = row.skillPlace, let skill = row.skill {
+                    HStack(spacing: 8) {
+                        Text(Skills.words(place, skill))
+                            .font(.system(size: 11.5)).foregroundStyle(skill == .theirs ? SettingsTheme.warning : SettingsTheme.mute)
+                            .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        if skill == .none { SmallButton(title: "Add the Skill") { model.addSkill(row.id) }.disabled(model.working) }
+                    }
+                }
                 if row.link?.isConnected == true || { if case .otherCopy = row.link { return true }; return false }() {
                     SmallButton(title: "Disconnect") { model.disconnect(row.id) }.disabled(model.working)
                 }
@@ -366,11 +450,82 @@ struct HarnessList: View {
             if open == "other" {
                 CopyBox(text: Harnesses.stdioCommand)
                 CopyBox(text: Harnesses.stdioJSON)
+                sharedSkill
+            }
+            if let message = model.sharedMessage {
+                Text(message).font(.system(size: 11.5)).foregroundStyle(model.sharedFailed ? SettingsTheme.record : SettingsTheme.accent)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
             if !model.hosts.isEmpty {
                 Text("\(ConnectModel.list(model.hosts)) \(model.hosts.count == 1 ? "runs" : "run") Claude Code and Codex, so \(model.hosts.count == 1 ? "it is" : "they are") connected through them.")
                     .font(.system(size: 11.5)).foregroundStyle(SettingsTheme.mute)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 10)
+    }
+
+    /// The skill for an agent added by hand, in the folder most harnesses read.
+    private var sharedSkill: some View {
+        let place = Skills.Place.agents
+        let asked: [String] = { if case .ours(let names, _) = model.sharedSkill { return names }; return [] }()
+        let words: String = {
+            switch model.sharedSkill {
+            case .none: return "A skill teaches the agent Greenroom's loop. Greenroom can write it to \(place.shown), which Codex, Cursor, Copilot CLI, opencode, Gemini CLI, Goose and Amp read."
+            case .theirs: return Skills.words(place, .theirs) + ", so it is left alone."
+            case .ours: return Skills.words(place, model.sharedSkill) + ", there for \(ConnectModel.list(asked.map(Skills.asker)))."
+            }
+        }()
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(words).font(.system(size: 11.5)).foregroundStyle(model.sharedSkill == .theirs ? SettingsTheme.warning : SettingsTheme.mute)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            switch model.sharedSkill {
+            case .none: SmallButton(title: "Add the Skill") { model.addSharedSkill() }.disabled(model.working)
+            case .ours where asked.contains("you"): SmallButton(title: "Remove It") { model.removeSharedSkill() }.disabled(model.working)
+            // There for a connected harness, and gone when that one is disconnected unless the person asks for it too.
+            case .ours: SmallButton(title: "Keep It") { model.addSharedSkill() }.disabled(model.working)
+            case .theirs: EmptyView()
+            }
+        }
+    }
+
+    /// The `greenroom` command: the same tools from a shell.
+    private var commandRow: some View {
+        let state = model.command
+        let warn: Bool = { switch state { case .otherCopy, .taken: return true; default: return false } }()
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 11) {
+                if ticks { Toggle("", isOn: .constant(false)).toggleStyle(.checkbox).labelsHidden().opacity(0).accessibilityHidden(true) }
+                Badge(text: ">_", color: SettingsTheme.mute)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("The greenroom command").font(.system(size: 13, weight: .semibold)).foregroundStyle(SettingsTheme.ink)
+                    HStack(spacing: 6) {
+                        Text(state.map(CommandLink.words) ?? (ConnectModel.lookups ? "Looking…" : "Not looked at"))
+                            .font(.system(size: 11.5)).foregroundStyle(warn ? SettingsTheme.warning : SettingsTheme.mute)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let state, CommandLink.script != nil {
+                            LinkButton(title: open == "command" ? "hide" : ({ if case .installed = state { return "details" }; return "what this runs" }())) { open = open == "command" ? nil : "command" }
+                        }
+                    }
+                }
+                Spacer(minLength: 8)
+                switch state {
+                case .installed: Text("✓ Added").font(.system(size: 12, weight: .semibold)).foregroundStyle(SettingsTheme.accent)
+                case .available: SmallButton(title: "Add", accent: !ticks) { model.addCommand() }.disabled(model.working)
+                case .otherCopy: SmallButton(title: "Point It Here", accent: true) { model.addCommand() }.disabled(model.working)
+                case .taken, .unavailable, nil: EmptyView()
+                }
+            }
+            if open == "command", let state {
+                CopyBox(text: CommandLink.displayCommand(state))
+                Text("greenroom tools lists what it can do; greenroom help TOOL gives one tool's arguments. It is a link to a script inside this app, so it goes away with the app.")
+                    .font(.system(size: 11.5)).foregroundStyle(SettingsTheme.mute).fixedSize(horizontal: false, vertical: true)
+                if case .installed = state { SmallButton(title: "Remove") { model.removeCommand() }.disabled(model.working) }
+            }
+            if let message = model.commandMessage {
+                Text(message).font(.system(size: 11.5)).foregroundStyle(model.commandFailed ? SettingsTheme.record : SettingsTheme.accent)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.vertical, 10)

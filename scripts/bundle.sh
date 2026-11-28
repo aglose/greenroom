@@ -72,6 +72,9 @@ if [[ "$VARIANT" == debug ]]; then
       -c "Set :CFBundleDisplayName Greenroom Debug" -c "Add :GreenroomVariant string debug" \
       -c "Delete :SUFeedURL" -c "Delete :SUPublicEDKey" "$C/Info.plist"
   $PB -c "Delete :GreenroomReportsURL" "$C/Info.plist" 2>/dev/null || true
+  # Its links are greenroom-debug://, so a greenroom:// link always opens the release.
+  $PB -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 greenroom-debug" \
+      -c "Set :CFBundleURLTypes:0:CFBundleURLName io.github.aglose.greenroom.debug.link" "$C/Info.plist"
   # Opening an .apk or .apkrec by double-click stays the release's: the debug copy only offers itself.
   i=0; while $PB -c "Print :CFBundleDocumentTypes:$i" "$C/Info.plist" >/dev/null 2>&1; do
     $PB -c "Set :CFBundleDocumentTypes:$i:LSHandlerRank Alternate" "$C/Info.plist"; i=$((i+1))
@@ -84,6 +87,11 @@ fi
 cp -Rc "$ENGINE" "$C/Resources/engine"
 cp "$TESTAPP" "$C/Resources/engine-testapp.apk"
 cp -R Resources/recipes "$C/Resources/recipes"
+# The greenroom command (the Connect screen links it into a folder on the PATH) and the skill it writes for
+# harnesses without the plugin: the plugin's own files, so the two never differ.
+mkdir -p "$C/Resources/bin" "$C/Resources/skill"
+install -m 755 plugin/bin/greenroom "$C/Resources/bin/greenroom"
+install -m 644 plugin/skills/verify/SKILL.md "$C/Resources/skill/SKILL.md"
 chmod -R u+w "$APP"   # a release's JDK files are read-only; signing rewrites them
 xattr -cr "$APP"
 

@@ -36,6 +36,8 @@ struct Harness {
     /// Points an entry that runs another copy at this one.
     let replace: () -> Result
     let disconnect: () -> Result
+    /// Where this harness reads Greenroom's skill from, nil when it has the skill another way (Claude Code's plugin).
+    let skill: () -> Skills.Place?
 }
 
 enum Harnesses {
@@ -81,15 +83,47 @@ enum Harnesses {
 
     private static func result(_ o: ClaudeConnect.Outcome) -> Harness.Result { Harness.Result(ok: o.ok, message: o.message) }
 
+    private static func alsoWrites(_ place: Skills.Place, _ more: String) -> String {
+        "\n\nAnd writes Greenroom's skill to \(place.shown)\(more)."
+    }
+
+    /// After a harness was connected or disconnected, its skill follows: written (or this harness's name added to
+    /// the one that is there) when LINK says it is connected to this copy, its name taken off when it is not
+    /// connected. A harness on another copy, or one that did not answer, is left as it is. Answers what happened,
+    /// nil when nothing changed. Without CREATING no file is made: a file Greenroom wrote is kept true, and that is
+    /// all (what looking does, as against connecting). The Debug copy writes no skill.
+    @discardableResult
+    static func settleSkill(_ h: Harness, _ link: Harness.Link, creating: Bool = true) -> Skills.Result? {
+        if ClaudeConnect.repositoryOnly { return nil }
+        var said: [Skills.Result] = []
+        switch link {
+        case .connected:
+            let place = h.skill()
+            for other in Skills.Place.allCases where other != place { said.append(Skills.remove(other, for: h.id)) }
+            if let place, creating || Skills.state(place).isOurs { said.append(Skills.install(place, for: h.id)) }
+        case .notConnected:
+            for place in Skills.Place.allCases { said.append(Skills.remove(place, for: h.id)) }
+        case .otherCopy, .notInstalled, .unknown:
+            return nil
+        }
+        let spoken = said.filter { !$0.message.isEmpty }
+        guard !spoken.isEmpty else { return nil }
+        return Skills.Result(ok: !spoken.contains { !$0.ok }, message: spoken.map(\.message).joined(separator: " "))
+    }
+
+    /// Whether Claude Code has the plugin, as its last status found it: the plugin carries the skill.
+    private static var claudePlugin = false
+
     // MARK: Claude Code
 
     static let claude = Harness(
         id: "claude", name: "Claude Code", badge: "CC", color: NSColor(srgbRed: 0.85, green: 0.47, blue: 0.34, alpha: 1),
-        how: { ClaudeConnect.displayCommand() + "\n\nOr, typed inside Claude Code, the plugin (the same tools and the verify skill):\n" + ClaudeConnect.pluginMarketplaceCommand + "\n" + ClaudeConnect.pluginInstallCommand },
+        how: { ClaudeConnect.displayCommand() + alsoWrites(.claude, "") + "\n\nOr, typed inside Claude Code, the plugin (the same tools, with the skill and the greenroom command in it):\n" + ClaudeConnect.pluginMarketplaceCommand + "\n" + ClaudeConnect.pluginInstallCommand },
         status: {
             let entry = ClaudeConnect.status()
             if entry == .missing { return .notInstalled }
             let plugin = ClaudeConnect.pluginInstalled()
+            claudePlugin = plugin
             switch entry {
             case .connected:
                 return .connected(plugin ? "as MCP server \(ClaudeConnect.serverName) and through the plugin, so its tools are listed twice" : "as MCP server \(ClaudeConnect.serverName)")
@@ -102,27 +136,30 @@ enum Harnesses {
         },
         connect: { result(ClaudeConnect.connect()) },
         replace: { result(ClaudeConnect.reconnect()) },
-        disconnect: { result(ClaudeConnect.disconnect()) })
+        disconnect: { result(ClaudeConnect.disconnect()) },
+        skill: { claudePlugin ? nil : .claude })
 
     // MARK: Codex
 
     static let codex = Harness(
         id: "codex", name: "Codex", badge: "CX", color: NSColor(srgbRed: 0.45, green: 0.62, blue: 0.95, alpha: 1),
-        how: { CodexConnect.displayCommand() },
+        how: { CodexConnect.displayCommand() + alsoWrites(.agents, ", which Cursor and other harnesses read too") },
         status: { CodexConnect.status() },
         connect: { CodexConnect.connect() },
         replace: { CodexConnect.replace() },
-        disconnect: { CodexConnect.disconnect() })
+        disconnect: { CodexConnect.disconnect() },
+        skill: { .agents })
 
     // MARK: Cursor
 
     static let cursor = Harness(
         id: "cursor", name: "Cursor", badge: "CU", color: NSColor(srgbRed: 0.78, green: 0.78, blue: 0.82, alpha: 1),
-        how: { CursorConnect.displayChange() },
+        how: { CursorConnect.displayChange() + alsoWrites(.agents, ", which Codex and other harnesses read too") },
         status: { CursorConnect.status() },
         connect: { CursorConnect.connect() },
         replace: { CursorConnect.connect() },
-        disconnect: { CursorConnect.disconnect() })
+        disconnect: { CursorConnect.disconnect() },
+        skill: { .agents })
 }
 
 /// Codex's connector: `codex mcp add`, as the person would type it. The syntax is from Codex's documentation

@@ -22,6 +22,15 @@
   <key>SUEnableSystemProfiling</key><false/>
   <!-- Opt-in crash reports and daily feature usage counts (Reports.swift, PRIVACY.md). Off unless enabled. -->
   <key>GreenroomReportsURL</key><string>https://greenroom-reports-426613790001.us-central1.run.app/report</string>
+  <!-- greenroom:// links: a place in the window (Links.swift). A link only navigates. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>io.github.aglose.greenroom.link</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>CFBundleURLSchemes</key><array><string>greenroom</string></array>
+    </dict>
+  </array>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

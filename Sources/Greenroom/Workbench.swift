@@ -2783,6 +2783,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         window.makeFirstResponder(emptyStage)
     }
 
+    /// The devices take the stage back from the Connect and APK screens: what a link to a session asks for.
+    func showDevices() {
+        leaveAPKScreen()
+        leaveConnectScreen()
+    }
+
     private func leaveAPKScreen() {
         guard showingAPK else { return }
         showingAPK = false
