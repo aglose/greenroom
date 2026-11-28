@@ -565,17 +565,18 @@ extension AgentTools {
             for ws in wb.sessions.workspaces { lines.append("\(ws.root.lastPathComponent): agents' sessions \(ws.recordAgent ? "recorded" : "not recorded")") }
             let entries = wb.agentActivity.entries(session: connection.session?.worktree.path, all: all).suffix(limit)
             if entries.isEmpty { lines.append("no calls yet") }
-            for e in entries {
-                lines.append("\(f.string(from: e.time)) \(e.tool)\(e.failed ? " FAILED" : "") | \(e.summary.split(separator: "\n").first ?? "")" + (all ? (e.label.map { " | \($0)" } ?? "") : ""))
+            var timed: [(Date, String)] = entries.map { e in
+                (e.time, "\(f.string(from: e.time)) \(e.tool)\(e.failed ? " FAILED" : "") | \(e.summary.split(separator: "\n").first ?? "")" + (all ? (e.label.map { " | \($0)" } ?? "") : ""))
             }
-            // What harnesses' hooks said (`greenroom hook`): this worktree's, or everyone's.
+            // What harnesses' hooks said (`greenroom hook`): this worktree's, or everyone's. In with the calls, by time.
             let mine = connection.session?.worktree.resolvingSymlinksInPath().path
             let hooks = HookLog.shared.events.filter { e in
                 guard !all, let mine else { return true }
                 let at = e.cwd.resolvingSymlinksInPath().path
                 return at == mine || at.hasPrefix(mine + "/")
             }.suffix(limit)
-            for e in hooks { lines.append("\(f.string(from: e.time)) hook \(e.harness) \(e.event) | \(e.cwd.lastPathComponent)") }
+            timed += hooks.map { e in (e.time, "\(f.string(from: e.time)) hook \(e.harness) \(e.event) | \(e.cwd.lastPathComponent)") }
+            lines += timed.enumerated().sorted { ($0.element.0, $0.offset) < ($1.element.0, $1.offset) }.suffix(limit).map(\.element.1)
             return lines.joined(separator: "\n")
         }
     }

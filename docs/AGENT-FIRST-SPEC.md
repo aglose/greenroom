@@ -131,12 +131,18 @@ connecting, then goes.
   marketplace as documented. (A3 ships `plugin/bin/greenroom` on that documentation; it was not seen on a real
   Claude Code's PATH.) (`claude mcp get` and `claude plugin list` were read from a real Claude Code 2.1 in A2
   and answer as `ClaudeConnect.swift` expects; `mcp add` and `mcp remove` are still only run against a stand-in.)
-- Codex's `mcp add`, `mcp get --json` and `mcp remove` against a real Codex: A2 took them from its documentation,
-  which does not give the JSON's shape or what `get` answers for a missing server. `CodexConnect` reads `command`
-  wherever it sits in the answer and treats a failing `get` as not connected.
+- Codex's `mcp add`, `mcp get --json` and `mcp remove` against a real Codex: A2 took them from its documentation.
+  (Checked after A4 on Codex 0.172 with `Greenroom --real-harness codex`: they work as `CodexConnect` expects;
+  the command sits under `transport` in the JSON, and `get` exits 1 for a missing server.)
 - Codex's hook trust step: what the person sees, and whether a hook can be offered without it. (A4 writes
   `~/.codex/hooks.json` and says to trust the hooks in `/hooks`; the command line is kept the same from build to
-  build so the trust, which is by the hook's hash, is asked once.)
+  build so the trust, which is by the hook's hash, is asked once. Seen on Codex 0.172: an untrusted hook is
+  skipped without a word in `codex exec`, and there is no command that trusts one, so the step stays the
+  person's.)
+- Cursor against a real Cursor. (Checked after A4 on Cursor 3.32 with `Greenroom --real-harness cursor`: it starts
+  the server from `~/.cursor/mcp.json` unasked and runs the hooks. It also loads Claude Code's plugins and user
+  hooks, so with Greenroom's Claude Code plugin installed it has Greenroom's server twice; and it fails to run
+  `sessionEnd` when the app quits. docs/AGENTS-INTERFACE.md, "Seen on real harnesses".)
 - What no harness's hooks say (A4): that a permission was granted (a session shows as waiting until its tool
   finishes) and, outside Claude Code's idle notification a minute later, that the person interrupted (it shows as
   working until 15 minutes pass with no hook).

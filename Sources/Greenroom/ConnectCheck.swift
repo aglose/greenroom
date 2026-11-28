@@ -345,6 +345,8 @@ enum ConnectCheck {
         let cu = CursorConnect.connect()
         expect(cu.ok && CursorConnect.status() == .connected("in ~/.cursor/mcp.json"), "connecting Cursor writes the entry", cu.message)
         expect((cursorServers()[N] as? [String: Any])?["command"] as? String == exe && (cursorServers()[N] as? [String: Any])?["args"] as? [String] == ["--mcp"], "... with this app as its command and --mcp", "\(cursorServers())")
+        let alone = CursorConnect.disconnect()
+        expect(alone.ok && !fm.fileExists(atPath: cursorFile.path) && CursorConnect.status() == .notConnected, "disconnecting takes away a file that held this entry alone", alone.message)
         try? fm.createDirectory(at: cursorFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? #"{"mcpServers": {"other": {"url": "https://example.com/mcp"}, "\#(N)": {"command": "/Applications/Other.app/Contents/MacOS/Greenroom", "args": ["--mcp"]}}, "theirs": 7}"#.write(to: cursorFile, atomically: true, encoding: .utf8)
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cursorFile.path)

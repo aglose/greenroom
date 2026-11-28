@@ -41,10 +41,15 @@ own words when a command fails; each row's details have Disconnect.
 
 `<Greenroom>` is this copy's program, `/Applications/Greenroom.app/Contents/MacOS/Greenroom` when installed there.
 If a harness already has a `greenroom` entry that runs another copy of the app, the row says so and offers
-Reconnect. The `claude mcp` lines and the shape of their answers were read from a real Claude Code (2.1); Codex's
-are from its documentation and were never run against a real Codex; every check runs stand-ins
-(`--connect-check`). The command lines are in `ClaudeConnect.swift` and `Harnesses.swift`. Each call is stopped at
-a deadline, and none runs on the app's main thread.
+Reconnect. The `claude mcp` lines and the shape of their answers were read from a real Claude Code (2.1), and
+Codex's and Cursor's were run against a real Codex (0.172) and a real Cursor (3.32), below; every check runs
+stand-ins (`--connect-check`). The command lines are in `ClaudeConnect.swift` and `Harnesses.swift`. Each call is
+stopped at a deadline, and none runs on the app's main thread.
+
+Disconnecting removes what connecting added. Cursor's `~/.cursor/mcp.json` is removed when Greenroom's entry was
+all it held. Codex writes `~/.codex/config.toml` itself, in its own layout: after `codex mcp add` and
+`codex mcp remove` the file says the same as before, but Codex may have re-sorted its keys and rewritten numbers
+(`120` as `120.0`).
 
 **Session status** comes from each harness's own hooks, which connecting adds and disconnecting removes:
 
@@ -73,6 +78,30 @@ read for titles and pull requests, and for sessions from before the harness was 
 (`workspace` setting `auto: on_turn_end`): a build that lands while an agent is mid-turn in that worktree is not
 walked until its turn ends, so the builds it makes along the way are not walked one by one. It starts no build,
 and with no agent heard in the worktree it is the same as walking every build.
+
+**Seen on real harnesses** (November 2026, with `Greenroom --real-harness`, below):
+
+- **Codex 0.172.** `codex mcp add`, `mcp get --json` (the command sits under `transport`; a missing server makes
+  `get` exit 1) and `mcp remove` work as the connector expects. Codex names itself `codex-mcp-client`, lists the
+  skill in `~/.agents/skills/greenroom`, and calls Greenroom's tools from `codex exec`. A hook it does not trust
+  yet is skipped without a word; once trusted (or with `codex exec --dangerously-bypass-hook-trust`),
+  `SessionStart`, `UserPromptSubmit`, `PostToolUse` (after a shell command and after an MCP tool) and `Stop`
+  arrive, and the session shows as working, then idle. Codex has no hook for a session's end.
+- **Cursor 3.32.** Opening a window starts the server in `~/.cursor/mcp.json` without asking; Cursor names itself
+  `cursor-vscode`. It loads all six hooks from `~/.cursor/hooks.json` and takes `{"continue":true}` and `{}` as
+  valid answers; `beforeSubmitPrompt`, `postToolUse` (after an MCP tool) and `stop` arrive from its agent. It did
+  not run `sessionStart` for a new conversation in the editor, and when the app quits it asks for `sessionEnd`
+  but fails to run it (its log: "MainThreadShellExec not initialized"), so a session whose window closed stays
+  shown as idle until it ages out.
+- **Cursor also reads Claude Code's files**: the hooks in `~/.claude/settings.json` (they run beside its own;
+  Greenroom hears a turn's end once) and Claude Code's installed plugins. With Greenroom's plugin installed in
+  Claude Code, Cursor starts that plugin's server too, so a Cursor connected here lists Greenroom twice: turn one
+  of the two off under Cursor's Settings > MCP.
+
+`Greenroom --real-harness claude|codex|cursor look|connect|disconnect` does from a terminal what the Connect
+screen's buttons do for one harness, against the real program and the real files, and prints what the harness
+then says. `look` changes nothing. It is not a check and no script runs it. In the Debug copy it connects the
+Debug copy, which the screen never does: disconnect it again afterwards.
 
 Any other MCP client: run that program with `--mcp` as a stdio server. The toolbar's Agent button (✦) has the
 command for this copy of the app, a log of what agents did, and a switch that pauses them.

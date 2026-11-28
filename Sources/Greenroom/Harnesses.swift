@@ -196,8 +196,9 @@ enum Harnesses {
 }
 
 /// Codex's connector: `codex mcp add`, as the person would type it. The syntax is from Codex's documentation
-/// (`codex mcp add <name> -- <command>`, `mcp get <name> --json`, `mcp remove <name>`) and was never run against a
-/// real Codex: every check runs a stand-in that records its arguments. If Codex's syntax changes, change it here.
+/// (`codex mcp add <name> -- <command>`, `mcp get <name> --json`, `mcp remove <name>`) and was run against a real
+/// Codex 0.172 by hand (RealHarness); every check runs a stand-in that records its arguments. If Codex's syntax
+/// changes, change it here.
 enum CodexConnect {
     static var serverName: String { ClaudeConnect.serverName }
     static func addArguments(executable: String) -> [String] { ["mcp", "add", serverName, "--", executable, "--mcp"] }
@@ -297,7 +298,8 @@ enum CodexConnect {
 /// Cursor's connector. Cursor has no command that adds a server, and its install link cannot be seen to have
 /// worked, so this is the one connector that writes the harness's file: the `greenroom` entry of
 /// `~/.cursor/mcp.json`, which Cursor's editor and its CLI both read. The other entries are kept as they are; the
-/// file is written again as sorted, indented JSON. A file that is not plain JSON is left alone, and said so.
+/// file is written again as sorted, indented JSON, and removed on disconnect when this entry was all it held. A file
+/// that is not plain JSON is left alone, and said so.
 enum CursorConnect {
     static var serverName: String { ClaudeConnect.serverName }
     static var file: URL { Harnesses.home.appendingPathComponent(".cursor/mcp.json") }
@@ -375,6 +377,11 @@ enum CursorConnect {
             }
             servers[serverName] = nil
             obj["mcpServers"] = servers
+            // A file that held this entry alone is one Greenroom made: it goes, as it came.
+            if servers.isEmpty, obj.count == 1 {
+                guard (try? FileManager.default.removeItem(at: file)) != nil else { return Harness.Result(ok: false, message: "\(shownPath) could not be removed.") }
+                return Harness.Result(ok: true, message: "Disconnected: \(shownPath) held this entry alone, and was removed.")
+            }
             guard write(obj) else { return Harness.Result(ok: false, message: "\(shownPath) could not be written.") }
             return Harness.Result(ok: true, message: "Disconnected: \(shownPath) no longer has a \(serverName) entry.")
         }

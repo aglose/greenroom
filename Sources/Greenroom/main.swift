@@ -13,6 +13,8 @@ if arguments.contains("--mcp") { AgentShim.run() }
 if let i = arguments.firstIndex(of: "--link-apk") { AgentShim.linkAPK(args: Array(arguments[(i + 1)...])) }
 // `Greenroom --connect-check DIR`: Connect Claude Code against a stand-in `claude` (ConnectCheck).
 if let i = arguments.firstIndex(of: "--connect-check"), i + 1 < arguments.count { ConnectCheck.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
+// `Greenroom --real-harness ID look|connect|disconnect`: one connector against the real harness, by hand (RealHarness).
+if let i = arguments.firstIndex(of: "--real-harness") { RealHarness.run(id: i + 1 < arguments.count ? arguments[i + 1] : "", action: i + 2 < arguments.count ? arguments[i + 2] : "") }
 // `Greenroom --t3-check DIR`: T3 Code's threads through a stand-in `t3` (T3Check).
 if let i = arguments.firstIndex(of: "--t3-check"), i + 1 < arguments.count { T3Check.run(dir: URL(fileURLWithPath: arguments[i + 1])) }
 // `Greenroom --t3-live REPO`: one read of your own T3 Code's threads for REPO, printed.
