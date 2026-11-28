@@ -140,6 +140,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private let emptyStage = EmptyStage(frame: .zero)
     /// What the stage shows with nothing running: waiting for an agent.
     private let waitingStage = WaitingStage(frame: .zero)
+    /// What the stage shows for a chosen session with no simulator.
+    private let sessionStage = SessionStage(frame: .zero)
+    /// Whether it is shown, and what it says (for a check).
+    var sessionStageShown: Bool { stageWanted[ObjectIdentifier(sessionStage)] ?? !sessionStage.isHidden }
+    var sessionStageTexts: [String] { sessionStage.texts }
     /// The Connect screen (first run, and File > Connect Agents…): on the stage only while `showingConnect`.
     private let connectStage = ConnectStage(frame: .zero)
     private var showingConnect = false
@@ -224,11 +229,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let content = NSViewController()
         let stack = StageBackground()
         let loopStrip = review.stripView
-        for v in [grid, waitingStage, connectStage, emptyStage, loopStrip, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        for v in [grid, waitingStage, sessionStage, connectStage, emptyStage, loopStrip, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
         // The loop strip sits over the devices of the chosen session, and the stage makes room for it.
         gridTop = grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8)
         review.onStrip = { [weak self] on in self?.gridTop.constant = Design.barHeight + 8 + (on ? 44 : 0) }
         emptyStage.isHidden = true
+        sessionStage.isHidden = true
         connectStage.isHidden = true
         connectStage.flow.onDone = { [weak self] in self?.leaveConnectScreen() }
         connectStage.flow.onRunAPK = { [weak self] in self?.runAPK(nil) }
@@ -263,6 +269,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             emptyStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
             emptyStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
             emptyStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            sessionStage.topAnchor.constraint(equalTo: grid.topAnchor),
+            sessionStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
+            sessionStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
+            sessionStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
             waitingStage.topAnchor.constraint(equalTo: grid.topAnchor),
             waitingStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
             waitingStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
@@ -504,7 +514,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
     }
 
-    private func reload() {
+    func reload() {
         let sims = Engine.shared.simulators
         if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
         refreshGrid()
@@ -533,6 +543,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         setStage(emptyStage, shown: showingAPK) { self.emptyStage.reload() }
         setStage(connectStage, shown: showingConnect && !showingAPK) { self.reloadConnectStage() }
         setStage(waitingStage, shown: sims.isEmpty && !showingAPK && !showingConnect) { self.reloadWaitingStage() }
+        let staged = sessions.stagedSession
+        if let staged { sessionStage.show(title: staged.title, line: sessions.stageLine(for: staged)) }
+        setStage(sessionStage, shown: staged != nil && !showingAPK && !showingConnect) {}
         if showingLog { logPanel.follow(selected) }
         if showingNetwork { networkPane.follow(selected) }
         if showingDevice { devicePane.follow(selected) }
@@ -637,7 +650,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             }
         }
         let selected = self.selected
-        let want = selected.flatMap { s in rows.firstIndex(where: {
+        let stagedPath = sessions.stagedSession?.worktree.path
+        let want = stagedPath.flatMap { p in rows.firstIndex(where: { if case .session(let x) = $0 { return x.worktree.path == p }; return false }) }
+            ?? selected.flatMap { s in rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }
             if case .main(let x) = $0 { return x.simulator === s }
             if case .pull(let x) = $0 { return x.simulator === s }
@@ -1254,7 +1269,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     func updateChrome() {
         guard appChip != nil else { return }
         let alive = Engine.shared.simulators.filter(\.isAlive).count
-        if let sim = selected {
+        if let staged = sessions.stagedSession {
+            let text = NSMutableAttributedString(string: "○ ", attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold), .foregroundColor: Design.mute])
+            text.append(NSAttributedString(string: staged.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.ink]))
+            appChip.title = staged.title
+            appChip.attributedTitle = text
+        } else if let sim = selected {
             let dot = sim.state == .running ? "● " : (sim.state == .starting ? "◌ " : "○ ")
             let text = NSMutableAttributedString(string: dot, attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold),
                                                                            .foregroundColor: sim.state == .running ? Design.accent : Design.mute])

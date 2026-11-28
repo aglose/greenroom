@@ -191,6 +191,15 @@ enum ReviewCheck {
             }
             let tripPath = trip.worktree.path, totalPath = total.worktree.path
 
+            // MARK: The stage, on a chosen session with no simulator
+
+            sessions.go(to: trip)
+            wb.reload()
+            await settle()
+            expect(wb.sessionStageShown && wb.sessionStageTexts.first == trip.title && review.session?.worktree.path == tripPath,
+                   "a session with no simulator has the stage and the panel to itself: \(wb.sessionStageTexts)")
+            expect(!(wb.sessionStageTexts.last ?? "").isEmpty, "... and the stage says why nothing runs: \(wb.sessionStageTexts.last ?? "-")")
+
             // MARK: The panel, on the chosen session
 
             wb.window.setContentSize(NSSize(width: 1380, height: 900))

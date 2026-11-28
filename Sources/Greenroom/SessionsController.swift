@@ -68,6 +68,20 @@ final class SessionsController {
 
     /// The session the person last went to, by its worktree's path (a row clicked, ⌘n, ⌘'): it may have no simulator.
     var focus: String?
+    /// The session the person went to that has no simulator: the stage is about it until a simulator is chosen.
+    private(set) var staged: String?
+    /// That session, while it still has no simulator.
+    var stagedSession: Session? {
+        guard let staged, let s = sessions.first(where: { $0.worktree.path == staged }), simulator(for: s) == nil else { return nil }
+        return s
+    }
+    /// Why nothing runs for it, for the stage.
+    func stageLine(for s: Session) -> String {
+        if buildQueue.isBuilding(s.worktree.path) { return "Building. Its simulator opens here when the build is ready." }
+        if apps(for: s.workspace).isEmpty { return "This repository has no Android app, so there is no simulator for it." }
+        if newestAPK(for: s) == nil { return "No build yet. Its simulator opens here when there is one." }
+        return "Its simulator is starting."
+    }
     /// CI runs of pushed sessions, watched without being asked (CIWatch.swift).
     private(set) lazy var ciWatch: CIWatch = {
         let w = CIWatch(sessions: self)
@@ -785,11 +799,18 @@ final class SessionsController {
 
     // MARK: Switching
 
+    /// The person is now at this session: the panel is about it, and so is the stage when it has no simulator.
+    func go(to session: Session) {
+        focus = session.worktree.path
+        staged = simulator(for: session) == nil ? session.worktree.path : nil
+    }
+
     /// Selects the session's simulator, or starts one from its newest build. Returns whether anything happened.
     @discardableResult
     func activate(_ session: Session) -> Bool {
         guard let wb = workbench else { return false }
-        focus = session.worktree.path
+        go(to: session)
+        defer { if staged != nil { wb.reload() } }
         show(session)
         if let sim = simulator(for: session) {
             wb.select(sim)
@@ -911,6 +932,7 @@ final class SessionsController {
 
     /// Called by the workbench whenever a simulator is selected, however it came to be.
     func selected(_ sim: Simulator?) {
+        if sim != nil { staged = nil }
         guard let sim, let s = session(forSimulator: sim) else { return }
         focus = s.worktree.path
         noteUsed(s.worktree.path)
