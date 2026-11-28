@@ -257,6 +257,7 @@ enum Bases {
             onLine?(line)
             JobQueue.shared.update(ticket, detail: line)
         }
+        run.onProgress = { JobQueue.shared.update(ticket, progress: .some($0)) }
         track(run, true)
         let outcome: RecipeOutcome = await withCheckedContinuation { c in run.start { c.resume(returning: $0) } }
         track(run, false)

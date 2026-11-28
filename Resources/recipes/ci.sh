@@ -16,6 +16,9 @@
 # started, 10), GREENROOM_CI_APPEAR_SECONDS (how long a started workflow may take to show a run, 180),
 # GREENROOM_CI_POLL (seconds between looks, 5).
 #
+# How far it has got is said in lines of the form "greenroom: progress DONE/TOTAL UNIT", which Greenroom draws as the
+# job's bar and keeps out of the log: the steps of a run that is waited for, the bytes of an artifact as it arrives.
+#
 # Only pushed commits have a run: the script says so for one that is not. Uncommitted changes are never in it.
 # Copy this file, change it, and choose it with "Custom..." for another CI.
 set -eu
@@ -76,6 +79,43 @@ list_runs() {
   if [ -n "$mine" ]; then printf '%s\n' "$mine"; else printf '%s\n' "$lines"; fi
 }
 
+# How far a run that is waited for has got: the steps of its jobs that are over, of those GitHub has listed so far (a
+# job that has not begun lists none yet, so the total is "about"), and the step it is on when that changed. Says
+# nothing when GitHub does not answer: the run is waited for all the same.
+on_step=""
+run_steps() {
+  local said counts now
+  said="$(gh api "$api_repo/actions/runs/$1/jobs?per_page=100" --jq '[.jobs[] | .name as $j | (.steps // [])[] | {j: $j, n: .name, s: .status}] | [(map(select(.s == "completed")) | length), length, (map(select(.s == "in_progress")) | first | if . then "\(.j): \(.n)" else "" end)] | @tsv' 2>/dev/null)" || return 0
+  counts="$(printf '%s\n' "$said" | awk -F'\t' '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $2 > 0 { print $1 "/~" $2; exit }')"
+  [ -n "$counts" ] || return 0
+  now="$(printf '%s\n' "$said" | awk -F'\t' 'NR == 1 { print $3 }')"
+  if [ -n "$now" ] && [ "$now" != "$on_step" ]; then on_step="$now"; echo "CI run $1: $now"; fi
+  echo "greenroom: progress $counts steps"
+}
+
+# Downloads one artifact (its id, its size in bytes, the folder to unpack it in), saying how many bytes have arrived
+# as they do. Not zero when it could not: the artifact is then fetched with gh run download, which is silent.
+fetch_artifact() {
+  local aid="$1" size="$2" dir="$3" zip="$tmp/artifact-$1.zip" pid got
+  command -v unzip >/dev/null 2>&1 || return 1
+  gh api "$api_repo/actions/artifacts/$aid/zip" > "$zip" 2>"$tmp/err" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    got="$(wc -c < "$zip" 2>/dev/null | tr -d ' ')"
+    # More than GitHub said there would be: the total was wrong, and only the count is said.
+    if [ "${got:-0}" -le "$size" ]; then echo "greenroom: progress ${got:-0}/$size bytes"; else echo "greenroom: progress $got/? bytes"; fi
+    sleep 1
+  done
+  if wait "$pid" && unzip -q -o "$zip" -d "$dir" 2>"$tmp/err"; then
+    rm -f "$zip"
+    echo "greenroom: progress -"
+    return 0
+  fi
+  rm -rf "$zip" "$dir"; mkdir -p "$dir"
+  echo "greenroom: progress -"
+  return 1
+}
+
 started=$SECONDS
 dispatched=0
 runs=""
@@ -116,7 +156,16 @@ while :; do
     sleep "$poll"
   else
     echo "waiting for CI run $aid"
-    if ! gh run watch ${R[@]+"${R[@]}"} "$aid" --exit-status >/dev/null 2>"$tmp/err"; then
+    gh run watch ${R[@]+"${R[@]}"} "$aid" --exit-status >/dev/null 2>"$tmp/err" &
+    watch=$!
+    asked=$SECONDS
+    run_steps "$aid"
+    while kill -0 "$watch" 2>/dev/null; do
+      if [ $((SECONDS - asked)) -ge 10 ]; then asked=$SECONDS; run_steps "$aid"; fi
+      sleep 1
+    done
+    echo "greenroom: progress -"
+    if ! wait "$watch"; then
       # A run that failed makes watch exit non-zero too: only a run still not finished means watch itself failed.
       werr="$(tail -n 1 "$tmp/err")"
       now="$(list_runs | awk -F'\t' -v id="$aid" '$1 == id { print $2 }')"
@@ -137,23 +186,32 @@ failed_run() { fail "CI run $1 of $short did not succeed: $(run_url "$1")"; }
 
 # Look in each successful run (newest first) for the APK.
 for id in $good; do
-  listing="$(gh api --paginate "$api_repo/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | [.name, (.expired | tostring)] | @tsv' 2>"$tmp/err")" \
+  listing="$(gh api --paginate "$api_repo/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | [.name, (.expired | tostring), (.id | tostring), (.size_in_bytes | tostring)] | @tsv' 2>"$tmp/err")" \
     || fail "gh could not list the artifacts of CI run $id: $(tail -n 1 "$tmp/err")"
-  names="$(printf '%s\n' "$listing" | awk -F'\t' '$2 != "true" { print $1 }')"
+  # "name<TAB>id<TAB>bytes" lines: what has not expired.
+  names="$(printf '%s\n' "$listing" | awk -F'\t' '$2 != "true" { print $1 "\t" $3 "\t" $4 }')"
   expired="$(printf '%s\n' "$listing" | awk -F'\t' '$2 == "true" { print $1 }' | tr '\n' ' ')"
   if [ -n "$artifact" ] && printf '%s\n' "$listing" | awk -F'\t' -v a="$artifact" '$1 == a && $2 == "true" { f = 1 } END { exit !f }'; then
     fail "artifact $artifact of run $id expired: re-run the workflow so GitHub keeps a new one."
   fi
   found=""        # "artifact<TAB>file" lines
   seen=""
-  while IFS= read -r name; do
+  while IFS='	' read -r name aid size; do
     [ -n "$name" ] || continue
     seen="$seen $name"
     if [ -n "$artifact" ] && [ "$name" != "$artifact" ]; then continue; fi
     dir="$tmp/$id/$name"
     mkdir -p "$dir"
-    echo "+ gh run download $id -n $name"
-    gh run download ${R[@]+"${R[@]}"} "$id" -n "$name" -D "$dir" >/dev/null 2>"$tmp/err" || fail "gh could not download the artifact $name of CI run $id: $(tail -n 1 "$tmp/err")"
+    got=0
+    case "$aid/$size" in
+      *[!0-9/]*|/*|*/|*/0) ;;   # GitHub did not say which artifact or how big
+      *) echo "downloading the artifact $name of CI run $id"
+         if fetch_artifact "$aid" "$size" "$dir"; then got=1; fi ;;
+    esac
+    if [ "$got" = 0 ]; then
+      echo "+ gh run download $id -n $name"
+      gh run download ${R[@]+"${R[@]}"} "$id" -n "$name" -D "$dir" >/dev/null 2>"$tmp/err" || fail "gh could not download the artifact $name of CI run $id: $(tail -n 1 "$tmp/err")"
+    fi
     case "$pattern" in
       */*) files="$(find "$dir" -type f -path "*/$pattern" | sort)" ;;
       *)   files="$(find "$dir" -type f -name "$pattern" | sort)" ;;

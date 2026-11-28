@@ -45,8 +45,10 @@ final class QueueJob {
     fileprivate(set) var waiting: String?
     /// Its last line of progress.
     fileprivate(set) var detail = ""
-    /// How far it has got, when it can say.
-    fileprivate(set) var fraction: Double?
+    /// How far it has got, in what it works on (bytes, tasks, screens), when it can say.
+    fileprivate(set) var progress: JobProgress?
+    /// Where a download was when its speed was last measured.
+    fileprivate var sample: (at: Date, done: Double)?
     let created = Date()
     fileprivate(set) var started: Date?
     fileprivate(set) var ended: Date?
@@ -89,6 +91,12 @@ final class QueueJob {
         case .cancelled: return "cancelled"
         }
     }
+
+    /// The share of its work that is done, when its progress has a total.
+    var fraction: Double? { progress?.fraction }
+
+    /// "23.1 of 48.0 MB · 3.2 MB/s", "214 of about 530 tasks": its progress in words, while it is under way.
+    var measure: String? { state == .running || state == .paused ? progress?.words : nil }
 
     /// How long it has run (or ran).
     var elapsed: TimeInterval? { started.map { (ended ?? Date()).timeIntervalSince($0) } }
@@ -155,14 +163,32 @@ final class JobQueue {
         pump()
     }
 
-    /// The job's progress: its last line, and how far it has got when it can say.
-    func update(_ job: QueueJob, detail: String? = nil, fraction: Double?? = nil) {
+    /// The job's progress: its last line, and how far it has got when it can say (`.some(nil)`: it no longer can).
+    /// A download's speed is measured here, from one update to the next (`at`: when this one was taken).
+    func update(_ job: QueueJob, detail: String? = nil, progress: JobProgress?? = nil, at now: Date = Date()) {
         var moved = false
         if let detail {
             let line = detail.trimmingCharacters(in: .whitespacesAndNewlines)
             if !line.isEmpty, line != job.detail { job.detail = line; moved = true }
         }
-        if let fraction, fraction != job.fraction { job.fraction = fraction; moved = true }
+        if var next = progress {
+            if let p = next, p.unit == .bytes {
+                var rate = job.progress?.unit == .bytes ? job.progress?.rate : nil
+                if let s = job.sample, job.progress?.unit == .bytes, p.done >= s.done {
+                    let dt = now.timeIntervalSince(s.at)
+                    if dt >= 1 {
+                        let r = (p.done - s.done) / dt
+                        rate = rate.map { ($0 + r) / 2 } ?? r   // evened out: one slow second is not the speed
+                        job.sample = (now, p.done)
+                    }
+                } else {
+                    job.sample = (now, p.done)   // a new download, or one that started again
+                    rate = nil
+                }
+                next?.rate = rate
+            } else { job.sample = nil }
+            if next != job.progress { job.progress = next; moved = true }
+        }
         if moved { notify() }
     }
 
@@ -177,7 +203,8 @@ final class JobQueue {
         if let detail { job.detail = detail }
         job.held = false
         job.waiting = nil
-        job.fraction = nil
+        job.progress = nil
+        job.sample = nil
         job.ended = Date()
         trim()
         pump()
@@ -212,7 +239,8 @@ final class JobQueue {
         guard job.isActive, jobs.contains(where: { $0 === job }) else { return }
         job.state = .queued
         job.held = held
-        job.fraction = nil
+        job.progress = nil
+        job.sample = nil
         job.started = nil
         if let detail { job.detail = detail }
         pump()
