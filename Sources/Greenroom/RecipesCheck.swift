@@ -130,12 +130,18 @@ enum RecipesCheck {
                 path=""; for x in "$@"; do case "$x" in repos/*) path="$x" ;; esac; done
                 case "$path" in
                   */git/ref/heads/*) [ -f "$S/refsha" ] && { cat "$S/refsha"; exit 0; }; exit 1 ;;
+                  */actions/artifacts/*/zip) [ -f "$S/artifact.zip" ] || exit 1; sleep 1.5; cat "$S/artifact.zip"; exit 0 ;;
+                  */runs/*/jobs*) [ -f "$S/steps.tsv" ] && cat "$S/steps.tsv"; exit 0 ;;
                   */artifacts*)
                     id="$(printf '%s' "$path" | sed -E 's|.*/runs/([0-9]+)/artifacts.*|\1|')"
                     [ -f "$S/artifacts-$id.txt" ] || exit 0
                     while IFS= read -r n; do
                       e=false; [ -f "$S/expired.txt" ] && grep -qx "$n" "$S/expired.txt" && e=true
-                      printf '%s\t%s\n' "$n" "$e"
+                      printf '%s\t%s' "$n" "$e"
+                      # With artifact.zip there, GitHub also says which artifact it is and how big: the recipe then
+                      # fetches the zip itself and counts its bytes. Without, it falls back to gh run download.
+                      [ -f "$S/artifact.zip" ] && printf '\t7001\t%s' "$(wc -c < "$S/artifact.zip" | tr -d ' ')"
+                      printf '\n'
                     done < "$S/artifacts-$id.txt"; exit 0 ;;
                 esac ;;
               workflow) echo 2 > "$S/dispatched" ;;
@@ -306,6 +312,31 @@ enum RecipesCheck {
             let j2 = await build(row("b"), "ci")
             expect(builtKey(j2) == ciKey && ghCalls().contains { $0.hasPrefix("gh run watch -R example/app 102") } && (j2?.lines.contains { $0.contains("waiting for CI run 102") } ?? false),
                    "an in-progress run: gh run watch, then its artifact (\(failure(j2)))")
+
+            // ===== 3b. How far it has got: the run's steps while it is waited for, the artifact's bytes ==========
+            ghReset(runs: ["110\tin_progress\t\tCI"], artifacts: ["110": ["app-debug"]])
+            write(ghState.appendingPathComponent("steps.tsv"), "7\t19\tbuild: Unit tests\n")
+            let zipped = base.appendingPathComponent("zipped", isDirectory: true)
+            try? fm.createDirectory(at: zipped, withIntermediateDirectories: true)
+            try? fm.copyItem(at: ciApk, to: zipped.appendingPathComponent("app-debug.apk"))
+            let zip = Process()
+            zip.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+            zip.arguments = ["-q", "-j", ghState.appendingPathComponent("artifact.zip").path, zipped.appendingPathComponent("app-debug.apk").path]
+            try? zip.run(); zip.waitUntilExit()
+            final class Measures { var seen = Set<String>() }
+            let measures = Measures()
+            let watching = NotificationCenter.default.addObserver(forName: JobQueue.changed, object: nil, queue: .main) { _ in
+                for j in JobQueue.shared.running { if let m = j.measure { measures.seen.insert(m) } }
+            }
+            let jp = await build(row("b"), "ci")
+            NotificationCenter.default.removeObserver(watching)
+            let measured = measures.seen.sorted().joined(separator: "; ")
+            expect(builtKey(jp) == ciKey && measures.seen.contains("7 of about 19 steps") && (jp?.lines.contains("CI run 110: build: Unit tests") ?? false),
+                   "a run that is waited for says its steps, and which one it is on (\(failure(jp)); said: \(measured))")
+            expect(measures.seen.contains { $0.contains(" of ") && ($0.contains(" MB") || $0.contains(" KB")) } && (jp?.lines.contains("downloading the artifact app-debug of CI run 110") ?? false)
+                   && ghCalls().contains { $0.contains("actions/artifacts/7001/zip") } && !ghCalls().contains { $0.hasPrefix("gh run download") },
+                   "an artifact GitHub gave the size of is fetched with its bytes counted (said: \(measured))")
+            expect(!(jp?.lines.contains { $0.contains(RecipeProgressReader.directive) } ?? true), "the lines that say how far it is stay out of the log")
 
             // ===== 4. no run + a workflow: dispatched, the run waited for ========================================
             ghReset(artifacts: ["9001": ["app-debug"]])

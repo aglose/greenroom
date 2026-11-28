@@ -303,6 +303,18 @@ final class RecipeRun {
     let job: RecipeJob
     /// Called on the main thread for each line of the log, in order.
     var onLine: ((String) -> Void)?
+    /// Called on the main thread when how far the recipe has got changed (`RecipeProgressReader`): nil when it can
+    /// no longer say.
+    var onProgress: ((JobProgress?) -> Void)?
+    /// How many Gradle tasks the last build like this one ran, when that is known. Set before `start`.
+    var expectedTasks: Int? {
+        get { lock.lock(); defer { lock.unlock() }; return reader.expectedTasks }
+        set { lock.lock(); reader = RecipeProgressReader(expectedTasks: newValue); lock.unlock() }
+    }
+    /// How many Gradle tasks this run has named so far.
+    var tasksRun: Int { lock.lock(); defer { lock.unlock() }; return reader.tasks }
+    /// Reads the lines for progress (under `lock`).
+    private var reader = RecipeProgressReader()
     /// The whole run may not take longer than this (a setting, "buildTimeoutMinutes", 30 by default).
     var timeout: TimeInterval = {
         let m = UserDefaults.standard.object(forKey: "buildTimeoutMinutes") as? Double ?? 30
@@ -371,11 +383,23 @@ final class RecipeRun {
     private func add(_ raw: [String]) {
         guard !raw.isEmpty else { return }
         lock.lock()
-        let new = secrets.isEmpty ? raw : raw.map { Variables.mask($0, secrets) }   // a secret never reaches the log
+        // A line that says how far the recipe has got ("greenroom: progress ...") is for the job's bar, not the log.
+        var moved = false
+        let kept = raw.filter { line in
+            let r = reader.read(line)
+            if r.changed { moved = true }
+            return !r.hidden
+        }
+        let progress = reader.progress
+        let new = secrets.isEmpty ? kept : kept.map { Variables.mask($0, secrets) }   // a secret never reaches the log
         _lines.append(contentsOf: new)
         if _lines.count > Self.keep { dropped += _lines.count - Self.keep; _lines.removeFirst(_lines.count - Self.keep) }
         lock.unlock()
-        DispatchQueue.main.async { [onLine] in for l in new { onLine?(l) } }
+        guard !new.isEmpty || moved else { return }
+        DispatchQueue.main.async { [onLine, onProgress] in
+            for l in new { onLine?(l) }
+            if moved { onProgress?(progress) }
+        }
     }
 
     private func run() -> RecipeOutcome {

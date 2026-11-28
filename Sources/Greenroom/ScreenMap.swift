@@ -907,13 +907,14 @@ final class ScreenMap: NSView {
             short = "Walking: \(screens)  ·  \(t)"
         }
         setSummary(detail)
-        report(WalkProgress(text: short, fraction: fraction, detail: detail))
+        let counted = fraction != nil ? JobProgress(Double(min(explored, reached.known)), of: Double(reached.known), .screens) : nil
+        report(WalkProgress(text: short, fraction: fraction, detail: detail, counted: counted))
     }
 
     private func report(_ p: WalkProgress?) {
         guard p != progress else { return }
         progress = p
-        if let p, let t = ticket { JobQueue.shared.update(t, detail: p.text, fraction: .some(p.fraction)) }
+        if let p, let t = ticket { JobQueue.shared.update(t, detail: p.text, progress: .some(p.counted)) }
         onProgress?(p)
     }
 

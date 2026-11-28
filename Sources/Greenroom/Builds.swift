@@ -35,6 +35,8 @@ final class BuildJob {
     fileprivate var logFile: URL
     /// The workspace's recipe settings, as the recipe's environment (RecipeSettings.swift).
     fileprivate var extra: [String: String]
+    /// The name its task count is remembered under (`BuildTaskCounts`), once it has started.
+    fileprivate var taskCounts: String?
     /// A sandbox the remote recipe made from a template (it says so in a line of its log).
     fileprivate(set) var createdSandbox: String?
     /// Pull request metadata associated with this session at launch time, if any.
@@ -183,6 +185,10 @@ final class Builds {
             let rj = RecipeJob(worktree: wt, repo: job.workspace, ref: ref, sha: sha, dirty: dirty, module: job.module, variant: job.variant, out: job.out,
                                prNumber: job.prNumber, prTitle: job.prTitle, prURL: job.prURL, prState: job.prState, extra: extra)
             let run = RecipeRun(recipe: job.recipe, job: rj)
+            // How many tasks the last build like this one ran: what this one's count is held against.
+            let counts = BuildTaskCounts.name(workspace: job.workspace.path, recipe: job.recipeName, module: job.module, variant: job.variant)
+            run.expectedTasks = BuildTaskCounts.expected(counts)
+            job.taskCounts = counts
             job.run = run
             if job.cancelRequested || job.pauseRequested {
                 self.finish(job, outcome: .cancelled, store: store, sha: sha, ref: ref, dirty: dirty)
@@ -194,6 +200,9 @@ final class Builds {
                 if let t = job.ticket, !job.pauseRequested { JobQueue.shared.update(t, detail: line) }
                 if line.hasPrefix("greenroom: sandbox-created ") { job.createdSandbox = String(line.dropFirst(27)).trimmingCharacters(in: .whitespaces) }
                 self.onLine?(job, line)
+            }
+            run.onProgress = { [weak job] progress in
+                if let job, let t = job.ticket, !job.pauseRequested { JobQueue.shared.update(t, progress: .some(progress)) }
             }
             run.start { [weak self] outcome in
                 self?.finish(job, outcome: outcome, store: store, sha: sha, ref: ref, dirty: dirty)
@@ -244,6 +253,9 @@ final class Builds {
         case .built:
             let out = job.out, source = job.source
             let prNumber = job.run?.resolvedPRNumber ?? job.prNumber
+            if let name = job.taskCounts, let run = job.run { BuildTaskCounts.note(run.tasksRun, for: name) }
+            // The recipe is over; what is left (the APK is hashed and filed) has no measure.
+            if let t = job.ticket { JobQueue.shared.update(t, detail: "filing the APK", progress: .some(nil)) }
             job.handingOff = true
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 // Hashing and cloning a big APK is off the main thread.

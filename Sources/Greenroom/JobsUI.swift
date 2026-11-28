@@ -8,6 +8,10 @@ final class JobsChip: NSView {
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let dot = CALayer()
+    private let track = CALayer()
+    private let fill = CALayer()
+    /// The share done of what runs, when every running job can say its own.
+    private var fraction: Double?
     private var observer: NSObjectProtocol?
     /// Jobs that failed after this have not been looked at: the chip says so until the list is opened.
     private var seen = Date()
@@ -18,6 +22,7 @@ final class JobsChip: NSView {
         layer?.backgroundColor = Design.well.cgColor
         layer?.cornerRadius = 8
         layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
         translatesAutoresizingMaskIntoConstraints = false
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -37,6 +42,10 @@ final class JobsChip: NSView {
         dot.backgroundColor = Design.record.cgColor
         dot.cornerRadius = 3
         dot.isHidden = true
+        track.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
+        fill.backgroundColor = Design.accent.cgColor
+        layer?.addSublayer(track)
+        layer?.addSublayer(fill)
         layer?.addSublayer(dot)
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -70,19 +79,28 @@ final class JobsChip: NSView {
         return parts.joined(separator: " · ")
     }
 
+    /// The share done of the jobs that run, each counting the same: nil when one of them cannot say how far it is
+    /// (the chip's spinner is all there is to show then), or when nothing runs.
+    static func fraction(of running: [QueueJob]) -> Double? {
+        let shares = running.compactMap(\.fraction)
+        guard !shares.isEmpty, shares.count == running.count else { return nil }
+        return shares.reduce(0, +) / Double(shares.count)
+    }
+
     func refresh() {
         let q = JobQueue.shared
         let running = q.running, waiting = q.waiting
         isHidden = q.jobs.isEmpty
+        fraction = Self.fraction(of: running)
         if running.isEmpty { spinner.stopAnimation(nil) } else { spinner.startAnimation(nil) }
         icon.isHidden = !running.isEmpty
         label.stringValue = Self.words(running: running, waiting: waiting)
         let failed = q.recent.filter { $0.failure != nil && ($0.ended ?? .distantPast) > seen }.count
         dot.isHidden = failed == 0
-        var tip = (running + waiting).prefix(8).map { "\($0.title): \($0.statusLine)" }
+        var tip = (running + waiting).prefix(8).map { "\($0.title): " + ([$0.measure, $0.statusLine].compactMap { $0 }).joined(separator: " · ") }
         if failed > 0 { tip.append("\(failed) job\(failed == 1 ? "" : "s") failed") }
         toolTip = (tip.isEmpty ? "Nothing is running." : tip.joined(separator: "\n")) + "\nClick for the job queue."
-        setAccessibilityLabel("Job queue: " + label.stringValue)
+        setAccessibilityLabel("Job queue: " + label.stringValue + (fraction.map { ", \(Int($0 * 100)) percent done" } ?? ""))
         needsLayout = true
     }
 
@@ -90,6 +108,11 @@ final class JobsChip: NSView {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         dot.frame = CGRect(x: bounds.width - 9, y: bounds.height - 9, width: 6, height: 6)
+        let h: CGFloat = 2
+        track.isHidden = fraction == nil
+        fill.isHidden = track.isHidden
+        track.frame = CGRect(x: 0, y: 0, width: bounds.width, height: h)
+        fill.frame = CGRect(x: 0, y: 0, width: bounds.width * min(1, max(0, fraction ?? 0)), height: h)
         CATransaction.commit()
     }
 
@@ -108,30 +131,79 @@ final class JobsChip: NSView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
-/// How far a job has got: a thin track and its filled share, in the colours of the top bar's walk chip.
+/// How far a job has got: a thin track and its filled share, in the colours of the top bar's walk chip. A job that
+/// cannot say how far it is still has its bar, with a piece that travels along it: the work goes on, uncounted.
 private final class JobBar: NSView {
+    enum Show: Equatable {
+        /// The share done, 0 to 1.
+        case share(Double)
+        /// At work, with nothing to count.
+        case moving
+    }
+
     private let fill = CALayer()
-    var fraction: Double = 0 { didSet { needsLayout = true } }
+    var show: Show = .moving { didSet { if show != oldValue { needsLayout = true } } }
+    /// A paused job's bar stays where it was, in the colour of what is held.
+    var paused = false { didSet { if paused != oldValue { needsLayout = true } } }
+    /// The share of the track the travelling piece takes.
+    private static let piece: CGFloat = 0.28
+    private static let travel = "travel"
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
-        layer?.cornerRadius = 1.5
+        layer?.cornerRadius = 2
         layer?.masksToBounds = true
-        fill.backgroundColor = Design.accent.cgColor
+        fill.cornerRadius = 2
         layer?.addSublayer(fill)
         translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 3).isActive = true
+        heightAnchor.constraint(equalToConstant: 4).isActive = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true   // a layer taken out of its window loses what moved it
+    }
 
     override func layout() {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        fill.frame = CGRect(x: 0, y: 0, width: bounds.width * min(1, max(0, fraction)), height: bounds.height)
+        fill.backgroundColor = (paused ? Design.warning.withAlphaComponent(0.7) : Design.accent).cgColor
+        switch show {
+        case .share(let f):
+            fill.removeAnimation(forKey: Self.travel)
+            fill.opacity = 1
+            fill.frame = CGRect(x: 0, y: 0, width: bounds.width * min(1, max(0, f)), height: bounds.height)
+        case .moving:
+            let w = max(24, bounds.width * Self.piece)
+            if paused || Design.reduceMotion {
+                // Nothing travels: the whole track is lit, faintly.
+                fill.removeAnimation(forKey: Self.travel)
+                fill.opacity = 0.35
+                fill.frame = bounds
+            } else {
+                fill.opacity = 1
+                fill.frame = CGRect(x: bounds.width * 0.2, y: 0, width: w, height: bounds.height)
+                if window != nil, bounds.width > 0, fill.animation(forKey: Self.travel) == nil || travelled != bounds.width {
+                    travelled = bounds.width
+                    let a = CABasicAnimation(keyPath: "position.x")
+                    a.fromValue = -w / 2
+                    a.toValue = bounds.width + w / 2
+                    a.duration = 1.5
+                    a.repeatCount = .infinity
+                    a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    fill.add(a, forKey: Self.travel)
+                }
+            }
+        }
         CATransaction.commit()
     }
+    /// The width the travelling piece was last sent across.
+    private var travelled: CGFloat = 0
 }
 
 /// One job in the list: what it is, how it goes, and the buttons that act on it.
@@ -140,6 +212,8 @@ private final class JobRow: NSView {
     private let title = NSTextField(labelWithString: "")
     private let status = NSTextField(labelWithString: "")
     private let time = NSTextField(labelWithString: "")
+    /// How far it has got, in words: "23.1 of 48.0 MB · 3.2 MB/s".
+    private let measure = NSTextField(labelWithString: "")
     private let bar = JobBar()
     var onReveal: (() -> Void)?
 
@@ -183,18 +257,28 @@ private final class JobRow: NSView {
         status.font = .systemFont(ofSize: 10.5)
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.init(250), for: .horizontal)
+        status.setContentHuggingPriority(.init(1), for: .horizontal)
+        measure.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
+        measure.textColor = Design.ink.withAlphaComponent(0.85)
+        measure.alignment = .right
+        measure.setContentHuggingPriority(.required, for: .horizontal)
+        measure.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let line = NSStackView(views: [status, measure])
+        line.spacing = 10
+        line.alignment = .firstBaseline
 
-        let column = NSStackView(views: [top, status, bar])
+        let column = NSStackView(views: [top, line, bar])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 3
+        column.setCustomSpacing(5, after: line)
         column.translatesAutoresizingMaskIntoConstraints = false
         addSubview(column)
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: topAnchor, constant: 7), column.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
             column.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10), column.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             top.widthAnchor.constraint(equalTo: column.widthAnchor),
-            status.widthAnchor.constraint(equalTo: column.widthAnchor),
+            line.widthAnchor.constraint(equalTo: column.widthAnchor),
             bar.widthAnchor.constraint(equalTo: column.widthAnchor),
         ])
         if reveal != nil { title.toolTip = "Click to show it" }
@@ -216,9 +300,21 @@ private final class JobRow: NSView {
         case .queued: time.stringValue = ""
         default: time.stringValue = job.elapsed.map(Self.clock) ?? ""
         }
-        let fraction = job.state == .running || job.state == .paused ? job.fraction : nil
-        bar.isHidden = fraction == nil
-        bar.fraction = fraction ?? 0
+        // A job under way always has its bar: filled to its share, or moving when it has nothing to count yet.
+        let underWay = job.state == .running || job.state == .paused
+        let words = job.measure ?? ""
+        measure.stringValue = words
+        measure.isHidden = words.isEmpty
+        bar.isHidden = !underWay
+        guard underWay else { return }
+        bar.paused = job.state == .paused
+        bar.show = job.fraction.map { .share($0) } ?? .moving
+        let said = job.fraction.map { "\(Int($0 * 100))% done" + (words.isEmpty || words.hasSuffix("%") ? "" : ": " + words) }
+            ?? (words.isEmpty ? "Working: this step has nothing to count" : words + ", with no end known yet")
+        bar.toolTip = said
+        measure.toolTip = said
+        bar.setAccessibilityLabel(job.title)
+        bar.setAccessibilityValue(said)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -246,6 +342,8 @@ final class JobsPopover: NSViewController, NSPopoverDelegate {
     private var ticker: Timer?
     private var heightConstraint: NSLayoutConstraint?
     static let width: CGFloat = 430
+    /// The list scrolls past this height. A check that draws the whole list raises it.
+    static var tallest: CGFloat = 420
 
     static var isShown: Bool { popover?.isShown == true }
 
@@ -406,7 +504,7 @@ final class JobsPopover: NSViewController, NSPopoverDelegate {
             stack.addArrangedSubview(empty)
         }
         stack.layoutSubtreeIfNeeded()
-        heightConstraint?.constant = min(420, max(44, stack.fittingSize.height))
+        heightConstraint?.constant = min(Self.tallest, max(44, stack.fittingSize.height))
     }
 
     private func button(_ symbol: String, _ tip: String, _ action: @escaping () -> Void) -> NSView {
