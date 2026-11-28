@@ -388,15 +388,22 @@ def command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait):
         return next((p for p in line.split(" | ") if p.split(":")[0] in ("ready for review", "needs you", "working")), "quiet")
     def files(want):
         return wait(lambda: filed() if filed() == want else None, 10) or filed()
+    # How many checks count depends on whether the session's build changed since an earlier part of this script
+    # checked its screen: the two above are on the build it has now, one of them failed.
+    def ready(line):
+        m = re.fullmatch(r"ready for review: (\d+) of (\d+) passed · 1 failed", line)
+        return bool(m) and int(m.group(2)) == int(m.group(1)) + 1 and int(m.group(2)) >= 2
+    def files_ready():
+        return wait(lambda: filed() if ready(filed()) else None, 10) or filed()
     expect("a session whose turn ended on a current build with checks on it is ready for review, a failed check said",
-           files("ready for review: 1 of 2 passed · 1 failed") == "ready for review: 1 of 2 passed · 1 failed", filed() + "\n" + a.call("sessions")[0])
+           ready(files_ready()), filed() + "\n" + a.call("sessions")[0])
     codex("UserPromptSubmit")
     expect("... a new turn takes it back to working", files("working: Codex is working") == "working: Codex is working", filed())
     codex("PermissionRequest")
     expect("... a permission asked for is the person's to answer", files("needs you: Codex is waiting for you") == "needs you: Codex is waiting for you", filed())
     codex("PostToolUse")
     codex("Stop")
-    expect("... and its turn's end makes it ready again", files("ready for review: 1 of 2 passed · 1 failed") == "ready for review: 1 of 2 passed · 1 failed", filed())
+    expect("... and its turn's end makes it ready again", ready(files_ready()), filed())
     # Cursor reads a hook's answer, and writes the account's address on stdin: answered, and the address never kept.
     def cursor(event, **more):
         body = json.dumps({"conversation_id": "conv-7", "workspace_roots": [trees["a"]], "hook_event_name": event, "cursor_version": "9.9",
