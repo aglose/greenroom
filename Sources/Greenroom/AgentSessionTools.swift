@@ -102,7 +102,9 @@ extension AgentTools {
         lines.append("launch: skin \(ws.skin.isEmpty ? "none" : ws.skin), options \(ws.launchOptions.isEmpty ? "none" : ws.launchOptions) (launch_settings changes them)")
         let sim = mainSync { wb.sessions.simulator(for: s) }
         lines.append(sim.map { "simulator: \(id($0)) running" } ?? "simulator: none (launch starts it)")
-        if let c = s.claude, let title = c.title { lines.append("claude session: \(ScreenNode.quote(title)) (\(c.status.rawValue))") }
+        if let c = s.agent {
+            lines.append("agent session: \(c.harness ?? c.sourceName)\(c.title.map { " " + ScreenNode.quote($0) } ?? "") (\(c.status.rawValue))")
+        }
         let taking = mainSync { recording.recording(for: s.worktree.path) }
         if let r = taking, r.live { lines.append("recording: your session is being recorded for the person (\(r.file.lastPathComponent))") }
         return lines.joined(separator: "\n")

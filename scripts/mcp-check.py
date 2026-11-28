@@ -366,6 +366,51 @@ def command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait):
     expect("... a worktree's agent sees its own worktree's hooks", f"hook codex Stop | {a_name}" in own and "hook claude-code" not in own, own[-300:])
     hits = subprocess.run(["grep", "-rl", "HOOKSECRET", state_dir], capture_output=True, text=True).stdout.strip()
     expect("... and nothing of it is written to the state folder", hits == "", hits)
+    # One status model for every harness: what its hooks say is what the worktree's session says.
+    def said():
+        return next((l for l in a.call("session")[0].split("\n") if l.startswith("agent session: ")), "")
+    def becomes(want):
+        return wait(lambda: said() if said() == want else None, 10) or said()
+    def codex(event):
+        cli("hook", event, "--harness", "codex", "--session", "abc-1", "--cwd", trees["a"], cwd=other)
+    expect("a turn that ended leaves the worktree's session idle, under the harness's name", becomes("agent session: Codex (idle)") == "agent session: Codex (idle)", said())
+    codex("UserPromptSubmit")
+    expect("a prompt's hook shows it working", becomes("agent session: Codex (working)") == "agent session: Codex (working)", said())
+    codex("PermissionRequest")
+    expect("a permission request shows it waiting for the person", becomes("agent session: Codex (waiting)") == "agent session: Codex (waiting)", said())
+    codex("PostToolUse")
+    expect("the tool finishing shows it working again", becomes("agent session: Codex (working)") == "agent session: Codex (working)", said())
+    codex("Stop")
+    expect("the turn's end shows it idle", becomes("agent session: Codex (idle)") == "agent session: Codex (idle)", said())
+    # Cursor reads a hook's answer, and writes the account's address on stdin: answered, and the address never kept.
+    def cursor(event, **more):
+        body = json.dumps({"conversation_id": "conv-7", "workspace_roots": [trees["a"]], "hook_event_name": event, "cursor_version": "9.9",
+                           "user_email": "HOOKSECRET@example.com", "prompt": "HOOKSECRET"})
+        return cli("hook", event, "--harness", "cursor", stdin=body, cwd=other, **more)
+    code, out, err, took = cursor("beforeSubmitPrompt")
+    expect("Cursor's prompt hook is answered with continue, and nothing else", code == 0 and out == '{"continue":true}' and err == "" and took < 5, f"{code} {out!r} {err!r}")
+    expect("... and its session is the worktree's, working", becomes("agent session: Cursor (working)") == "agent session: Cursor (working)", said())
+    code, out, err, _ = cursor("stop")
+    expect("Cursor's other hooks are answered with an empty object", code == 0 and out == "{}" and err == "", f"{code} {out!r} {err!r}")
+    expect("... and its turn ended", becomes("agent session: Cursor (idle)") == "agent session: Cursor (idle)", said())
+    code, out, err, _ = cursor("beforeSubmitPrompt", state=nobody)
+    code2, out2, err2, _ = cursor("stop", state=nobody)
+    expect("with no app running Cursor is answered the same, and no app is started",
+           (code, out, err, code2, out2, err2) == (0, '{"continue":true}', "", 0, "{}", "") and not os.path.exists(nobody + "/agent.json"), f"{code} {out!r} {err!r} {code2} {out2!r} {err2!r}")
+    # Cursor also runs the hooks in Claude Code's settings: heard as Cursor's session, answered as Claude Code is.
+    body = json.dumps({"conversation_id": "conv-7", "workspace_roots": [trees["a"]], "cursor_version": "9.9", "user_email": "HOOKSECRET@example.com"})
+    code, out, err, _ = cli("hook", "UserPromptSubmit", "--harness", "claude", stdin=body, cwd=other)
+    expect("Claude Code's hook run by Cursor prints nothing, and is Cursor's session", code == 0 and out == "" and err == ""
+           and becomes("agent session: Cursor (working)") == "agent session: Cursor (working)", f"{code} {out!r} {err!r} {said()}")
+    act = a.call("agent_activity", all=True)[0]
+    hits = subprocess.run(["grep", "-rl", "HOOKSECRET", state_dir], capture_output=True, text=True).stdout.strip()
+    expect("the account Cursor names is never kept: not in the activity, the log or the state folder",
+           "HOOKSECRET" not in act and "HOOKSECRET" not in open(root + "/app.log", errors="replace").read() and hits == "", act[-400:] + hits)
+    # A session that ended is gone, and so is the line.
+    cli("hook", "sessionEnd", "--harness", "cursor", "--session", "conv-7", "--cwd", trees["a"], cwd=other)
+    codex("SessionEnd")
+    cli("hook", "SessionEnd", "--harness", "claude-code", "--session", "sess-42", "--cwd", trees["b"], cwd=other)
+    expect("a session that ended is no longer shown", becomes("") == "", said())
     # open, and the links: they navigate, and that is all.
     def stage():
         t, _ = a.call("app")

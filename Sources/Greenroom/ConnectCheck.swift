@@ -389,6 +389,23 @@ enum ConnectCheck {
         expect(onMain { model.rows.first { $0.id == "codex" }?.skill } == .ours(asked: ["codex", "cursor"], current: true) && onMain { model.rows.first { $0.id == "claude" }?.skillPlace } == nil,
                "the rows say so", "\(onMain { model.rows.map { "\($0.id): \(String(describing: $0.skill))" } })")
         expect(onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" }.contains("~/.agents/skills/greenroom/SKILL.md"), "connecting says where the skill is", onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" })
+        // ... and its hooks. Claude Code's plugin here is one from before it had hooks, so its row offers them.
+        expect(Hooks.state(.codex) == .ours(current: true) && Hooks.state(.cursor) == .ours(current: true) && Hooks.state(.claude) == .none,
+               "connecting Codex and Cursor wrote each its hooks, and nothing in Claude Code's settings", "\(Hooks.state(.codex)) \(Hooks.state(.cursor)) \(Hooks.state(.claude))")
+        expect(onMain { model.rows.first { $0.id == "codex" }?.hooks } == .ours(current: true) && onMain { model.rows.first { $0.id == "cursor" }?.hooksPlace } == .cursor
+               && onMain { model.rows.first { $0.id == "claude" }?.hooks } == Hooks.State.none,
+               "the rows say so", "\(onMain { model.rows.map { "\($0.id): \(String(describing: $0.hooks))" } })")
+        expect(onMain { model.rows.first { $0.id == "codex" }?.message ?? "" }.contains("~/.codex/hooks.json") && onMain { model.rows.first { $0.id == "codex" }?.message ?? "" }.contains("/hooks"),
+               "connecting Codex says where its hooks are, and to trust them", onMain { model.rows.first { $0.id == "codex" }?.message ?? "" })
+        wait { model.addHooks("claude", then: $0) }
+        expect(Hooks.state(.claude) == .ours(current: true) && onMain { model.rows.first { $0.id == "claude" }?.hooks } == .ours(current: true), "Add the Hooks writes Claude Code's", "\(Hooks.state(.claude))")
+        wait { model.disconnect("cursor", then: $0) }
+        expect(Hooks.state(.cursor) == .none && !fm.fileExists(atPath: Hooks.Place.cursor.file.path) && onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" }.contains("hooks were removed"),
+               "disconnecting Cursor takes its hooks out", onMain { model.rows.first { $0.id == "cursor" }?.message ?? "" })
+        wait { model.connect("cursor", then: $0) }
+        expect(Hooks.state(.cursor) == .ours(current: true), "... and connecting it again puts them back")
+        try? fm.removeItem(at: Hooks.Place.claude.file)
+
 
         // The text: the plugin's, without what only the plugin has.
         let skillText = Skills.text() ?? ""
@@ -541,6 +558,10 @@ enum ConnectCheck {
         expect(Skills.state(shared) == .none, "the Debug copy writes no skill and adds no command")
         ClaudeConnect.repositoryOnlyOverride = false
         ConnectModel.lookups = false
+
+        // --- Hooks: each harness's file, and the status they give (docs/AGENT-FIRST-SPEC.md, A4) ---
+        HooksCheck.cases(base: base) { expect($0, $1, $2) }
+
         expect(ConnectModel.displayName(client: "claude-code") == "Claude Code" && ConnectModel.displayName(client: "codex-mcp-client") == "Codex" && ConnectModel.displayName(client: "my-agent") == "my-agent",
                "an MCP client's name reads as the harness the person knows")
 

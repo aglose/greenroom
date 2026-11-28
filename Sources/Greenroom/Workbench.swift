@@ -501,7 +501,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
 
     /// Asks for the rows to be worked out again, once, at the end of this turn of the run loop: a build line, a
-    /// walk's progress and a Claude session's write arriving together make one redraw, not three.
+    /// walk's progress and an agent session's write arriving together make one redraw, not three.
     private func setNeedsSidebar() {
         guard !sidebarPending else { return }
         sidebarPending = true
@@ -1949,7 +1949,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Open in Claude", action: #selector(openInClaudeClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Open the Agent's App", action: #selector(openAgentClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove from Sidebar", action: #selector(removeSessionClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
         menu.delegate = self
@@ -2181,8 +2181,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         menu.items.filter { $0.tag == 77 }.forEach { menu.removeItem($0) }
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
-        if let open = menu.items.first(where: { $0.action == #selector(openInClaudeClicked) }) {
-            if case .session(let s) = rows[row], (s.displayAgent ?? s.claude)?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
+        if let open = menu.items.first(where: { $0.action == #selector(openAgentClicked) }) {
+            if case .session(let s) = rows[row], let agent = s.displayAgent ?? s.agent { open.title = "Open in \(agent.appName)" } else { open.title = "Open the Agent's App" }
         }
         // Main's row, headers and the empty placeholder are not worktrees: hide session-only actions on them.
         var isMain = false
@@ -2190,7 +2190,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if case .main = rows[row] { isMain = true }
         if case .sessionsHeader = rows[row] { isWorkspaceOnly = true }
         if case .addSession = rows[row] { isWorkspaceOnly = true }
-        for item in menu.items where [#selector(openInClaudeClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain || isWorkspaceOnly }
+        for item in menu.items where [#selector(openAgentClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain || isWorkspaceOnly }
         for item in menu.items where item.action == #selector(closeClicked) { item.isHidden = isWorkspaceOnly }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
@@ -2209,20 +2209,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if case .pull(let pull) = rows[row] { sessions.closePullSimulator(pull) }
     }
 
-    @objc private func openInClaudeClicked() {
+    @objc private func openAgentClicked() {
         let row = table.clickedRow
         guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
-        let agent = session.displayAgent ?? session.claude
-        if agent?.source == .t3 {
-            T3Sessions.open(session.worktree) { [weak self] why in
-                if let why {
-                    if let link = agent?.link { NSWorkspace.shared.open(link) }
-                    else { self?.toast.show(why, problem: true) }
-                }
-            }
-            return
-        }
-        if !ClaudeSessions.openInClaude(agent) { toast.show("Claude is not installed on this Mac", problem: true) }
+        ClaudeSessions.open(session.displayAgent ?? session.agent, in: session.worktree) { [weak self] why in self?.toast.show(why, problem: true) }
     }
 
     /// The session row under the pointer when the sidebar's context menu opened.

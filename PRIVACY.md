@@ -82,7 +82,14 @@ shown first, and the same row removes it.
 The `greenroom` command talks to the running app over the same connection as an agent, and to nothing else. A
 harness's hook that runs `greenroom hook` tells the app four things: the harness's name, its session id, the
 working folder and the event's name. It does not read the transcript, the prompt or a tool's input, the app keeps
-the newest 200 in memory only (never in a file), and none of it is sent anywhere. Greenroom installs no hook yet.
+the newest 200 in memory only (never in a file), and none of it is sent anywhere. Cursor also writes your
+account's address to a hook; Greenroom does not read it.
+
+Connecting a harness adds those hooks, so Greenroom can show whether its session is working, waiting for you or
+finished: to `~/.codex/hooks.json` for Codex, `~/.cursor/hooks.json` for Cursor, and `~/.claude/settings.json` for
+Claude Code when it is connected without the plugin (the plugin carries its own). Only the `hooks` part of the
+file is changed, the hooks you already have are kept, and disconnecting takes Greenroom's out again. The file and
+the line each hook runs are shown on the Connect screen. Codex asks you to trust a new hook before it runs.
 
 A `greenroom://` link (which macOS hands to Greenroom from a browser, a chat or a terminal) only shows a place
 in the window. It cannot add a repository, run an APK or change a setting.

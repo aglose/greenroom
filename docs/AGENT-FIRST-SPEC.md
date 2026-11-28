@@ -91,8 +91,14 @@ Built in A2: the Tools column for Claude Code (`claude mcp add`; an enabled plug
 installed by Greenroom), Codex (`codex mcp add`) and Cursor (`~/.cursor/mcp.json`: the install link cannot be seen
 to have worked, so the file is written, with every other entry kept). Built in A3: the Skill column for the same
 three, so a row says "Adds Greenroom's tools and a skill"; "Another agent" has "Add the Skill" for the shared
-folder, and the screen has a row that links the `greenroom` command into a folder on the PATH. The Status column
-is A4: `greenroom hook` exists and the app hears it, and nothing installs a hook yet. Every other harness found is
+folder, and the screen has a row that links the `greenroom` command into a folder on the PATH. Built in A4: the
+Status column for the same three. Connecting writes each harness's hooks (`~/.codex/hooks.json`,
+`~/.cursor/hooks.json`; for Claude Code the plugin's `hooks/hooks.json`, or `~/.claude/settings.json` when it is
+connected with `claude mcp add` or its installed plugin predates hooks), touching only the file's `hooks` value and
+keeping the person's own; disconnecting removes them; a row says "Adds Greenroom's tools, a skill and session
+status". `HookSessions` is the one status model (working, waiting, idle, from the harness's name, session id and
+folder), joined with what Claude Code's and T3 Code's files say; `onTurnEnd` holds a walk until the agent's turn
+ends and starts no build. Every other harness found is
 named under "Another agent", with the stdio command and the JSON to paste.
 
 | Harness | Tools | Status (hooks) | Skill |
@@ -128,7 +134,12 @@ connecting, then goes.
 - Codex's `mcp add`, `mcp get --json` and `mcp remove` against a real Codex: A2 took them from its documentation,
   which does not give the JSON's shape or what `get` answers for a missing server. `CodexConnect` reads `command`
   wherever it sits in the answer and treats a failing `get` as not connected.
-- Codex's hook trust step: what the person sees, and whether a hook can be offered without it.
+- Codex's hook trust step: what the person sees, and whether a hook can be offered without it. (A4 writes
+  `~/.codex/hooks.json` and says to trust the hooks in `/hooks`; the command line is kept the same from build to
+  build so the trust, which is by the hook's hash, is asked once.)
+- What no harness's hooks say (A4): that a permission was granted (a session shows as waiting until its tool
+  finishes) and, outside Claude Code's idle notification a minute later, that the person interrupted (it shows as
+  working until 15 minutes pass with no hook).
 - Antigravity's file names and skills folder: sources disagree.
 - Whether Cursor and VS Code show pictures from a tool result. Only Claude Code documents it.
 - MCP Tasks in a second client. If only Claude Code has them, `review` and the CI wait stay blocking calls.

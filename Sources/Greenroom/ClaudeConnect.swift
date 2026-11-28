@@ -74,6 +74,20 @@ enum ClaudeConnect {
         return false
     }
 
+    /// Whether the installed plugin carries Greenroom's hooks (plugins from before A4 do not): a `hooks/hooks.json`
+    /// in a copy of it in Claude Code's plugin cache (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`).
+    /// That folder is Claude Code's own, so a layout this does not know answers no: Greenroom's hooks then go in
+    /// Claude Code's settings as well, and a session's hooks arrive twice, which changes nothing it shows.
+    static func pluginHasHooks() -> Bool {
+        let fm = FileManager.default
+        let parts = pluginID.split(separator: "@").map(String.init)   // plugin@marketplace
+        guard parts.count == 2 else { return false }
+        let copies = Harnesses.home.appendingPathComponent(".claude/plugins/cache/\(parts[1])/\(parts[0])", isDirectory: true)
+        for version in (try? fm.contentsOfDirectory(at: copies, includingPropertiesForKeys: nil)) ?? []
+        where fm.fileExists(atPath: version.appendingPathComponent("hooks/hooks.json").path) { return true }
+        return false
+    }
+
     // MARK: Running claude
 
     enum State: Equatable {

@@ -368,8 +368,13 @@ enum CLI {
     /// `greenroom hook EVENT [--harness NAME] [--session ID] [--cwd DIR]`: what a harness's hook runs. It reads the
     /// JSON the harness writes to the hook's stdin and takes two things from it, the session's id and the working
     /// folder, then tells the running app: harness, session id, folder, event. Nothing else leaves this process: no
-    /// prompt, no tool input, no transcript, no file. With no app running it does nothing (it never starts one).
-    /// It prints nothing and exits 0 always, so it can never hold up or fail an agent's turn.
+    /// prompt, no tool input, no transcript, no file, and not the account Cursor names there. With no app running it
+    /// tells nobody (it never starts one). It exits 0 always, so it can never hold up or fail an agent's turn.
+    ///
+    /// What it prints is what the harness reads as the hook's answer, and it is the same with or without the app.
+    /// Claude Code and Codex take silence as "go on", so for them it prints nothing. Cursor reads JSON from a hook:
+    /// `{"continue":true}` for `beforeSubmitPrompt` (the one hook of ours that could hold a prompt back) and `{}`
+    /// for the rest, neither of which changes anything Cursor does.
     private static func hook(_ args: [String]) -> Never {
         var event: String?, harness = "agent", session: String?, cwd: String?
         var i = 0
@@ -384,15 +389,27 @@ enum CLI {
                 print("usage: greenroom hook EVENT [--harness NAME] [--session ID] [--cwd DIR]\n\n"
                     + "For a harness's hooks. Tells the running Greenroom that EVENT happened: the harness's name, its\n"
                     + "session id and working folder (read from the JSON on stdin, or given here) and the event's name.\n"
-                    + "Never a prompt, a transcript or a file's content. Prints nothing and exits 0, app open or not.")
+                    + "Never a prompt, a transcript or a file's content. Exits 0, app open or not. Prints nothing,\n"
+                    + "except for Cursor, which reads a hook's answer: {\"continue\":true} or {}.")
                 exit(0)
             default: if event == nil, !a.hasPrefix("-") { event = a }
             }
             i += 1
         }
-        guard let e = AgentShim.endpoint() else { exit(0) }   // no app: nothing to tell, and none is started
+        /// Cursor's answer, and the end.
+        func done(cursor: Bool, _ name: String) -> Never {
+            if cursor { print(name.lowercased().filter(\.isLetter) == "beforesubmitprompt" ? "{\"continue\":true}" : "{}") }
+            exit(0)
+        }
+        // The answer follows the hook file the command was written into (its --harness), so it is the same whether
+        // or not the app is there to hear it: Cursor running Claude Code's hooks is answered as Claude Code is.
+        let cursor = harness.lowercased() == "cursor"
+        // No app: nothing to tell, and none is started.
+        guard let e = AgentShim.endpoint() else { done(cursor: cursor, event ?? "") }
         let input = (try? JSONSerialization.jsonObject(with: stdin(seconds: 0.25, limit: 4 << 20))) as? [String: Any] ?? [:]
         func text(_ keys: String...) -> String? { keys.lazy.compactMap { input[$0] as? String }.first { !$0.isEmpty } }
+        // Cursor also runs the hooks in Claude Code's settings, as itself: what it writes says whose session it is.
+        if input["cursor_version"] != nil { harness = "cursor" }
         let name = event ?? text("hook_event_name", "event", "type") ?? ""
         let folder = cwd ?? text("cwd") ?? (input["workspace_roots"] as? [String])?.first ?? FileManager.default.currentDirectoryPath
         let params: [String: Any] = ["harness": harness, "event": name, "cwd": folder,
@@ -401,7 +418,7 @@ enum CLI {
         if !name.isEmpty, let body = try? JSONSerialization.data(withJSONObject: message) {
             _ = AgentShim.post(body, to: e, cwdOverride: folder.hasPrefix("/") ? folder : nil, timeout: 1)
         }
-        exit(0)
+        done(cursor: cursor, name)
     }
 
     /// What is on stdin, if anything arrives in time: a hook must not wait for a harness that writes nothing.

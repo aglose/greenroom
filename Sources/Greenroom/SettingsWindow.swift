@@ -389,8 +389,8 @@ struct SettingsView: View {
 
             SettingsCard {
                 settingsToggleRow(
-                    title: "Show Claude Code sessions in sidebar",
-                    subtitle: "Reads local Claude Code transcripts and read-only git status. Sent nowhere.",
+                    title: "Read Claude Code's session files",
+                    subtitle: "Titles, pull requests and sessions from before Claude Code was connected, from its local transcripts. A connected agent's status comes from its hooks. Sent nowhere.",
                     isOn: $claudeSessions
                 )
                 .onChange(of: claudeSessions) { _, on in ClaudeSessions.shared.enabled = on }

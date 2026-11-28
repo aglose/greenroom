@@ -292,7 +292,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
             statusDot.layer?.backgroundColor = (tools.paused ? Design.warning : Design.accent).cgColor
         } else {
             clientTitle.stringValue = "No agent connected"
-            clientSubtitle.stringValue = "Copy the setup command and run it in a terminal to connect Claude Code or another MCP client."
+            clientSubtitle.stringValue = "Connect one in File > Connect Agents…, or copy the setup command for any other MCP client."
             statusCard.layer?.backgroundColor = Design.well.cgColor
             statusCard.layer?.borderColor = Design.stroke.cgColor
             statusDot.layer?.backgroundColor = (tools.paused ? Design.warning : Design.mute.withAlphaComponent(0.45)).cgColor

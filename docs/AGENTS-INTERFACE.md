@@ -20,7 +20,8 @@ The plugin's server is a script, `plugin/scripts/greenroom-mcp.sh`, that runs `G
 `/Applications/Greenroom.app`, else `~/Applications`, else the copy Spotlight finds by bundle id, and says so on
 standard error when there is none. `GREENROOM_APP` names another copy (a build of your own). The plugin's `bin/`
 holds the `greenroom` command (below), which Claude Code puts on its Bash tool's PATH. Its tools are named
-`mcp__plugin_greenroom_greenroom__launch` and so on. The Connect screen shows the two lines; Greenroom does not
+`mcp__plugin_greenroom_greenroom__launch` and so on. The plugin's `hooks/hooks.json` is the session status (below).
+The Connect screen shows the two lines; Greenroom does not
 run them, but it counts an enabled plugin as connected (`claude plugin list`) and does not offer to add the server
 a second time. `scripts/plugin-check.py` checks the manifests and runs
 the script against a built app; to try the plugin from a checkout without installing it,
@@ -44,6 +45,34 @@ Reconnect. The `claude mcp` lines and the shape of their answers were read from 
 are from its documentation and were never run against a real Codex; every check runs stand-ins
 (`--connect-check`). The command lines are in `ClaudeConnect.swift` and `Harnesses.swift`. Each call is stopped at
 a deadline, and none runs on the app's main thread.
+
+**Session status** comes from each harness's own hooks, which connecting adds and disconnecting removes:
+
+| Harness | Hooks are in | For |
+| --- | --- | --- |
+| Claude Code | the plugin's `hooks/hooks.json`; `~/.claude/settings.json` when connected with `claude mcp add`, or when the installed plugin is from before it had hooks (the row then offers "Add the Hooks") | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Notification` (a permission or a question; idle), `Stop`, `SessionEnd` |
+| Codex | `~/.codex/hooks.json` | `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop` |
+| Cursor | `~/.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `postToolUse`, `afterFileEdit`, `stop`, `sessionEnd` |
+
+Each hook runs `"<Greenroom>" --cli hook EVENT --harness NAME` (the plugin's run its own `bin/greenroom`). Only the
+`hooks` value of the file is touched: the hooks you have there stay, in their order, and every other byte of the
+file is kept. A file that is not laid out as the harness documents is left alone and the row shows what to paste.
+Greenroom recognises its own lines by their shape, rewrites them when this copy moved, and removes the file when
+nothing else is left in it. Codex runs a new hook only after you trust it (`/hooks` in Codex, or Settings > Hooks
+in its app), so Codex's status starts once you have. The Debug copy writes no hooks.
+
+From the hooks every harness's session has one status, shown on its row and in `session` (`agent session: Codex
+(working)`): **working** from a prompt or a tool call, **waiting** from a permission request or a question,
+**idle** when the turn ends. What no harness says: that you allowed a permission (the session shows as waiting
+until the tool finishes), and, except Claude Code a minute later, that you interrupted it (it shows as working
+until 15 minutes pass with no hook). A session is known from its first hook after Greenroom opened, and by the
+harness's name, its session id and its folder only. Claude Code's transcripts and T3 Code's threads are still
+read for titles and pull requests, and for sessions from before the harness was connected (Settings > Agents).
+
+**A walk can wait for the turn's end.** A session row's menu has Walk New Builds Automatically > Wait for the Agent's Turn to End
+(`workspace` setting `auto: on_turn_end`): a build that lands while an agent is mid-turn in that worktree is not
+walked until its turn ends, so the builds it makes along the way are not walked one by one. It starts no build,
+and with no agent heard in the worktree it is the same as walking every build.
 
 Any other MCP client: run that program with `--mcp` as a stdio server. The toolbar's Agent button (✦) has the
 command for this copy of the app, a log of what agents did, and a switch that pauses them.
@@ -94,11 +123,12 @@ switch holds for the command as for any agent.
 **`greenroom hook EVENT`** is what a harness's hook runs (`--harness NAME`, and `--session ID` and `--cwd DIR`
 where the harness does not write them as JSON to the hook's standard input). It tells the running app four
 things: the harness's name, its session id, the working folder and the event's name. It reads nothing else from
-what the harness hands it (no prompt, no tool input, no transcript), prints nothing, always exits 0, and when
-Greenroom is not open it does nothing: a hook never starts the app and never holds up an agent's turn. The app
-keeps the newest 200 in memory and lists them in `agent_activity` (those of the caller's worktree; `all: true` for
-every one). Nothing installs a hook into a harness yet: that, and the session status built from them, is the next
-step of [AGENT-FIRST-SPEC.md](AGENT-FIRST-SPEC.md).
+what the harness hands it (no prompt, no tool input, no transcript, and not the account Cursor names there),
+always exits 0, and when Greenroom is not open it tells nobody: a hook never starts the app and never holds up an
+agent's turn. It prints nothing, except with `--harness cursor`, because Cursor reads a hook's answer:
+`{"continue":true}` for `beforeSubmitPrompt` and `{}` for the rest, app open or not. The app keeps the newest 200
+in memory, lists them in `agent_activity` (those of the caller's worktree; `all: true` for every one) and builds
+each session's status from them (above).
 
 **Links.** `greenroom://` opens a place in the window, from a terminal (`greenroom open LINK`, `open LINK`), a pull
 request's description or a chat: `greenroom://open` (the window), `greenroom://connect` (the Connect screen),

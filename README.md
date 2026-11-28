@@ -17,8 +17,9 @@ version of it and adds the workbench.
   found on this Mac (Claude Code, Codex and Cursor have a connector; any other MCP client gets the command to
   paste), shows what connecting each would run, and connects the ticked ones on one button. Then it gives you the
   words to paste into your agent, for your own project or for the sample app that comes with Greenroom, and
-  listens for the agent's first call. Connecting a harness also gives it a skill that teaches the loop, and the
-  same screen can put the `greenroom` command on your PATH.
+  listens for the agent's first call. Connecting a harness also gives it a skill that teaches the loop and
+  hooks that tell Greenroom whether its session is working, waiting for you or finished (the same status for
+  every harness), and the same screen can put the `greenroom` command on your PATH.
 - **An agent brings the work.** With nothing running, the window waits for an agent and shows the words to give
   yours. The first call an agent makes from a git worktree with an Android app in it adds that repository to
   Sessions (the window says so, with Undo), so nothing is prepared by hand. A repository you removed is never added
@@ -151,7 +152,7 @@ version of it and adds the workbench.
 - **Agents** drive the same simulators over the Model Context Protocol: the screen as compact text with stable
   references, every action answered with what changed, checks and waits in one call
   ([docs/AGENTS-INTERFACE.md](docs/AGENTS-INTERFACE.md)). The toolbar's Agent button shows what an agent did and
-  can pause it. For Claude Code there is a plugin, with the tools and a skill that verifies a change with them:
+  can pause it. For Claude Code there is a plugin, with the tools, the status hooks and a skill that verifies a change with them:
   `/plugin marketplace add aglose/greenroom`, then `/plugin install greenroom@greenroom`.
 - **From a shell**, the same tools are the `greenroom` command: `greenroom launch app.apk`,
   `greenroom tap --text Add`, `greenroom check Saved` (exit 1 on `FAIL`), `greenroom screenshot --out shot.png`,

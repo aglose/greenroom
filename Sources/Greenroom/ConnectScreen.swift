@@ -21,6 +21,11 @@ final class ConnectModel: ObservableObject {
         /// Connected: where its skill goes, and what is there. nil: it has the skill another way, or is not connected.
         var skillPlace: Skills.Place?
         var skill: Skills.State?
+        /// Connected: the file its hooks go in, and what is there. nil: it has them another way, or is not connected.
+        var hooksPlace: Hooks.Place?
+        var hooks: Hooks.State?
+        /// Connected with hooks that are in no file of Greenroom's: where they are (Claude Code's plugin).
+        var hooksNote: String?
         var id: String { harness.id }
     }
 
@@ -113,8 +118,11 @@ final class ConnectModel: ObservableObject {
                 // Looking makes no skill file (the row offers that). It keeps the ones Greenroom wrote true: this
                 // harness's name on its own, and off them once it is no longer connected.
                 Harnesses.settleSkill(h, link, creating: false)
-                let skill = Self.skill(of: h, link)
-                DispatchQueue.main.async { self.update(h.id) { $0.link = link; $0.skillPlace = skill.place; $0.skill = skill.state } }
+                Harnesses.settleHooks(h, link, creating: false)   // the same for its hooks
+                let skill = Self.skill(of: h, link), hooks = Self.hooks(of: h, link)
+                DispatchQueue.main.async {
+                    self.update(h.id) { $0.link = link; $0.skillPlace = skill.place; $0.skill = skill.state; $0.hooksPlace = hooks.place; $0.hooks = hooks.state; $0.hooksNote = hooks.note }
+                }
             }
             for place in Skills.Place.allCases { Skills.refresh(place) }
             let also = Harnesses.alsoFound()
@@ -131,6 +139,13 @@ final class ConnectModel: ObservableObject {
     private static func skill(of h: Harness, _ link: Harness.Link) -> (place: Skills.Place?, state: Skills.State?) {
         guard link.isConnected, let place = h.skill() else { return (nil, nil) }
         return (place, Skills.state(place))
+    }
+
+    /// A connected harness's hooks: the file they go in and what is there, or where else they are.
+    private static func hooks(of h: Harness, _ link: Harness.Link) -> (place: Hooks.Place?, state: Hooks.State?, note: String?) {
+        guard link.isConnected, !ClaudeConnect.repositoryOnly else { return (nil, nil, nil) }
+        guard let place = h.hooks() else { return (nil, nil, "Session status: the plugin's hooks.") }
+        return (place, Hooks.state(place), nil)
     }
 
     private func update(_ id: String, _ change: (inout Row) -> Void) {
@@ -151,10 +166,15 @@ final class ConnectModel: ObservableObject {
                 let link = h.status()
                 // The skill follows the connection: there once the harness is connected, gone with its last one.
                 let followed = Harnesses.settleSkill(h, link)
-                let message = [r.message, followed?.message ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
-                let skill = Self.skill(of: h, link)
+                // So do its hooks, which are what tells the sidebar a session is working, waiting or finished.
+                let hooked = Harnesses.settleHooks(h, link)
+                let message = [r.message, followed?.message ?? "", hooked?.message ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
+                let skill = Self.skill(of: h, link), hooks = Self.hooks(of: h, link)
                 DispatchQueue.main.async {
-                    self.update(id) { $0.busy = false; $0.link = link; $0.message = message; $0.failed = !r.ok; $0.skillPlace = skill.place; $0.skill = skill.state }
+                    self.update(id) {
+                        $0.busy = false; $0.link = link; $0.message = message; $0.failed = !r.ok; $0.skillPlace = skill.place; $0.skill = skill.state
+                        $0.hooksPlace = hooks.place; $0.hooks = hooks.state; $0.hooksNote = hooks.note
+                    }
                 }
             }
             let shared = Skills.state(.agents)
@@ -173,6 +193,8 @@ final class ConnectModel: ObservableObject {
     func disconnect(_ id: String, then: (() -> Void)? = nil) { act([id], { $0.disconnect() }, then: then) }
     /// For a harness connected before Greenroom wrote skills, or one whose skill was deleted: settling writes it.
     func addSkill(_ id: String, then: (() -> Void)? = nil) { act([id], { _ in Harness.Result(ok: true, message: "") }, then: then) }
+    /// The same for its hooks: a harness connected before Greenroom wrote hooks, or one whose hooks were taken out.
+    func addHooks(_ id: String, then: (() -> Void)? = nil) { addSkill(id, then: then) }
 
     /// One thing beside the harnesses (the skill for an agent added by hand, the command), then what is there now.
     private func aside(_ work: @escaping () -> (ok: Bool, message: String), said: @escaping (ConnectModel, Bool, String) -> Void, then: (() -> Void)?) {
@@ -347,7 +369,7 @@ struct HarnessList: View {
         switch row.link {
         case nil: return ConnectModel.lookups ? "Looking…" : "Not looked at"
         case .notInstalled: return "Not found on this Mac"
-        case .notConnected: return "Adds Greenroom's tools and a skill"
+        case .notConnected: return "Adds Greenroom's tools, a skill and session status"
         case .connected(let how): return "Connected " + how
         case .otherCopy(let path): return "Its \(ClaudeConnect.serverName) server runs another copy of Greenroom (\(path))"
         case .unknown(let why): return why
@@ -415,6 +437,17 @@ struct HarnessList: View {
                             .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                         if skill == .none { SmallButton(title: "Add the Skill") { model.addSkill(row.id) }.disabled(model.working) }
                     }
+                }
+                if let place = row.hooksPlace, let hooks = row.hooks {
+                    HStack(spacing: 8) {
+                        Text(Hooks.words(place, hooks))
+                            .font(.system(size: 11.5)).foregroundStyle(hooks == .unreadable ? SettingsTheme.warning : SettingsTheme.mute)
+                            .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        if hooks == .none { SmallButton(title: "Add the Hooks") { model.addHooks(row.id) }.disabled(model.working) }
+                    }
+                    if hooks == .unreadable { CopyBox(text: Hooks.byHand(place)) }
+                } else if let note = row.hooksNote {
+                    Text(note).font(.system(size: 11.5)).foregroundStyle(SettingsTheme.mute)
                 }
                 if row.link?.isConnected == true || { if case .otherCopy = row.link { return true }; return false }() {
                     SmallButton(title: "Disconnect") { model.disconnect(row.id) }.disabled(model.working)

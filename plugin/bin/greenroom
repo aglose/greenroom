@@ -17,7 +17,13 @@
 # --agent-check, which with GREENROOM_STATE gives the app a state folder of its own; leave it unset otherwise.
 BUNDLE_ID=io.github.aglose.greenroom
 
+# `greenroom hook` is run by a harness after every prompt and tool call: with no app to tell (not installed, or one
+# from before the command) it says nothing and exits 0, so a hook never fails or holds up an agent's turn.
+quiet=
+[ "${1:-}" = hook ] && quiet=1
+
 fail() {
+  [ -n "$quiet" ] && exit 0
   echo "greenroom: $1" >&2
   exit 1
 }

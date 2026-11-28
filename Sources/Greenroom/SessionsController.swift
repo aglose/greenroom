@@ -105,21 +105,24 @@ final class SessionsController {
         installBuilds()
         let claude = ClaudeSessions.shared   // W1: Claude Code's sessions, behind the switch in Settings
         claude.workspaceRoots = { [weak self] in self?.workspaces.map(\.root) ?? [] }
-        claude.onChange = { [weak self] in self?.applyClaude() }
+        claude.onChange = { [weak self] in self?.applyAgents() }
         claude.changedSwitch()
         let t3 = T3Sessions.shared   // T3 Code's threads, behind their own switch in Settings
         t3.workspaceRoots = { [weak self] in self?.workspaces.map(\.root) ?? [] }
-        t3.onChange = { [weak self] in self?.applyClaude() }
+        t3.onChange = { [weak self] in self?.applyAgents() }
         t3.changedSwitch()
+        // What the harnesses' own hooks say (A4): the status every harness shares, and the end of a turn.
+        HookSessions.shared.onChange = { [weak self] in self?.applyAgents() }
+        HookSessions.shared.onTurnEnd = { [weak self] in self?.turnEnded(in: $0) }
         refresh()
     }
 
     /// Hands every row its Claude/T3 sessions (or takes them away) without asking git again. Says nothing when no row's
     /// sessions changed in a way the row shows.
-    func applyClaude() {
+    func applyAgents() {
         let next = attachPulls(ClaudeSessions.shared.attach(sessions))
         let changed = next.map { $0.agentSessions.map(\.shown) } != sessions.map { $0.agentSessions.map(\.shown) }
-            || next.map { $0.claude?.shown } != sessions.map { $0.claude?.shown }
+            || next.map { $0.agent?.shown } != sessions.map { $0.agent?.shown }
         sessions = next
         if autoArchive() || changed { onChange?() }
     }
@@ -275,7 +278,7 @@ final class SessionsController {
             if !self.sessions.contains(where: { $0.worktree.resolvingSymlinksInPath().path == worktreePath }) {
                 let wsRoot = self.workspaces.first { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }?.root ?? root
                 let initial = Session(worktree: worktree, workspace: wsRoot, branch: nil, head: "", dirty: false,
-                                      ahead: 0, claude: nil, build: self.builds[worktreePath], simulator: nil,
+                                      ahead: 0, agent: nil, build: self.builds[worktreePath], simulator: nil,
                                       outputs: nil, sourcesDate: nil)
                 self.sessions.append(initial)
             }
@@ -379,11 +382,11 @@ final class SessionsController {
         return simulator(for: s) != nil || (buildQueue.job(for: s)?.isActive ?? false)
     }
 
-    /// Worth suggesting: not shown, not put away, and a Claude session is at work in it or it has an open pull request.
+    /// Worth suggesting: not shown, not put away, and an agent's session is at work in it or it has an open pull request.
     func isSuggested(_ s: Session) -> Bool {
         guard !isShown(s), let ws = workspace(of: s), !ws.hidden.contains(s.worktree.path), !ws.archived.contains(s.worktree.path) else { return false }
         // A worktree with nothing to run is not worth a row until the person adds it (the + menu has it).
-        return (s.claudeActive || s.hasOpenPR) && newestAPK(for: s) != nil
+        return (s.agentActive || s.hasOpenPR) && newestAPK(for: s) != nil
     }
 
     /// The suggestions, active ones first.
@@ -391,11 +394,11 @@ final class SessionsController {
         sessions.filter(isSuggested).sorted { (Self.tier($0, live: false), $0.title) < (Self.tier($1, live: false), $1.title) }
     }
 
-    /// The order rows show in: something running first (a simulator, a Claude session, a build), then an open pull
+    /// The order rows show in: something running first (a simulator, an agent's session, a build), then an open pull
     /// request, then the rest; within each, the order they were added in (newest first). Coarse on purpose: a status
     /// that flickers does not make rows jump.
     private static func tier(_ s: Session, live: Bool) -> Int {
-        if live || s.claudeActive { return 0 }
+        if live || s.agentActive { return 0 }
         return s.hasOpenPR ? 1 : 2
     }
 
@@ -436,13 +439,13 @@ final class SessionsController {
     }
 
     /// Archives the shown sessions whose pull requests have all closed with one merged, unless something is still
-    /// going on in them (a simulator, a build, a Claude session that runs) or they are a main checkout. Returns
+    /// going on in them (a simulator, a build, an agent's session that runs) or they are a main checkout. Returns
     /// whether one was archived.
     @discardableResult
     func autoArchive() -> Bool {
         guard autoArchiveEnabled else { return false }
         var done: [Session] = []
-        for s in sessions where !s.isMain && s.prMerged && !s.claudeActive && !(s.claude?.running ?? false) {
+        for s in sessions where !s.isMain && s.prMerged && !s.agentActive && !(s.agent?.running ?? false) {
             guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }), workspaces[i].shown.contains(s.worktree.path),
                   simulator(for: s) == nil, !(buildQueue.job(for: s)?.isActive ?? false) else { continue }
             workspaces[i].shown.removeAll { $0 == s.worktree.path }
@@ -467,8 +470,8 @@ final class SessionsController {
             i.toolTip = (s.worktree.path as NSString).abbreviatingWithTildeInPath
             return i
         }
-        let active = rest.filter { ($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
-        let others = rest.filter { !($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
+        let active = rest.filter { ($0.agentActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
+        let others = rest.filter { !($0.agentActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
         let gone = rest.filter { archived.contains($0.worktree.path) }
         if !rest.isEmpty {
             let find = ClosureMenuItem("Find a Worktree…") { [weak self] in self?.findWorktree(in: workspace) }
@@ -552,7 +555,7 @@ final class SessionsController {
         } else if let n = s.pullRequests.first?.number {
             bits.append("#\(n)")
         }
-        if let agent = s.displayAgent ?? s.claude {
+        if let agent = s.displayAgent ?? s.agent {
             if agent.status == .waiting { bits.append("\(agent.sourceName) waiting for you") }
             else if agent.status == .working && agent.running { bits.append("\(agent.sourceName) working") }
         }
@@ -643,7 +646,7 @@ final class SessionsController {
                         } else if FileManager.default.fileExists(atPath: ws.root.path) {
                             let path = ws.root.resolvingSymlinksInPath()
                             all.append(Session(worktree: path, workspace: ws.root, branch: nil, head: "", dirty: false,
-                                               ahead: 0, claude: nil, build: known[path.path], simulator: nil,
+                                               ahead: 0, agent: nil, build: known[path.path], simulator: nil,
                                                outputs: nil, sourcesDate: nil))
                         }
                         continue
@@ -662,7 +665,7 @@ final class SessionsController {
                                 let (outputs, state) = await (outputsTask, stateTask)
                                 if let state {
                                     return (idx, Session(worktree: path, workspace: ws.root, branch: state.branch, head: state.head,
-                                                         dirty: state.dirty, ahead: state.ahead, claude: nil, build: known[path.path],
+                                                         dirty: state.dirty, ahead: state.ahead, agent: nil, build: known[path.path],
                                                          simulator: nil, outputs: outputs, sourcesDate: state.sourcesDate))
                                 } else if var old = before.first(where: { $0.worktree.path == path.path }) {
                                     // One failed call (a lock, a busy disk) must not drop the row, and with it the simulator's.
@@ -673,7 +676,7 @@ final class SessionsController {
                                     // Unborn HEAD or transient git failure: still list the worktree from `git worktree list`.
                                     let head = wt.head.allSatisfy({ $0 == "0" }) ? "" : wt.head
                                     return (idx, Session(worktree: path, workspace: ws.root, branch: wt.branch, head: head,
-                                                         dirty: false, ahead: 0, claude: nil, build: known[path.path],
+                                                         dirty: false, ahead: 0, agent: nil, build: known[path.path],
                                                          simulator: nil, outputs: outputs, sourcesDate: nil))
                                 }
                             }
@@ -1193,6 +1196,15 @@ final class SessionsController {
         evidence.buildArrived(worktree: worktree, build: build, auto: auto(of: s), withData: walksWithData(s))
     }
 
+    /// An agent's turn ended in FOLDER (its hook said so): a repository that walks at the end of a turn has the
+    /// build of that worktree walked now, if it was not already.
+    private func turnEnded(in folder: URL) {
+        guard let path = ClaudeSessions.owner(of: folder, among: sessions.map(\.worktree)),
+              let s = sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == path }), auto(of: s) == .onTurnEnd,
+              let build = builds[s.worktree.path] ?? s.build else { return }
+        evidence.buildArrived(worktree: s.worktree.path, build: build, auto: .onTurnEnd, withData: walksWithData(s))
+    }
+
     /// Whether a queued walk is held back now: a recipe of its workspace is building, or the person is using a
     /// simulator (it starts by itself later).
     private func walkShouldWait(_ owner: String) -> Bool {
@@ -1331,7 +1343,7 @@ final class SessionsController {
         let buildColor: NSColor?
         let metadataParts: [(text: String, color: NSColor)]
         let metadataKey: String
-        let agent: ClaudeSession?
+        let agent: AgentSession?
         let extraActiveAgents: Int
         let agentTitle: String?
         let agentSnippet: String?
@@ -1533,7 +1545,7 @@ final class SessionsController {
         return pill
     }
 
-    private static func agentStatusStyle(for agent: ClaudeSession) -> (text: String, symbol: String, color: NSColor, border: NSColor, fill: NSColor) {
+    private static func agentStatusStyle(for agent: AgentSession) -> (text: String, symbol: String, color: NSColor, border: NSColor, fill: NSColor) {
         let agentPurple = NSColor(srgbRed: 0.616, green: 0.569, blue: 1.0, alpha: 1)
         if agent.status == .waiting {
             return ("Waiting for you", "exclamationmark.circle.fill", Design.warning,
@@ -1560,19 +1572,8 @@ final class SessionsController {
                 Design.stroke, NSColor(white: 0, alpha: 0.18))
     }
 
-    private func openAgent(_ agent: ClaudeSession, in worktree: URL) {
-        if agent.source == .t3 {
-            T3Sessions.open(worktree) { [weak self] why in
-                if let why {
-                    if let link = agent.link { NSWorkspace.shared.open(link) }
-                    else { self?.workbench?.toast.show(why, problem: true) }
-                }
-            }
-        } else {
-            if !ClaudeSessions.openInClaude(agent) {
-                workbench?.toast.show("Claude is not installed on this Mac", problem: true)
-            }
-        }
+    private func openAgent(_ agent: AgentSession, in worktree: URL) {
+        ClaudeSessions.open(agent, in: worktree) { [weak self] why in self?.workbench?.toast.show(why, problem: true) }
     }
 
     // matchFont: an attributed label keeps the field's default 13pt font for its line height and baseline, so
@@ -1691,7 +1692,7 @@ final class SessionsController {
             headerViews.append(modelLabel)
         }
 
-        let openBtn = ClosureButton(symbol: "arrow.up.right", tip: "Open in \(agent.sourceName)") { [weak self] in
+        let openBtn = ClosureButton(symbol: "arrow.up.right", tip: "Open in \(agent.appName)") { [weak self] in
             self?.openAgent(agent, in: s.worktree)
         }
         openBtn.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
@@ -2008,7 +2009,7 @@ final class SessionsController {
             actionRowView = actionRow
         }
 
-        // Rich tooltip with complete PR, Git, and all T3 Code / Claude sessions on this worktree.
+        // Rich tooltip with complete PR, Git, and all the agents' sessions on this worktree.
         var tip: [String] = []
         if let pr = s.githubPR {
             var line = "PR #\(pr.number): \(pr.title) (\(pr.statusBadge))"
@@ -2022,7 +2023,7 @@ final class SessionsController {
         }
         tip.append("Branch: \(p.branchLabel) (\(s.shortHead)\(s.ahead > 0 ? ", \(s.ahead) ahead" : "")\(s.dirty ? ", edited" : ""))")
         tip.append("Worktree: \((s.worktree.path as NSString).abbreviatingWithTildeInPath)")
-        let allAgents = s.agentSessions.isEmpty ? [s.claude].compactMap { $0 } : s.agentSessions
+        let allAgents = s.agentSessions.isEmpty ? [s.agent].compactMap { $0 } : s.agentSessions
         for a in allAgents.prefix(4) {
             let st = Self.agentStatusStyle(for: a).text
             let modelStr = a.shortModel.map { " [\($0)]" } ?? ""
@@ -2112,7 +2113,7 @@ final class SessionsController {
         } else if let n = s.pullRequests.first(where: { $0.state == .open })?.number {
             subBits.append("#\(n) Open")
         }
-        if let agent = s.displayAgent ?? s.claude {
+        if let agent = s.displayAgent ?? s.agent {
             let st = Self.agentStatusStyle(for: agent).text
             subBits.append("\(agent.sourceName) · \(st)")
         }
@@ -2121,7 +2122,7 @@ final class SessionsController {
 
         let sub = NSTextField(labelWithString: subText)
         sub.font = .systemFont(ofSize: 10)
-        sub.textColor = (s.displayAgent?.status == .waiting || s.claude?.status == .waiting) ? Design.warning : .secondaryLabelColor
+        sub.textColor = (s.displayAgent?.status == .waiting || s.agent?.status == .waiting) ? Design.warning : .secondaryLabelColor
         sub.maximumNumberOfLines = 1
         sub.lineBreakMode = .byTruncatingTail
         sub.cell?.usesSingleLineMode = true
@@ -2154,7 +2155,7 @@ final class SessionsController {
 
     /// The suggestion row's key, like `rowKey`.
     func suggestionKey(for s: Session) -> String {
-        let agent = s.displayAgent ?? s.claude
+        let agent = s.displayAgent ?? s.agent
         return [
             s.title,
             s.branch ?? "",

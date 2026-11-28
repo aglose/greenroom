@@ -84,7 +84,7 @@ enum T3Check {
 
         var cache: [String: (updated: String, detail: T3Reader.Detail)] = [:]
         let first = T3Reader.read(roots: [repo], cache: &cache)
-        func one(_ id: String) -> ClaudeSession? { first.sessions.first { $0.id == id } }
+        func one(_ id: String) -> AgentSession? { first.sessions.first { $0.id == id } }
         expect(calls().first == "thread list --project \(repo.path) --json", "the list is asked for the repository, as JSON", calls().first ?? "none")
         expect(first.note == nil && first.sessions.count == 3, "three threads: the old one and the subagent's are left out", first.sessions.compactMap(\.id).joined(separator: ","))
         expect(calls().filter { $0.hasPrefix("thread show") }.count == 3, "one thread show per thread kept")
@@ -104,10 +104,10 @@ enum T3Check {
         expect(calls() == ["thread list --project \(repo.path) --json"], "a second read asks no thread show", calls().joined(separator: " | "))
 
         // On the rows: the running thread names its worktree's row, which shows an open pull request and is active.
-        let row = Session(worktree: wt, workspace: repo, branch: "fix-login", head: "abc", dirty: false, ahead: 0, claude: run, build: nil, simulator: nil, outputs: nil, sourcesDate: nil)
-        expect(row.title == "Fix the login screen" && row.hasOpenPR && row.claudeActive, "the row is named by the thread, active, with an open pull request")
-        var doneRow = row; doneRow.claude = done
-        expect(doneRow.prMerged && !doneRow.claudeActive, "a row whose thread finished with a merged pull request is one to archive")
+        let row = Session(worktree: wt, workspace: repo, branch: "fix-login", head: "abc", dirty: false, ahead: 0, agent: run, build: nil, simulator: nil, outputs: nil, sourcesDate: nil)
+        expect(row.title == "Fix the login screen" && row.hasOpenPR && row.agentActive, "the row is named by the thread, active, with an open pull request")
+        var doneRow = row; doneRow.agent = done
+        expect(doneRow.prMerged && !doneRow.agentActive, "a row whose thread finished with a merged pull request is one to archive")
 
         // A repository that is not a T3 Code project: no threads from it, and no note (T3 Code answered).
         let other = base.appendingPathComponent("other", isDirectory: true)

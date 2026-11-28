@@ -73,6 +73,22 @@ scheme = "greenroom-debug" if info.get("GreenroomVariant") == "debug" else "gree
 schemes = [s for t in info.get("CFBundleURLTypes", []) for s in t.get("CFBundleURLSchemes", [])]
 expect(f"the app opens {scheme}:// links, and no other", schemes == [scheme], schemes)
 
+# The hooks: hooks/hooks.json is what Claude Code runs for the plugin, each the plugin's own command, and the same
+# set Greenroom writes to ~/.claude/settings.json for a Claude Code connected without the plugin.
+hooks = json.load(open(plugin + "/hooks/hooks.json")).get("hooks", {})
+in_plugin, shapes = [], True
+for event, groups in hooks.items():
+    for g in groups:
+        handlers = g.get("hooks", [])
+        m = re.fullmatch(r'"\$\{CLAUDE_PLUGIN_ROOT\}/bin/greenroom" hook ([A-Za-z]+) --harness claude', handlers[0].get("command", "") if len(handlers) == 1 else "")
+        shapes = shapes and bool(m) and handlers[0].get("type") == "command" and set(g) <= {"matcher", "hooks"}
+        in_plugin.append((event, m.group(1) if m else "", g.get("matcher", "")))
+expect("every hook of the plugin runs the plugin's own greenroom command, as greenroom hook EVENT --harness claude", shapes and in_plugin, hooks)
+swift = open(root + "/Sources/Greenroom/Hooks.swift").read()
+block = swift.split("static let claude = Place(")[1].split("static let codex")[0]
+in_app = [(e, w or e, m or "") for e, w, m in re.findall(r'Spec\(event: "(\w+)"(?:, word: "(\w+)")?(?:, matcher: "([^"]*)")?\)', block)]
+expect("the plugin's hooks are the ones Greenroom writes to Claude Code's settings", in_plugin == in_app and len(in_app) >= 5, (in_plugin, in_app))
+
 # The launcher, with no app to find.
 def launch(env, stdin=""):
     return subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=60, env=env)
@@ -93,6 +109,10 @@ r = subprocess.run([command, "tools"], capture_output=True, text=True, timeout=6
 expect("the command refuses an app older than itself, in words", r.returncode == 1 and "is older than the greenroom command" in r.stderr and "Check for Updates" in r.stderr and r.stdout == "", (r.returncode, r.stderr))
 r = subprocess.run([command, "mcp"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, env=dict(plain, GREENROOM_APP=old))
 expect("... and still starts its MCP server", r.returncode == 0 and r.stdout.strip() == "ran --mcp" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
+# A hook runs at every prompt and tool call, app or no app: with none to tell it is silent and exits 0.
+for where, what in ((old, "an app older than the command"), ("/nowhere/Greenroom.app", "no app")):
+    r = subprocess.run([command, "hook", "Stop", "--harness", "claude"], input='{"session_id": "s", "cwd": "/"}', capture_output=True, text=True, timeout=60, env=dict(plain, GREENROOM_APP=where))
+    expect(f"greenroom hook with {what} says nothing and exits 0", (r.returncode, r.stdout, r.stderr) == (0, "", ""), (r.returncode, r.stdout, r.stderr))
 r = subprocess.run([command, "tools"], capture_output=True, text=True, timeout=60, env=dict(plain, GREENROOM_APP="/nowhere/Greenroom.app"))
 expect("the command refuses a GREENROOM_APP that is no app, in words", r.returncode == 1 and "not a Greenroom.app" in r.stderr and r.stdout == "", r.stderr)
 open(fake + "/mdfind", "w").write("#!/bin/sh\necho /nowhere/Greenroom.app\n")
@@ -162,6 +182,10 @@ try:
     expect("a link to it on the PATH runs the app it is inside", code == 0 and info["CFBundleShortVersionString"] in out and ("Debug" in out) == (scheme == "greenroom-debug"), (code, out, err[:300]))
     code, out, err = said([command, "simulators"], dict(checking, GREENROOM_APP=app))
     expect("the plugin's command reaches the app GREENROOM_APP names", code == 0 and out.strip() != "" and err == "", (code, out[:200], err[:300]))
+    r = subprocess.run([command, "hook", "Stop", "--harness", "claude"], input=json.dumps({"session_id": "plugin-check", "cwd": empty}), capture_output=True, text=True, timeout=60,
+                       env=dict(checking, GREENROOM_APP=app), cwd=empty)
+    code, out, err = said([command, "agent_activity"], dict(checking, GREENROOM_APP=app))
+    expect("the plugin's hook command is heard by the app, and prints nothing", (r.returncode, r.stdout, r.stderr) == (0, "", "") and "hook claude Stop" in out, (r.returncode, r.stdout, r.stderr, out[-300:]))
     code, out, err = said([command, "nope"], dict(checking, GREENROOM_APP=app))
     expect("... and a wrong tool is a usage error (2), not a window", code == 2 and "greenroom tools" in err and out == "", (code, out[:200], err[:300]))
     if found:

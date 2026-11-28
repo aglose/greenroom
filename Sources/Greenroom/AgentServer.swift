@@ -118,7 +118,8 @@ final class AgentServer {
         if message["method"] as? String == "greenroom/hook" {
             let params = message["params"] as? [String: Any] ?? [:]
             DispatchQueue.main.async { [weak self] in
-                guard HookLog.shared.add(params) != nil else { return }
+                guard let event = HookLog.shared.add(params) else { return }
+                HookSessions.shared.heard(event)
                 self?.tools.workbench?.agentChanged()
             }
             respond(connection, 202, "")
