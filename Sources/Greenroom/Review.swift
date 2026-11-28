@@ -297,7 +297,7 @@ final class ReviewController {
                 case .passed: detail = "Passed" + (c.at.map { " " + Self.ago($0) } ?? "")
                 case .failed: detail = "Failed" + (c.at.map { " " + Self.ago($0) } ?? "") + (c.note.map { " · " + $0 } ?? "")
                 }
-                if c.state != .none, c.build != build { detail += " · on an older build" }
+                if c.state != .none, build != nil, c.build != build { detail += " · on an older build" }
                 // A recording still being written cannot be played yet.
                 let playable = c.recording.map { $0 != live && FileManager.default.fileExists(atPath: $0) } ?? false
                 return SessionPanelState.Criterion(id: i, text: c.text, state: c.state, detail: detail,

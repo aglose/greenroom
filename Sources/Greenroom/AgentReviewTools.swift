@@ -77,8 +77,9 @@ extension AgentTools {
     static func mark(_ c: Work.Spec.Criterion, on build: String?) -> String {
         switch c.state {
         case .none: return "[ ]"
-        case .passed: return c.build == build ? "[passed]" : "[passed on an older build]"
-        case .failed: return c.build == build ? "[FAILED]" : "[failed on an older build]"
+        // With no build known (after a restart, before the session's simulator runs) nothing says the tick is old.
+        case .passed: return build == nil || c.build == build ? "[passed]" : "[passed on an older build]"
+        case .failed: return build == nil || c.build == build ? "[FAILED]" : "[failed on an older build]"
         }
     }
 
