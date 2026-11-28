@@ -321,7 +321,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             // Plain launches keep their app data per device (DeviceData); a session's, or any naming a slot, keep theirs.
             let engine = Engine.shared
             let others = engine.simulators.filter(\.isAlive) + engine.closing
-            let slotted = DeviceData.options(for: apk, options, others: others, root: engine.engineState.appendingPathComponent("cache/data", isDirectory: true))
+            // The bundled sample app is shown in dark appearance unless the launch names one (Self.sampleOptions).
+            let shown = Self.sampleOptions(for: apk, options)
+            let slotted = DeviceData.options(for: apk, shown, others: others, root: engine.engineState.appendingPathComponent("cache/data", isDirectory: true))
             let sim = try engine.open(apk: apk, options: slotted)
             if sim.displayLabel == nil, let label = storedBuildLabel(for: apk) { sim.displayLabel = label }
             if remember {
@@ -354,6 +356,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             if !fromAgent { NSAlert(error: error).beginSheetModal(for: window) }
             return nil
         }
+    }
+
+    /// The sample app Greenroom ships (apksim's test app, Material 3 Expressive) is shown dark by default, as its
+    /// screenshots are: a launch that names an appearance keeps it, and every other APK follows its own default.
+    static func sampleOptions(for apk: URL, _ options: [String]) -> [String] {
+        let sample = Engine.shared.root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
+        guard apk.standardizedFileURL.path == sample.standardizedFileURL.path else { return options }
+        if options.contains(where: { $0 == "--appearance" || $0.hasPrefix("--appearance=") }) { return options }
+        return ["--appearance", "dark"] + options
     }
 
     /// The app crashed because one of its native libraries is 4 KB aligned with writable data on a code page, which

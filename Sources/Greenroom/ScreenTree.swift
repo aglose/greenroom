@@ -132,8 +132,10 @@ final class ScreenTree {
             for n in changed {
                 out.append(n.oldLabel != n.label ? "~ \(n.ref) \(ScreenNode.quote(n.oldLabel)) -> \(ScreenNode.quote(n.label))" : "~ " + n.line)
             }
-            out += removed.filter { !$0.label.isEmpty || $0.click }.map { "- " + $0.line }
+            // What is new before what went: when a whole screen changes, the limit cuts the end, and the screen the
+            // action led to is what the next step needs.
             out += added.filter { !$0.label.isEmpty || $0.click }.map { "+ " + $0.line }
+            out += removed.filter { !$0.label.isEmpty || $0.click }.map { "- " + $0.line }
             if out.count > limit { out = Array(out.prefix(limit)) + ["... \(out.count - limit) more changes: call screen"] }
             return out
         }
