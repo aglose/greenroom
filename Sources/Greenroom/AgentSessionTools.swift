@@ -9,6 +9,11 @@ import AppKit
 
 extension AgentTools {
     static let noSession = "this folder is not a worktree of a repository added to Greenroom: run the agent from a worktree of one"
+    /// The same, with why this call did not add the folder's repository when there is a reason to give.
+    static func noSession(_ connection: Connection) -> String {
+        guard let why = connection.why else { return noSession }
+        return "this folder is not a worktree of a repository added to Greenroom (\(why))"
+    }
 
     // MARK: Plumbing
 
@@ -28,7 +33,7 @@ extension AgentTools {
 
     /// The session this connection is tied to, as the app has it now, with its workspace and git state read again.
     func tied(_ connection: Connection) throws -> (session: Session, workspace: Workspace) {
-        guard let wb = workbench, let old = connection.session else { throw Failure(message: Self.noSession) }
+        guard let wb = workbench, let old = connection.session else { throw Failure(message: Self.noSession(connection)) }
         var found: (Session, Workspace)?
         mainSync {
             let s = wb.sessions.session(atWorktree: old.worktree) ?? old
@@ -97,9 +102,12 @@ extension AgentTools {
         lines.append("launch: skin \(ws.skin.isEmpty ? "none" : ws.skin), options \(ws.launchOptions.isEmpty ? "none" : ws.launchOptions) (launch_settings changes them)")
         let sim = mainSync { wb.sessions.simulator(for: s) }
         lines.append(sim.map { "simulator: \(id($0)) running" } ?? "simulator: none (launch starts it)")
-        if let c = s.claude, let title = c.title { lines.append("claude session: \(ScreenNode.quote(title)) (\(c.status.rawValue))") }
+        if let c = s.agent {
+            lines.append("agent session: \(c.harness ?? c.sourceName)\(c.title.map { " " + ScreenNode.quote($0) } ?? "") (\(c.status.rawValue))")
+        }
         let taking = mainSync { recording.recording(for: s.worktree.path) }
         if let r = taking, r.live { lines.append("recording: your session is being recorded for the person (\(r.file.lastPathComponent))") }
+        lines += reviewLines(s)
         return lines.joined(separator: "\n")
     }
 
@@ -150,6 +158,7 @@ extension AgentTools {
         // The remote recipe uploads source code: only the person's yes, given in Greenroom, lets it run. An agent cannot give it.
         if let refusal = ws.refusal(forRecipe: name) {
             if name == "remote" {
+                mainSync { WorkStore.shared.ask(s.worktree.path, "remote") }   // the session now needs the person (Attention)
                 throw Failure(message: "The remote recipe uploads this repository's source code to the person's own boat.dev account, and they have not allowed it. Ask them to allow it in Greenroom (the row's Build with > remote); an agent cannot give that yes. Meanwhile use another recipe.")
             }
             throw Failure(message: refusal)

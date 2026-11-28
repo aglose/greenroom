@@ -47,6 +47,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
     private let clientSubtitle = NSTextField(wrappingLabelWithString: "")
     private var pauseButton: GlassButton!
     private var copyButton: GlassButton!
+    private var sessionButton: GlassButton!
     private let scope = NSPopUpButton(frame: .zero, pullsDown: false)
     private var shown: [Entry] = []
     typealias Entry = AgentActivity.Entry
@@ -61,11 +62,14 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
 
     /// Called when the close button is clicked.
     var onClose: (() -> Void)?
+    /// Called to go back to the chosen session's own panel.
+    var onSession: (() -> Void)?
     /// Reports a short status message to the window (text, isProblem).
     var onSay: ((String, Bool) -> Void)?
 
-    /// The command that connects Claude Code to this copy of Greenroom.
-    static var setupCommand: String { ClaudeConnect.displayCommand() }
+    /// The command that connects Claude Code to this copy of Greenroom. The Debug copy is never added to every
+    /// project (its repository's .mcp.json registers it), so it gives the plain stdio command.
+    static var setupCommand: String { ClaudeConnect.repositoryOnly ? Harnesses.stdioCommand : ClaudeConnect.displayCommand() }
 
     init(activity: AgentActivity, tools: AgentTools, selected: @escaping () -> (path: String, label: String)? = { nil }) {
         self.activity = activity
@@ -100,7 +104,8 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
         let headerSpacer = NSView()
         headerSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let close = GlassButton(symbol: "xmark", label: "Close Agent panel", target: self, action: #selector(closePressed))
-        let header = NSStackView(views: [title, statusDot, headerSpacer, close])
+        sessionButton = GlassButton(symbol: "arrow.uturn.backward", title: "Session", label: "Back to the chosen session", style: .well, target: self, action: #selector(sessionPressed))
+        let header = NSStackView(views: [title, statusDot, headerSpacer, sessionButton, close])
         header.alignment = .centerY
         header.spacing = 8
 
@@ -280,6 +285,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
 
     func refresh() {
         guard isViewLoaded else { return }
+        sessionButton.isHidden = selected() == nil && tools.workbench?.review.session == nil
 
         if let client = activity.client {
             clientTitle.stringValue = client
@@ -291,7 +297,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
             statusDot.layer?.backgroundColor = (tools.paused ? Design.warning : Design.accent).cgColor
         } else {
             clientTitle.stringValue = "No agent connected"
-            clientSubtitle.stringValue = "Copy the setup command and run it in a terminal to connect Claude Code or another MCP client."
+            clientSubtitle.stringValue = "Connect one in File > Connect Agents…, or copy the setup command for any other MCP client."
             statusCard.layer?.backgroundColor = Design.well.cgColor
             statusCard.layer?.borderColor = Design.stroke.cgColor
             statusDot.layer?.backgroundColor = (tools.paused ? Design.warning : Design.mute.withAlphaComponent(0.45)).cgColor
@@ -356,6 +362,7 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
     // MARK: Actions
 
     @objc private func closePressed() { onClose?() }
+    @objc private func sessionPressed() { onSession?() }
 
     @objc private func toggleRecording() {
         guard let c = selected(), let session = tools.workbench?.sessions.sessions.first(where: { $0.worktree.path == c.path }) else { return }

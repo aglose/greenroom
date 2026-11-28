@@ -9,19 +9,47 @@ import Network
 final class AgentServer {
     static let modern = "2026-07-28"
     static let legacy = ["2025-11-25", "2025-06-18"]
-    static let info: [String: Any] = ["name": "greenroom", "title": "Greenroom", "version": "1"]
+    static let info: [String: Any] = ["name": "greenroom", "title": Variant.name, "version": "1"]
 
     let tools = AgentTools()
     private var listener: NWListener?
     private let token: String
     private let queue = DispatchQueue(label: "greenroom-agent-connections")
-    /// Tool calls run one at a time, off the main thread (they wait for answers delivered there).
-    private let work = DispatchQueue(label: "greenroom-agent-tools")
+    /// Tool calls run off the main thread (they wait for answers delivered there), one at a time in each lane: a
+    /// lane for each simulator, one for each launch's target, and one for each agent's other calls. So an agent
+    /// that waits on one device does not hold up another agent's device, and two calls never act on one simulator
+    /// at once.
+    private var lanes: [String: DispatchQueue] = [:]
+    private let lanesLock = NSLock()
+    /// Finds lanes: resolving a call's simulator asks the main thread, which must not be done on the connection queue.
+    private let router = DispatchQueue(label: "greenroom-agent-router")
+
+    private func lane(_ key: String) -> DispatchQueue {
+        lanesLock.lock(); defer { lanesLock.unlock() }
+        if let q = lanes[key] { return q }
+        let q = DispatchQueue(label: "greenroom-agent-tools." + key)
+        lanes[key] = q
+        return q
+    }
+
+    /// The lane a message runs in.
+    static func laneKey(_ message: [String: Any], hint: (cwd: URL?, parent: Int32?), tools: AgentTools) -> String {
+        let mine = "agent:\(hint.parent.map(String.init) ?? "-")|\(hint.cwd?.path ?? "-")"
+        guard message["method"] as? String == "tools/call", let params = message["params"] as? [String: Any], let name = params["name"] as? String else { return mine }
+        let args = params["arguments"] as? [String: Any] ?? [:]
+        if let sim = args["sim"] as? String, !sim.isEmpty { return "sim:" + sim }
+        if AgentTools.driving.contains(name) || name == "close", let s = try? tools.sim(args) { return "sim:" + tools.id(s) }
+        // A launch waits for its app to start: beside other agents' launches, but one at a time for one target.
+        if name == "launch" { return "launch:" + ((args["apk"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? hint.cwd?.path ?? "-") }
+        return mine
+    }
     /// build and changes wait for minutes: they must not hold up the other tools' answers.
     private let slow = DispatchQueue(label: "greenroom-agent-slow-tools", attributes: .concurrent)
     private(set) var port: UInt16 = 0
     /// Called on the main thread when an agent first talks to the server.
     var onClient: ((String) -> Void)?
+    /// Called on the main thread once the endpoint listens (the waiting stage says so).
+    var onReady: (() -> Void)?
 
     static var file: URL { Engine.shared.state.appendingPathComponent("agent.json") }
 
@@ -41,6 +69,7 @@ final class AgentServer {
             guard let self, case .ready = state, let port = listener.port?.rawValue else { return }
             self.port = port
             self.publish()
+            DispatchQueue.main.async { self.onReady?() }
         }
         listener.start(queue: queue)
         self.listener = listener
@@ -48,6 +77,11 @@ final class AgentServer {
 
     func stop() {
         listener?.cancel()
+        // Only this copy's own word is taken back: another copy on the same state folder may have published since,
+        // and agents reach that one.
+        if let data = try? Data(contentsOf: AgentServer.file),
+           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let pid = json["pid"] as? Int, pid != Int(ProcessInfo.processInfo.processIdentifier) { return }
         try? FileManager.default.removeItem(at: AgentServer.file)
     }
 
@@ -110,15 +144,44 @@ final class AgentServer {
             respond(connection, 200, json: ["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "parse error"]])
             return
         }
+        // `greenroom hook EVENT`: a harness saying where its turn is. A note, not a call: it registers no
+        // connection, adds no repository and gets no answer.
+        if message["method"] as? String == "greenroom/hook" {
+            let params = message["params"] as? [String: Any] ?? [:]
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let event = HookLog.shared.add(params) else { self?.respond(connection, 202, ""); return }
+                // A turn's end, from a hook that can pass an answer on (`answers`): what the person said and the
+                // agent has not been given goes back with it, and the harness carries on with the turn.
+                var say: String?
+                if params["answers"] as? Bool == true, HookSessions.kind(event.event) == .turnEnd,
+                   let s = self.tools.workbench?.sessions.session(containing: event.cwd) {
+                    var parts: [String] = []
+                    if let notice = self.tools.takeNotice(s.worktree.path) { parts.append("From Greenroom: " + notice) }
+                    if let given = WorkStore.shared.deliver(s.worktree.path, via: "turn end") {
+                        parts.append("The person at the Mac answered in Greenroom.\n" + WorkStore.words(given, paths: true).text)
+                    }
+                    if !parts.isEmpty { say = parts.joined(separator: "\n") }
+                }
+                HookSessions.shared.heard(event, continues: say != nil)
+                self.tools.workbench?.agentChanged()
+                if let say { self.respond(connection, 200, json: ["say": say]) } else { self.respond(connection, 202, "") }
+            }
+            return
+        }
         // Hints from a local program that already holds the token: they select a row and grant nothing.
         let hint = AgentServer.hint(headers)
         let isSlow = message["method"] as? String == "tools/call"
             && AgentTools.slow.contains(((message["params"] as? [String: Any])?["name"] as? String) ?? "")
-        (isSlow ? slow : work).async { [weak self] in
+        let run = { [weak self] in
             guard let self else { return }
             let who = message["method"] as? String == "tools/call" ? self.connect(hint) : self.note(hint)
             if let answer = self.dispatch(message, connection: who) { self.respond(connection, 200, json: answer) }
             else { self.respond(connection, 202, "") }   // a notification: nothing to answer
+        }
+        if isSlow { slow.async(execute: run); return }
+        router.async { [weak self] in
+            guard let self else { return }
+            self.lane(AgentServer.laneKey(message, hint: hint, tools: self.tools)).async(execute: run)
         }
     }
 
@@ -163,11 +226,49 @@ final class AgentServer {
             var top: URL?
             Task.detached { top = await Git.toplevel(of: cwd); done.signal() }
             done.wait()
-            if let top { c.session = DispatchQueue.main.sync { tools.workbench?.sessions.session(atWorktree: top) } }
+            if let top {
+                c.session = DispatchQueue.main.sync { tools.workbench?.sessions.session(atWorktree: top) }
+                if c.session == nil { (c.session, c.why) = adopt(top) }
+            }
         }
         let key = "\(hint.parent.map(String.init) ?? "-")|\(hint.cwd?.path ?? "-")"
         knownLock.lock(); known[key] = c; knownLock.unlock()
         return c
+    }
+
+    /// A repository adds itself (AgentAdoption): a call from a worktree no session has adds its repository, when the
+    /// worktree holds an Android app, the person did not remove that repository, and agents are not paused. A new
+    /// worktree of a repository already added is only shown. Answers the session, or why there is none. On the tool
+    /// queue, never the main thread.
+    private func adopt(_ top: URL) -> (Session?, String?) {
+        guard AgentAdoption.enabled, let sessions = DispatchQueue.main.sync(execute: { tools.workbench?.sessions }) else { return (nil, nil) }
+        let done = DispatchSemaphore(value: 0)
+        var found: URL?
+        Task.detached { found = await Git.mainCheckout(of: top)?.resolvingSymlinksInPath(); done.signal() }
+        done.wait()
+        guard let root = found else { return (nil, nil) }
+        let name = root.lastPathComponent
+        let known = DispatchQueue.main.sync { sessions.workspace(at: root) != nil }
+        if !known {
+            if AgentAdoption.isRemoved(root) {
+                return (nil, "\(name) was removed from Greenroom by the person at the Mac: only they can add it back, with File > Add Repository…")
+            }
+            if tools.paused || AgentCheckHooks.pausedByCheck { return (nil, "agents are paused, so \(name) was not added") }
+            // An agent that launches an APK by its path from some other repository adds nothing.
+            guard AndroidProject.isApp(top) else { return (nil, "no Android app was found in \(top.lastPathComponent), so it was not added") }
+        }
+        let task = DispatchQueue.main.sync { sessions.addRepository(top, quietIfExisting: true, byAgent: true) }
+        Task.detached { _ = await task.value; done.signal() }
+        done.wait()
+        // The row is there at once; its branch, commit and build are read from git a moment later. The call that
+        // added it is answered from what was read, not from the empty row (ten seconds at most, for a large one).
+        let end = Date().addingTimeInterval(10)
+        var session = DispatchQueue.main.sync { sessions.session(atWorktree: top) }
+        while session?.head.isEmpty ?? false, Date() < end {
+            Thread.sleep(forTimeInterval: 0.1)
+            session = DispatchQueue.main.sync { sessions.session(atWorktree: top) }
+        }
+        return (session, nil)
     }
 
     private static func same(_ a: String, _ b: String) -> Bool {
@@ -229,6 +330,24 @@ final class AgentServer {
             return result([:])
         case "tools/list":
             return result(["resultType": "complete", "tools": AgentTools.list(), "ttlMs": 3_600_000, "cacheScope": "public"])
+        case "greenroom/open":
+            // `greenroom open`: the window comes forward, on a place a link names. It only navigates (Links).
+            guard let workbench = tools.workbench else { return failure(-32603, "Greenroom is not ready") }
+            var link: URL?
+            if let raw = params["link"] as? String, !raw.isEmpty {
+                guard let url = URL(string: raw), Links.handles(url) else {
+                    return result(["resultType": "complete", "isError": true, "content": [["type": "text", "text": "\(raw) is not a \(Links.scheme):// link"]]])
+                }
+                link = url
+            } else if params["session"] as? Bool == true, let s = connection.session {
+                link = URL(string: Links.session(s.worktree))   // `greenroom open DIR`: the session of the folder it names
+            }
+            let (said, ok) = DispatchQueue.main.sync { () -> (String, Bool) in
+                let answer = link.map { Links.open($0, in: workbench) } ?? ("Greenroom's window", true)
+                Links.bringForward(workbench)
+                return answer
+            }
+            return result(["resultType": "complete", "isError": !ok, "content": [["type": "text", "text": said]]])
         case "tools/call":
             guard let name = params["name"] as? String else { return failure(-32602, "name is required") }
             if let a = params["arguments"], !(a is [String: Any]), !(a is NSNull) { return failure(-32602, "arguments must be an object") }
@@ -249,11 +368,13 @@ final class AgentServer {
 
 /// `Greenroom --mcp`: what an agent runs. Speaks the protocol on stdin and stdout (one JSON message a line) and
 /// passes each message to the running app, starting Greenroom first if it is not open. It holds no state: the
-/// simulators belong to the app, where the person can see them.
+/// simulators belong to the app, where the person can see them. The `greenroom` command (CLI) reaches the app the
+/// same way.
 enum AgentShim {
-    private struct Endpoint { let port: Int; let token: String; let pid: Int32 }
+    struct Endpoint { let port: Int; let token: String; let pid: Int32 }
 
-    private static func endpoint() -> Endpoint? {
+    /// The running app's endpoint, if an app is running.
+    static func endpoint() -> Endpoint? {
         guard let data = try? Data(contentsOf: AgentServer.file),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let port = json["port"] as? Int, let token = json["token"] as? String, let pid = json["pid"] as? Int,
@@ -261,9 +382,18 @@ enum AgentShim {
         return Endpoint(port: port, token: token, pid: Int32(pid))
     }
 
-    /// The running app's endpoint, starting the app (in the background) when there is none.
-    private static func connect() -> Endpoint? {
+    /// The running app's endpoint, starting the app (in the background) when there is none. Not under a check: a
+    /// check starts the copy it tests itself, in its own state folder, and an app started here would be an ordinary
+    /// one on the person's real state folder, left running after the check. It waits for the check's copy instead.
+    static func connect() -> Endpoint? {
         if let e = endpoint() { return e }
+        if Engine.agentCheck {
+            for _ in 0..<150 {
+                Thread.sleep(forTimeInterval: 0.1)
+                if let e = endpoint() { return e }
+            }
+            return nil
+        }
         let p = Process()
         let bundle = Bundle.main.bundleURL
         if bundle.pathExtension == "app" {
@@ -283,11 +413,23 @@ enum AgentShim {
         return nil
     }
 
-    private static func post(_ body: Data, to e: Endpoint, cwdOverride: String? = nil) -> (status: Int, data: Data)? {
+    /// How long the app is given to answer a message: five minutes, or longer for a call that says it waits
+    /// longer (`review` waits up to half an hour), with a minute to spare.
+    static func timeout(for message: [String: Any]?) -> TimeInterval {
+        guard let params = message?["params"] as? [String: Any], let args = params["arguments"] as? [String: Any],
+              let wait = args["timeout_s"] as? Int else { return 300 }
+        return max(300, TimeInterval(min(max(wait, 0), 1800) + 60))
+    }
+
+    /// Whether the app at this endpoint is the one that is still running: then a call it did not answer in time is
+    /// not sent again (it may have done it).
+    static func stillRunning(_ e: Endpoint) -> Bool { endpoint()?.pid == e.pid }
+
+    static func post(_ body: Data, to e: Endpoint, cwdOverride: String? = nil, timeout: TimeInterval = 300) -> (status: Int, data: Data)? {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(e.port)/mcp")!)
         request.httpMethod = "POST"
         request.httpBody = body
-        request.timeoutInterval = 300
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(e.token)", forHTTPHeaderField: "Authorization")
         // Where the agent works and who started this shim: the app ties the connection to a worktree's session.
@@ -301,7 +443,7 @@ enum AgentShim {
         let done = DispatchSemaphore(value: 0)
         var out: (Int, Data)?
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForResource = 300
+        config.timeoutIntervalForResource = timeout
         config.connectionProxyDictionary = [:]   // loopback only: never through a proxy
         URLSession(configuration: config).dataTask(with: request) { data, response, _ in
             if let http = response as? HTTPURLResponse { out = (http.statusCode, data ?? Data()) }
@@ -386,18 +528,24 @@ enum AgentShim {
             let id = message?["id"]
             let wantsAnswer = message?["method"] != nil && id != nil && !(id is NSNull)
             var answer: Data?
+            let timeout = timeout(for: message)
+            var unanswered = false
             for attempt in 0..<2 {
                 guard let e = connect() else { break }
-                if let r = post(body, to: e) {
+                if let r = post(body, to: e, timeout: timeout) {
                     if r.status == 200 { answer = r.data }
                     if r.status == 200 || r.status == 202 { break }
+                } else if stillRunning(e) {
+                    unanswered = true   // it is running and did not answer in time: sending it again could do it twice
+                    break
                 }
                 if attempt == 0 { Thread.sleep(forTimeInterval: 0.5) }   // the app may have just quit: look again
             }
             if message == nil, answer == nil {
                 answer = Data(#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}"#.utf8)
             } else if wantsAnswer, answer == nil {
-                let failure: [String: Any] = ["jsonrpc": "2.0", "id": id!, "error": ["code": -32603, "message": "Greenroom is not running and could not be started"]]
+                let why = unanswered ? "Greenroom is running but did not answer within \(Int(timeout)) s" : "Greenroom is not running and could not be started"
+                let failure: [String: Any] = ["jsonrpc": "2.0", "id": id!, "error": ["code": -32603, "message": why]]
                 answer = try? JSONSerialization.data(withJSONObject: failure)
             }
             if let answer, wantsAnswer || message == nil {

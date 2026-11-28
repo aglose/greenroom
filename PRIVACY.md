@@ -61,9 +61,67 @@ calls (`agent-*.mp4` and `steps.jsonl`), kept on this Mac under that build's evi
 The list holds only the shape of each call: the tool, how many characters were typed, a link without its query,
 the name of a setting without its value, the length of a text tapped or awaited; not the text itself. The video is
 the screen, so it shows what was on screen. Nothing is sent anywhere. It can be turned off for each repository in
-the Agent popover, which ends a running recording at once; a paused agent is not recorded. "Connect Claude Code"
-(Settings) runs `claude mcp add` with your own `claude` program, which changes Claude Code's own list of servers on
-this Mac and nothing else.
+the Agent popover, which ends a running recording at once; a paused agent is not recorded. The Connect screen
+(first run, File > Connect Agents…, Settings > Agents, and once at launch when nothing is running, so the window
+can say which agents are connected) looks for the agent programs on this Mac: it asks your login
+shell for its PATH, looks for their applications, and asks each one found whether it has a `greenroom` server
+(`claude mcp get`, `claude plugin list`, `codex mcp get`; for Cursor it reads `~/.cursor/mcp.json`, of which it
+uses only the `greenroom` entry). Connecting runs `claude mcp add` or `codex mcp add` with your own program, which
+changes that program's own list of servers on this Mac, or adds the `greenroom` entry to `~/.cursor/mcp.json` and
+leaves the rest of that file's contents as they were. The command or the change is shown before it happens, and
+nothing is connected until you press the button. None of it is sent anywhere.
+
+Connecting also writes a skill, a text file that teaches the agent Greenroom's loop: `~/.agents/skills/greenroom/SKILL.md`
+for Codex and Cursor, `~/.claude/skills/greenroom/SKILL.md` for Claude Code when it is connected without the
+plugin. It is the text in `plugin/skills/verify/SKILL.md` and holds nothing about you or your apps. Its last line
+says Greenroom wrote it; Greenroom rewrites and removes only files with that line, keeps one it wrote up to date
+when it looks, and removes it when you disconnect the last harness that asked for it. "The greenroom command" on
+the same screen makes one symbolic link, in a folder on your PATH, to a script inside the app; the line it runs is
+shown first, and the same row removes it.
+
+The `greenroom` command talks to the running app over the same connection as an agent, and to nothing else. A
+harness's hook that runs `greenroom hook` tells the app four things: the harness's name, its session id, the
+working folder and the event's name. It does not read the transcript, the prompt or a tool's input, the app keeps
+the newest 200 in memory only (never in a file), and none of it is sent anywhere. Cursor also writes your
+account's address to a hook; Greenroom does not read it.
+
+Connecting a harness adds those hooks, so Greenroom can show whether its session is working, waiting for you or
+finished: to `~/.codex/hooks.json` for Codex, `~/.cursor/hooks.json` for Cursor, and `~/.claude/settings.json` for
+Claude Code when it is connected without the plugin (the plugin carries its own). Only the `hooks` part of the
+file is changed, the hooks you already have are kept, and disconnecting takes Greenroom's out again. The file and
+the line each hook runs are shown on the Connect screen. Codex asks you to trust a new hook before it runs.
+
+The sidebar files each session by what it needs from you. For that Greenroom keeps, in its state folder on this
+Mac (`work/`, a small file a session), the first line of each `check` an agent ran ("PASS | MainActivity"), when it
+ran and on which build, and when the agent's turn last ended. The same file holds what an agent declared with
+`spec` (the task's title, text and criteria, and how each check of them went), the summary it gave when it asked
+for your review, your answer, and the comments you wrote for it; a comment pinned to the screen has a small picture
+of that part of the screen beside the file. Your answer and your comments go to the agent that works in that
+session, over the connection it already has, and nowhere else: with the answer to its `review` call, at the end of
+its next tool call's answer, or, where its harness's hook can carry it, when its turn ends (then the hook Greenroom
+installed prints your words for the harness to continue with). Removing the session removes the file and the
+pictures. Merge runs `gh pr merge` as the GitHub account you signed `gh` in with, only when you press it and say
+yes. For a session whose commit is pushed, Greenroom asks GitHub for that commit's CI runs through `gh` (`gh run
+list --commit`, your sign-in, every half minute while a run goes and for half an hour at most while none shows),
+and for a repository that builds its APKs on CI it fetches the APK as the `ci` recipe does. It only reads, and
+never starts a workflow. Settings > Agents > "Watch CI for pushed sessions" turns it off. If you say yes (first run's last step, or Settings >
+Agents), Greenroom posts a notification on this Mac when a session becomes ready for review or comes to need you
+while Greenroom is not in front: its text is the session's title, the count of its checks and the repository's
+name. It is macOS's own notification, off until you turn it on, and nothing about it leaves this Mac.
+
+A `greenroom://` link (which macOS hands to Greenroom from a browser, a chat or a terminal) only shows a place
+in the window. It cannot add a repository, run an APK or change a setting.
+
+## Repositories an agent brings
+
+When an agent you connected calls Greenroom from a folder, Greenroom runs `git` in that folder (read-only) to find
+its repository, as it always has. New: if the folder is a worktree with an Android app in it and its repository is
+not in Sessions, Greenroom adds it, says so in the window and offers Undo. Adding looks through the repository's
+folders for Gradle build files and built APKs, on this Mac, and nothing else: a repository an agent added does not
+fetch its base branch, ask GitHub for a build or run a recipe until the agent or you ask for a build, or you turn
+"Keep main built" on for it. A repository you removed from Sessions is not added again by an agent, and none is added
+while agents are paused. The list of removed repositories is a file in the state folder (`sessions/removed.json`,
+folder paths only).
 
 ## Build recipes
 

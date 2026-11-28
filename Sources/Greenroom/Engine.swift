@@ -5,7 +5,8 @@ import Foundation
 final class Engine {
     static let shared = Engine()
     /// Launched by scripts/mcp-check.py: its GREENROOM_STATE, GREENROOM_ADD_REPOSITORY and GREENROOM_CHECK_FEEDS count.
-    static let agentCheck = CommandLine.arguments.contains("--agent-check")
+    /// (What follows `--cli` is the `greenroom` command's own line: a text typed there is not a flag of ours.)
+    static let agentCheck = CommandLine.arguments.prefix { $0 != "--cli" }.contains("--agent-check")
 
     /// The engine's folder: `Contents/Resources/engine` in the app, or `GREENROOM_ENGINE` for a development run.
     let root: URL

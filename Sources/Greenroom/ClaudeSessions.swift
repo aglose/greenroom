@@ -6,8 +6,8 @@ import CoreServices
 // Settings is on. They are not an interface Claude Code promises: every field is optional here, a file that does not
 // parse is skipped without a word, and when nothing parses the rows stay plain worktree rows with one line saying so.
 
-/// A pull request a Claude Code session opened, with its state when the desktop app recorded one.
-struct ClaudePR: Equatable {
+/// A pull request an agent's session opened, with its state when the desktop app recorded one.
+struct AgentPR: Equatable {
     enum State: String { case open = "OPEN", merged = "MERGED", closed = "CLOSED" }
     var url: URL
     var state: State?
@@ -16,8 +16,8 @@ struct ClaudePR: Equatable {
     var number: Int? { Int(url.lastPathComponent) }
 }
 
-/// What is known of one Claude Code session.
-struct ClaudeSession: Equatable {
+/// What is known of one agent's session: read from Claude Code's files, from T3 Code, or heard from a harness's hooks.
+struct AgentSession: Equatable {
     enum Status: String { case working, idle, waiting }
 
     /// The session's working folder (symlinks resolved): a worktree, or a main checkout.
@@ -29,16 +29,21 @@ struct ClaudeSession: Equatable {
     var branch: String?
     var pullRequests: [URL] = []
     /// The same pull requests with their state and branch (the desktop app's files have them; a transcript's do not).
-    var prs: [ClaudePR] = []
+    var prs: [AgentPR] = []
     var lastActivity: Date?
     /// Whether the process of a `~/.claude/sessions/<pid>.json` file is still there.
     var running = false
     var archived = false
-    /// Who keeps it: a Claude Code session, or a T3 Code thread (T3Sessions.swift) shown the same way.
-    enum Source: String { case claude, t3 }
+    /// Where it is known from: Claude Code's files, a T3 Code thread (T3Sessions.swift), or a harness's hooks
+    /// (HookSessions.swift), all shown the same way.
+    enum Source: String { case claude, t3, hook }
     var source: Source = .claude
-    /// The T3 Code thread's id (nil for Claude Code's sessions).
+    /// The T3 Code thread's id, or the id a harness's hooks gave (nil for sessions read from Claude Code's files).
     var id: String?
+    /// The harness, for a session known from hooks ("Codex", "Cursor", "Claude Code").
+    var harness: String? = nil
+    /// Every id Claude Code's files give the session: a hook's session id is matched against them.
+    var ids: Set<String> = []
     /// Whether a T3 Code thread has been settled (finished and put aside).
     var settled = false
     /// Model name when known (e.g. from T3 Code).
@@ -54,14 +59,22 @@ struct ClaudeSession: Equatable {
 
     var pullRequest: URL? { pullRequests.first }
     /// Human-readable source name.
-    var sourceName: String { source == .t3 ? "T3 Code" : "Claude" }
+    var sourceName: String {
+        switch source {
+        case .t3: return "T3 Code"
+        case .claude: return "Claude Code"
+        case .hook: return harness ?? "Agent"
+        }
+    }
+    /// The app "Open in ..." names: Claude's desktop app for Claude Code's sessions, else the harness itself.
+    var appName: String { source == .claude || harness == "Claude Code" ? "Claude" : sourceName }
     /// Short readable model badge (trims verbose prefixes if present).
     var shortModel: String? {
         guard let m = model, !m.isEmpty else { return nil }
         return m.replacingOccurrences(of: "claude-", with: "")
     }
     /// What a row shows: the same session without the time of its last activity, which moves with every write.
-    var shown: ClaudeSession { var c = self; c.lastActivity = nil; return c }
+    var shown: AgentSession { var c = self; c.lastActivity = nil; return c }
 }
 
 /// Where the three sources are. Injectable, so a check can point the reader at fixtures.
@@ -91,10 +104,10 @@ struct ClaudeOffer: Equatable {
 
 // MARK: Reader
 
-/// Reads the three sources into `ClaudeSession` values. Pure of UI; safe on any queue.
+/// Reads the three sources into `AgentSession` values. Pure of UI; safe on any queue.
 enum ClaudeReader {
     struct Result {
-        var sessions: [ClaudeSession] = []
+        var sessions: [AgentSession] = []
         /// Files looked at, and how many of them gave a session: when the first is above zero and the second is not,
         /// Claude Code's files have changed shape.
         var seen = 0
@@ -122,7 +135,7 @@ enum ClaudeReader {
         var procStart: Date?
         var branch: String?
         var prs: [URL] = []
-        var prInfo: [URL: (state: ClaudePR.State?, branch: String?)] = [:]
+        var prInfo: [URL: (state: AgentPR.State?, branch: String?)] = [:]
         var date: Date?
         var archived = false
         var fromDesktop = false
@@ -198,7 +211,7 @@ enum ClaudeReader {
     }
 
     /// Records that share an id (the CLI's session id, the desktop app's) are one session.
-    private static func join(_ records: [Record]) -> [ClaudeSession] {
+    private static func join(_ records: [Record]) -> [AgentSession] {
         var groups: [Record] = []
         for r in records {
             if let i = groups.firstIndex(where: { !$0.ids.isDisjoint(with: r.ids) }) {
@@ -216,13 +229,13 @@ enum ClaudeReader {
         func res(_ p: String) -> URL { if let u = resolved[p] { return u }; let u = resolve(p); resolved[p] = u; return u }
         return groups.compactMap { g in
             guard let folder = g.folder else { return nil }
-            var status = ClaudeSession.Status.idle
+            var status = AgentSession.Status.idle
             if g.alive && g.busy { status = .working }
             if g.waiting && !g.archived { status = .waiting }
-            let prs = g.prs.map { ClaudePR(url: $0, state: g.prInfo[$0]?.state, branch: g.prInfo[$0]?.branch) }
-            return ClaudeSession(folder: res(folder), repository: g.repository.map(res), title: g.title ?? g.pidName, status: status,
+            let prs = g.prs.map { AgentPR(url: $0, state: g.prInfo[$0]?.state, branch: g.prInfo[$0]?.branch) }
+            return AgentSession(folder: res(folder), repository: g.repository.map(res), title: g.title ?? g.pidName, status: status,
                                  branch: g.branch, pullRequests: g.prs, prs: prs, lastActivity: g.date, running: g.alive, archived: g.archived,
-                                 summary: g.summary)
+                                 ids: g.ids, summary: g.summary)
         }
     }
 
@@ -391,7 +404,7 @@ extension ClaudeReader.Record {
                 guard let u = ClaudeReader.url(item) else { continue }
                 if !prs.contains(u) { prs.append(u) }
                 let d = item as? [String: Any]
-                prInfo[u] = (ClaudeReader.string(d?["state"]).flatMap { ClaudePR.State(rawValue: $0.uppercased()) }, ClaudeReader.string(d?["branch"]))
+                prInfo[u] = (ClaudeReader.string(d?["state"]).flatMap { AgentPR.State(rawValue: $0.uppercased()) }, ClaudeReader.string(d?["branch"]))
             }
         }
         fromDesktop = true
@@ -457,7 +470,7 @@ final class ClaudeSessions {
     }
 
     /// Every session read at the last refresh (none with the switch off).
-    private(set) var sessions: [ClaudeSession] = []
+    private(set) var sessions: [AgentSession] = []
     /// One line for the sidebar when files were found and none could be read; nil otherwise.
     private(set) var note: String?
     private(set) var offers: [ClaudeOffer] = []
@@ -522,27 +535,28 @@ final class ClaudeSessions {
     /// Whether a read is under way (a check waits for none before it counts opened files).
     var isScanning: Bool { lock.lock(); defer { lock.unlock() }; return scans > 0 }
 
-    /// Gives each row its Claude session (nil with the switch off), carrying the pull requests of every session of
+    /// Gives each row its agent's session (nil when none is known), carrying the pull requests of every session of
     /// that worktree. Each path is resolved once and sessions are matched on strings: with hundreds of sessions and
     /// a dozen worktrees, resolving inside the match ran to hundreds of thousands of file system calls on the main
     /// thread at every write Claude Code made.
     func attach(_ rows: [Session]) -> [Session] {
-        let pool = (enabled ? sessions : []) + T3Sessions.shared.sessions   // T3 Code's threads, when its switch is on
+        // Claude Code's files and T3 Code's threads, each behind its switch, then what the harnesses' hooks say.
+        let pool = HookSessions.shared.joined(with: (enabled ? sessions : []) + T3Sessions.shared.sessions)
         guard !pool.isEmpty else {
-            return rows.map { var r = $0; r.claude = nil; r.agentSessions = []; return r }
+            return rows.map { var r = $0; r.agent = nil; r.agentSessions = []; return r }
         }
         let paths = rows.map { $0.worktree.resolvingSymlinksInPath().path }
-        var byOwner: [String: [ClaudeSession]] = [:]
+        var byOwner: [String: [AgentSession]] = [:]
         for s in pool {   // `folder` was resolved when read
             if let o = Self.owner(path: s.folder.path, among: paths) { byOwner[o, default: []].append(s) }
         }
         return zip(rows, paths).map { row, path in
             var r = row
-            guard let mine = byOwner[path], !mine.isEmpty else { r.claude = nil; r.agentSessions = []; return r }
+            guard let mine = byOwner[path], !mine.isEmpty else { r.agent = nil; r.agentSessions = []; return r }
             let sorted = mine.sorted { Self.rank($0) > Self.rank($1) }
             var best = sorted[0]
             for s in sorted { for pr in s.prs where !best.prs.contains(where: { $0.url == pr.url }) { best.prs.append(pr) } }
-            r.claude = best
+            r.agent = best
             r.agentSessions = sorted
             return r
         }
@@ -566,13 +580,13 @@ final class ClaudeSessions {
 
     /// The best session of a worktree: not archived over archived, running over not, then the most recent. `among`
     /// is every worktree of the rows, so a session started in a subfolder finds its worktree.
-    static func best(for worktree: URL, among all: [URL] = [], in list: [ClaudeSession]) -> ClaudeSession? {
+    static func best(for worktree: URL, among all: [URL] = [], in list: [AgentSession]) -> AgentSession? {
         let path = worktree.resolvingSymlinksInPath().path
         let paths = (all + [worktree]).map { $0.resolvingSymlinksInPath().path }
         return list.filter { owner(path: $0.folder.path, among: paths) == path }.max { rank($0) < rank($1) }
     }
 
-    fileprivate static func rank(_ s: ClaudeSession) -> (Int, Int, Int, Date) {
+    fileprivate static func rank(_ s: AgentSession) -> (Int, Int, Int, Date) {
         let liveTier = s.status == .waiting ? 3 : (s.running && s.status == .working ? 2 : (s.running ? 1 : 0))
         return (s.archived ? 0 : 1, s.settled ? 0 : 1, liveTier, s.lastActivity ?? .distantPast)
     }
@@ -668,16 +682,40 @@ final class ClaudeSessions {
     /// The main checkouts of the workspaces added; set by the sessions controller. Offers leave these out.
     var workspaceRoots: () -> [URL] = { [] }
 
-    // MARK: Open in Claude
+    // MARK: Opening a session's app
 
-    /// Brings Claude up. SS1 (docs/SESSIONS-PLAN.md, spikes): if the desktop app has a `claude://` link that opens a
+    /// Brings Claude's desktop app up. SS1 (docs/SESSIONS-PLAN.md, spikes): if it has a `claude://` link that opens a
     /// given session, build it from `session` here; until the format is known this only activates the app.
     @discardableResult
-    static func openInClaude(_ session: ClaudeSession?) -> Bool {
+    static func openInClaude(_ session: AgentSession?) -> Bool {
         let ws = NSWorkspace.shared
         guard let app = ws.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") else { return false }
         ws.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
         return true
+    }
+
+    /// Brings up the app AGENT's session is in: T3 Code on the worktree's thread, Claude's desktop app, or the
+    /// harness's own app when it has one (Cursor on the worktree's folder). `failed` gets what to say when there is
+    /// nothing to open: a harness in a terminal has no window Greenroom can find.
+    static func open(_ agent: AgentSession?, in worktree: URL, failed: @escaping (String) -> Void) {
+        switch agent?.source {
+        case .t3?:
+            T3Sessions.open(worktree) { why in
+                guard let why else { return }
+                if let link = agent?.link { NSWorkspace.shared.open(link) } else { failed(why) }
+            }
+        case .hook? where agent?.harness != "Claude Code":
+            let name = agent?.harness ?? "The agent"
+            if name == "Cursor", let app = Harnesses.app("Cursor.app") {
+                NSWorkspace.shared.open([worktree], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+            } else if name == "Codex", let app = Harnesses.app("Codex.app") {
+                NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
+            } else {
+                failed("\(name) has no app here that Greenroom can open: look in the terminal it runs in")
+            }
+        default:
+            if !openInClaude(agent) { failed("The Claude desktop app is not installed on this Mac") }
+        }
     }
 }
 
@@ -686,14 +724,14 @@ final class ClaudeSessions {
 enum ClaudeUI {
     /// The status dot of a row: green working, grey idle, orange waiting for you; nothing for a session that is
     /// archived or not running (a finished one is not shown as live).
-    static func dot(for c: ClaudeSession?) -> NSView? {
+    static func dot(for c: AgentSession?) -> NSView? {
         guard let c else { return nil }
         let (symbol, tint, label): (String, NSColor, String)
-        if c.archived { (symbol, tint, label) = ("circle.dotted", .tertiaryLabelColor, "Claude session archived") }
-        else if c.status == .waiting { (symbol, tint, label) = ("exclamationmark.circle.fill", .systemOrange, "Claude is waiting for you") }
-        else if c.running && c.status == .working { (symbol, tint, label) = ("circle.fill", .systemGreen, "Claude is working") }
-        else if c.running { (symbol, tint, label) = ("circle.fill", .secondaryLabelColor, "Claude is idle") }
-        else { (symbol, tint, label) = ("circle", .tertiaryLabelColor, "Claude session finished") }
+        if c.archived { (symbol, tint, label) = ("circle.dotted", .tertiaryLabelColor, "\(c.sourceName) session archived") }
+        else if c.status == .waiting { (symbol, tint, label) = ("exclamationmark.circle.fill", .systemOrange, "\(c.sourceName) is waiting for you") }
+        else if c.running && c.status == .working { (symbol, tint, label) = ("circle.fill", .systemGreen, "\(c.sourceName) is working") }
+        else if c.running { (symbol, tint, label) = ("circle.fill", .secondaryLabelColor, "\(c.sourceName) is idle") }
+        else { (symbol, tint, label) = ("circle", .tertiaryLabelColor, "\(c.sourceName) session finished") }
         let v = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage())
         v.contentTintColor = tint
         v.toolTip = label
@@ -756,7 +794,7 @@ enum ClaudeUI {
         repoName.lineBreakMode = .byTruncatingTail
         repoName.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let countPill = NSTextField(labelWithString: "\(offer.count) Claude session\(offer.count == 1 ? "" : "s")")
+        let countPill = NSTextField(labelWithString: "\(offer.count) Claude Code session\(offer.count == 1 ? "" : "s")")
         countPill.font = .systemFont(ofSize: 10, weight: .medium)
         countPill.textColor = Design.mute
         countPill.setContentHuggingPriority(.required, for: .horizontal)
@@ -782,7 +820,7 @@ enum ClaudeUI {
         stack.alignment = .centerY
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
-        stack.toolTip = "\(offer.count) Claude session\(offer.count == 1 ? "" : "s") found in \((offer.repository.path as NSString).abbreviatingWithTildeInPath). Click to add."
+        stack.toolTip = "\(offer.count) Claude Code session\(offer.count == 1 ? "" : "s") found in \((offer.repository.path as NSString).abbreviatingWithTildeInPath). Click to add."
         return stack
     }
 }

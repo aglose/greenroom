@@ -99,7 +99,7 @@ extension AgentTools {
         return n
     }
 
-    private static let appSettingKeys = "sessions_warm, auto_archive, jobs_at_once, evidence_cap_gb, build_timeout_minutes, reopen_last, app_icon, update_checks"
+    private static let appSettingKeys = "sessions_warm, complete_on_merge, jobs_at_once, evidence_cap_gb, build_timeout_minutes, reopen_last, app_icon, update_checks"
 
     /// Main thread.
     private func appSettings() -> [AppSetting] {
@@ -109,9 +109,9 @@ extension AgentTools {
             AppSetting(key: "sessions_warm", about: "session simulators kept running at once (1-6)",
                        get: { String(sessions?.warmLimit ?? 3) },
                        set: { sessions?.warmLimit = Int(try Self.number($0, 1...6)) }),
-            AppSetting(key: "auto_archive", about: "archive a session once its pull request is merged",
-                       get: { (sessions?.autoArchiveEnabled ?? true) ? "on" : "off" },
-                       set: { sessions?.autoArchiveEnabled = try Self.flag($0) }),
+            AppSetting(key: "complete_on_merge", about: "move a session to Completed, at the bottom of the sidebar, once its pull request is merged",
+                       get: { (sessions?.completeOnMerge ?? true) ? "on" : "off" },
+                       set: { sessions?.completeOnMerge = try Self.flag($0) }),
             AppSetting(key: "jobs_at_once", about: "jobs (builds, walks, comparisons) run at once, 0 for no limit",
                        get: { String(JobQueue.shared.limit) },
                        set: { JobQueue.shared.limit = Int(try Self.number($0, 0...16)) }),
@@ -141,6 +141,7 @@ extension AgentTools {
             AppSetting(key: "usage_reports", about: "send usage counts (the owner's choice)", get: { Reports.shared.usage ? "on" : "off" }, set: nil),
             AppSetting(key: "claude_sessions", about: "read Claude Code's session titles (the owner's choice)", get: { ClaudeSessions.shared.enabled ? "on" : "off" }, set: nil),
             AppSetting(key: "t3_sessions", about: "read T3 Code's sessions (the owner's choice)", get: { T3Sessions.shared.enabled ? "on" : "off" }, set: nil),
+            AppSetting(key: "watch_ci", about: "watch CI for sessions whose commit is pushed, and fetch what it built (the owner's choice)", get: { CIWatch.enabled ? "on" : "off" }, set: nil),
             AppSetting(key: "agents_paused", about: "agents' actions are refused (the owner's switch in the Agent popover)", get: { self.paused || AgentCheckHooks.pausedByCheck ? "on" : "off" }, set: nil),
         ]
     }
@@ -166,6 +167,7 @@ extension AgentTools {
                      "state: \(Self.tilde(Engine.shared.state.path))"]
         let (sims, repos) = mainSync { (Engine.shared.simulators.filter(\.isAlive).count, workbench?.sessions.workspaces.count ?? 0) }
         lines.append("\(sims) simulator\(sims == 1 ? "" : "s") running, \(repos) repositor\(repos == 1 ? "y" : "ies") added")
+        lines.append("stage: " + mainSync { workbench?.stageSummary ?? "unknown" })
         lines.append("settings:")
         lines += mainSync { appSettings().map { "  \($0.key) = \($0.get())  (\($0.about)\($0.set == nil ? "; read only" : ""))" } }
         return lines.joined(separator: "\n")
@@ -311,6 +313,9 @@ extension AgentTools {
                     if let sim = c.simulator(for: s) { parts.append("simulator \(id(sim))") }
                     if let n = s.prNumber { parts.append("PR #\(n)\(s.prState.map { " \($0)" } ?? "")") }
                     if let w = walkText(c.evidence.entry(of: s.worktree.path)) { parts.append(w) }
+                    // Where the sidebar files it (Attention), when that is not Quiet.
+                    let attention = c.attention(of: s)
+                    if c.isShown(s), attention.group != .quiet { parts.append(attention.group.title.lowercased() + (attention.line.isEmpty ? "" : ": " + attention.line)) }
                     if !c.isShown(s) { parts.append("hidden") }
                     lines.append(parts.joined(separator: " | ") + (s.worktree.path == ws.root.path ? "" : " | \(Self.tilde(s.worktree.path))"))
                 }
@@ -369,7 +374,12 @@ extension AgentTools {
             let folder = URL(fileURLWithPath: (p as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
             var dir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &dir), dir.boolValue else { throw Failure(message: "\(p) is not a folder") }
-            let task = mainSync { wb.sessions.addRepository(folder, quietIfExisting: true) }
+            // What the person took out of Sessions is theirs to put back.
+            if let known = blocking({ await Git.mainCheckout(of: folder) })?.resolvingSymlinksInPath(), AgentAdoption.isRemoved(known),
+               mainSync({ wb.sessions.workspace(at: known) }) == nil {
+                throw Failure(message: "\(known.lastPathComponent) was removed from Greenroom by the person at the Mac: only they can add it back, with File > Add Repository…")
+            }
+            let task = mainSync { wb.sessions.addRepository(folder, quietIfExisting: true, byAgent: true) }
             guard let root = blocking({ await task.value }) else { throw Failure(message: "\(p) is not a git repository Greenroom can add") }
             return "added \(root.lastPathComponent) (\(Self.tilde(root.path))): its worktrees are sessions; sessions lists them"
         }
@@ -560,9 +570,18 @@ extension AgentTools {
             for ws in wb.sessions.workspaces { lines.append("\(ws.root.lastPathComponent): agents' sessions \(ws.recordAgent ? "recorded" : "not recorded")") }
             let entries = wb.agentActivity.entries(session: connection.session?.worktree.path, all: all).suffix(limit)
             if entries.isEmpty { lines.append("no calls yet") }
-            for e in entries {
-                lines.append("\(f.string(from: e.time)) \(e.tool)\(e.failed ? " FAILED" : "") | \(e.summary.split(separator: "\n").first ?? "")" + (all ? (e.label.map { " | \($0)" } ?? "") : ""))
+            var timed: [(Date, String)] = entries.map { e in
+                (e.time, "\(f.string(from: e.time)) \(e.tool)\(e.failed ? " FAILED" : "") | \(e.summary.split(separator: "\n").first ?? "")" + (all ? (e.label.map { " | \($0)" } ?? "") : ""))
             }
+            // What harnesses' hooks said (`greenroom hook`): this worktree's, or everyone's. In with the calls, by time.
+            let mine = connection.session?.worktree.resolvingSymlinksInPath().path
+            let hooks = HookLog.shared.events.filter { e in
+                guard !all, let mine else { return true }
+                let at = e.cwd.resolvingSymlinksInPath().path
+                return at == mine || at.hasPrefix(mine + "/")
+            }.suffix(limit)
+            timed += hooks.map { e in (e.time, "\(f.string(from: e.time)) hook \(e.harness) \(e.event) | \(e.cwd.lastPathComponent)") }
+            lines += timed.enumerated().sorted { ($0.element.0, $0.offset) < ($1.element.0, $1.offset) }.suffix(limit).map(\.element.1)
             return lines.joined(separator: "\n")
         }
     }

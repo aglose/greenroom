@@ -1,10 +1,13 @@
 import AppKit
-import SwiftUI
 
-// "Connect Claude Code" (docs/SESSIONS-PLAN.md, "5. The Claude Code link"): Settings > Claude Code shows the command
-// that registers this copy of Greenroom as an MCP server of Claude Code, runs it on a click through the person's
-// own login-shell PATH, and says when it is already connected. Nothing here edits Claude Code's files: only the
-// person's own `claude` program does, as it would if they typed the command.
+// Claude Code's connector (docs/AGENT-FIRST-SPEC.md, "Installing, per harness"): the Connect screen shows the
+// command that registers this copy of Greenroom as an MCP server of Claude Code, runs it through the person's own
+// login-shell PATH, and says when it is already connected, as an MCP entry or through the plugin. Nothing here
+// edits Claude Code's files: only the person's own `claude` program does, as it would if they typed the command.
+//
+// The Debug copy is for developing Greenroom itself, so it is never registered for every project: the Greenroom
+// repository's own `.mcp.json` registers it, for agents working in that repository and its worktrees. Here the
+// Debug copy only looks for an entry at user scope left by an earlier build, and removes it when asked.
 
 enum ClaudeConnect {
     /// The name the server is registered under: the debug copy has its own (`greenroom-debug`), so connecting it never
@@ -21,6 +24,13 @@ enum ClaudeConnect {
     static let removeArguments = ["mcp", "remove", "--scope", "user", serverName]
     static let getArguments = ["mcp", "get", serverName]
     static let listArguments = ["mcp", "list"]
+    static let pluginListArguments = ["plugin", "list"]
+
+    /// The Debug copy: reachable from the Greenroom repository alone, through its `.mcp.json`. Never added at user scope.
+    static var repositoryOnly: Bool { repositoryOnlyOverride ?? Variant.isDebug }
+    /// For a check: this copy behaves as the Debug copy does (or does not).
+    static var repositoryOnlyOverride: Bool?
+    static let repositoryOnlyMessage = "Greenroom Debug is not added to every project. The Greenroom repository registers it in its .mcp.json, so agents working in that repository or one of its worktrees have it, and no others."
 
     /// This copy's program: what `claude` is told to run for the MCP server.
     static var executable: String { executableOverride ?? Bundle.main.executablePath ?? CommandLine.arguments[0] }
@@ -45,6 +55,38 @@ enum ClaudeConnect {
     // to the manifests.
     static let pluginMarketplaceCommand = "/plugin marketplace add aglose/greenroom"
     static let pluginInstallCommand = "/plugin install greenroom@greenroom"
+    /// The plugin as `claude plugin list` names it.
+    static let pluginID = "greenroom@greenroom"
+
+    /// Whether Claude Code has the Greenroom plugin, enabled: `claude plugin list` names it and its block says
+    /// enabled. The plugin's script starts the installed release app, so the Debug copy never counts it. Off the main thread.
+    static func pluginInstalled() -> Bool {
+        guard !repositoryOnly, let (exe, env) = find() else { return false }
+        let r = run(exe, pluginListArguments, env: env)
+        guard r.status == 0 else { return false }
+        var mine = false
+        for line in r.output.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { mine = false; continue }
+            if t.split(separator: " ").contains(where: { $0 == pluginID }) { mine = true; continue }
+            if mine, t.lowercased().hasPrefix("status:") { return t.lowercased().contains("enabled") }
+        }
+        return false
+    }
+
+    /// Whether the installed plugin carries Greenroom's hooks (plugins from before A4 do not): a `hooks/hooks.json`
+    /// in a copy of it in Claude Code's plugin cache (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`).
+    /// That folder is Claude Code's own, so a layout this does not know answers no: Greenroom's hooks then go in
+    /// Claude Code's settings as well, and a session's hooks arrive twice, which changes nothing it shows.
+    static func pluginHasHooks() -> Bool {
+        let fm = FileManager.default
+        let parts = pluginID.split(separator: "@").map(String.init)   // plugin@marketplace
+        guard parts.count == 2 else { return false }
+        let copies = Harnesses.home.appendingPathComponent(".claude/plugins/cache/\(parts[1])/\(parts[0])", isDirectory: true)
+        for version in (try? fm.contentsOfDirectory(at: copies, includingPropertiesForKeys: nil)) ?? []
+        where fm.fileExists(atPath: version.appendingPathComponent("hooks/hooks.json").path) { return true }
+        return false
+    }
 
     // MARK: Running claude
 
@@ -65,6 +107,8 @@ enum ClaudeConnect {
         case disconnected(String)
         case notConnected
         case missing
+        /// The Debug copy: nothing was added (see `repositoryOnly`).
+        case repositoryOnly
         case failed(String)
 
         var message: String {
@@ -75,12 +119,13 @@ enum ClaudeConnect {
             case .disconnected: return "Disconnected: Claude Code no longer lists \(serverName)."
             case .notConnected: return "Not connected: Claude Code has no server called \(serverName)."
             case .missing: return ClaudeConnect.missingMessage
+            case .repositoryOnly: return ClaudeConnect.repositoryOnlyMessage
             case .failed(let why): return why
             }
         }
         var ok: Bool {
             switch self {
-            case .connected, .alreadyConnected, .otherCopy, .disconnected, .notConnected: return true
+            case .connected, .alreadyConnected, .otherCopy, .disconnected, .notConnected, .repositoryOnly: return true
             case .missing, .failed: return false
             }
         }
@@ -93,21 +138,24 @@ enum ClaudeConnect {
     /// How long one `claude` call may take.
     static var timeout: TimeInterval = 60
 
-    private struct Run { var status: Int32; var output: String; var timedOut = false }
+    struct Run { var status: Int32; var output: String; var timedOut = false }
 
     /// The `claude` program on the person's login-shell PATH, nil when there is none. Blocks (the login shell is
     /// asked the first time): never on the main thread.
-    private static func find() -> (exe: String, env: [String: String])? {
+    private static func find() -> (exe: String, env: [String: String])? { find("claude") }
+
+    /// A program on the person's login-shell PATH, with the environment to run it in. The other connectors use it too.
+    static func find(_ program: String) -> (exe: String, env: [String: String])? {
         dispatchPrecondition(condition: .notOnQueue(.main))
         var env = LoginEnvironment.resolve().env
         if let p = pathOverride { env["PATH"] = p }
-        guard let exe = GH.find("claude", in: env["PATH"] ?? "") else { return nil }
+        guard let exe = GH.find(program, in: env["PATH"] ?? "") else { return nil }
         return (exe, env)
     }
 
     /// Runs one `claude` call. Its output goes to a file, not a pipe, so nothing a grandchild holds open can keep this
     /// waiting; at the deadline the process is ended (SIGTERM, then SIGKILL after 2 s) and the call answers.
-    private static func run(_ exe: String, _ args: [String], env: [String: String]) -> Run {
+    static func run(_ exe: String, _ args: [String], env: [String: String]) -> Run {
         dispatchPrecondition(condition: .notOnQueue(.main))
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("greenroom-claude-\(UUID().uuidString.prefix(8)).out")
         FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -140,12 +188,12 @@ enum ClaudeConnect {
         return Run(status: timedOut ? 124 : p.terminationStatus, output: text, timedOut: timedOut)
     }
 
-    private static func lines(_ s: String, _ n: Int = 6) -> String {
+    static func lines(_ s: String, _ n: Int = 6) -> String {
         let all = s.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         return all.suffix(n).joined(separator: "\n")
     }
 
-    private static func same(_ a: String, _ b: String) -> Bool {
+    static func same(_ a: String, _ b: String) -> Bool {
         URL(fileURLWithPath: a).resolvingSymlinksInPath().standardizedFileURL.path == URL(fileURLWithPath: b).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
@@ -206,6 +254,7 @@ enum ClaudeConnect {
     }
 
     static func connect() -> Outcome {
+        if repositoryOnly { return .repositoryOnly }
         switch status() {
         case .missing: return .missing
         case .connected: return .alreadyConnected
@@ -237,6 +286,7 @@ enum ClaudeConnect {
     /// Points an entry that runs another copy at this one: remove, then add. Each step's own words are reported, and
     /// "Connected" only when a `get` afterwards shows this copy.
     static func reconnect() -> Outcome {
+        if repositoryOnly { return .repositoryOnly }
         if translocated { return .failed(translocatedMessage) }
         let off = disconnect()
         switch off {
@@ -261,136 +311,5 @@ enum ClaudeConnect {
         let said = r.output.lowercased()
         if said.contains("no mcp server") || said.contains("not found") { return .notConnected }
         return .failed("claude mcp remove failed (exit \(r.status)):\n" + lines(r.output))
-    }
-}
-
-/// Settings > Agents, "Connect Claude Code": status badge, action button, and copyable MCP or Plugin setup.
-struct ClaudeConnectView: View {
-    var onStatusChange: ((ClaudeConnect.State) -> Void)? = nil
-
-    @State private var state: ClaudeConnect.State?
-    @State private var busy = false
-    @State private var message: String?
-    @State private var failed = false
-    @State private var method = 0   // 0: Direct MCP, 1: Claude Plugin
-
-    private var connected: Bool { state == .connected }
-    private var otherCopy: Bool { if case .otherCopy = state { return true }; return false }
-
-    private var statusColor: Color {
-        if connected { return SettingsTheme.accent }
-        if otherCopy { return SettingsTheme.warning }
-        return SettingsTheme.mute
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 9, height: 9)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Claude Code")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(SettingsTheme.ink)
-                    Text(connected ? "Connected as MCP server \(ClaudeConnect.serverName)" : (otherCopy ? "Connected to another copy of Greenroom" : "Give Claude Code access to these simulators"))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(connected ? SettingsTheme.accent : SettingsTheme.mute)
-                }
-                Spacer()
-                if otherCopy {
-                    actionButton("Reconnect", accent: true) { act { ClaudeConnect.reconnect() } }
-                } else if connected {
-                    actionButton("Disconnect", accent: false) { act { ClaudeConnect.disconnect() } }
-                } else {
-                    actionButton("Connect", accent: true) { act { ClaudeConnect.connect() } }
-                        .disabled(busy || state == .missing)
-                }
-            }
-
-            // Segmented method switcher (Direct MCP vs Plugin)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    HStack(spacing: 2) {
-                        methodTab("Direct MCP", index: 0)
-                        methodTab("Claude Plugin (/verify)", index: 1)
-                    }
-                    .padding(2)
-                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(SettingsTheme.wellFill))
-                    Spacer()
-                    Text("Use one or the other")
-                        .font(.system(size: 11))
-                        .foregroundStyle(SettingsTheme.mute)
-                }
-
-                if method == 0 {
-                    SettingsCopyChip(text: ClaudeConnect.displayCommand())
-                    Text("Runs via your login shell\u{2019}s claude CLI to register only Greenroom\u{2019}s MCP server.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(SettingsTheme.mute)
-                } else {
-                    SettingsCopyChip(text: ClaudeConnect.pluginMarketplaceCommand + "\n" + ClaudeConnect.pluginInstallCommand)
-                    Text("Type inside Claude Code for the same simulators plus the /greenroom:verify skill.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(SettingsTheme.mute)
-                }
-            }
-
-            if state == .missing {
-                Text(ClaudeConnect.missingMessage)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(SettingsTheme.warning)
-            }
-            if let message {
-                Text(message)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(failed ? SettingsTheme.record : SettingsTheme.accent)
-                    .textSelection(.enabled)
-            }
-        }
-        .onAppear { look() }
-    }
-
-    private func methodTab(_ title: String, index: Int) -> some View {
-        Button(title) { method = index }
-            .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(method == index ? SettingsTheme.ink : SettingsTheme.mute)
-            .padding(.horizontal, 8).padding(.vertical, 3.5)
-            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(method == index ? Color.white.opacity(0.14) : Color.clear))
-    }
-
-    private func actionButton(_ title: String, accent: Bool, action: @escaping () -> Void) -> some View {
-        Button(busy ? "Working…" : title, action: action)
-            .buttonStyle(.plain)
-            .disabled(busy)
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(accent ? SettingsTheme.onAccent : SettingsTheme.ink)
-            .padding(.horizontal, 11).padding(.vertical, 5)
-            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(accent ? SettingsTheme.accent : Color.white.opacity(0.09)))
-    }
-
-    private func look() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let s = ClaudeConnect.status()
-            DispatchQueue.main.async {
-                state = s
-                onStatusChange?(s)
-            }
-        }
-    }
-
-    private func act(_ work: @escaping () -> ClaudeConnect.Outcome) {
-        busy = true
-        message = nil
-        DispatchQueue.global(qos: .userInitiated).async {
-            let o = work()
-            DispatchQueue.main.async {
-                busy = false
-                message = o.message
-                failed = !o.ok
-                look()
-            }
-        }
     }
 }

@@ -1,15 +1,14 @@
 import AppKit
 
-/// What the stage shows with nothing running: where to drop an APK, the promise that it stays on this Mac, a way in
-/// for someone with source and no APK (a project folder, or a GitHub repository cloned here), and the apps opened lately.
+/// The APK screen (File > Run an APK…, docs/AGENT-FIRST-SPEC.md): running an APK by hand. Where to drop one, the
+/// promise that it stays on this Mac, a file picker, the apps opened lately and the sample app. It takes the stage
+/// when asked for, over running devices too, and gives it back (Back, Escape, or an app opening). With nothing
+/// running the stage is WaitingStage: this is the only screen that offers a drop target.
 final class EmptyStage: NSView {
     var onChoose: (() -> Void)?
     var onOpen: ((URL) -> Void)?
-    var onAddRepo: (() -> Void)?
-    /// "Open a project folder…": build an Android project on this Mac and run it.
-    var onFolder: (() -> Void)?
-    /// "Clone from GitHub…": clone a repository, then build and run it.
-    var onClone: (() -> Void)?
+    /// Back, or Escape: give the stage back.
+    var onBack: (() -> Void)?
     private let recents = NSStackView()
     private let card = NSView()
     private let recentTitle = NSTextField(labelWithString: "RECENT APPS")
@@ -18,6 +17,14 @@ final class EmptyStage: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         appearance = NSAppearance(named: .darkAqua)
+        // Its own stage, so running devices do not show through when it is opened over them.
+        let floor = StageBackground()
+        floor.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(floor)
+        NSLayoutConstraint.activate([
+            floor.topAnchor.constraint(equalTo: topAnchor), floor.bottomAnchor.constraint(equalTo: bottomAnchor),
+            floor.leadingAnchor.constraint(equalTo: leadingAnchor), floor.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
         card.wantsLayer = true
         card.layer?.cornerRadius = 22
         card.layer?.cornerCurve = .continuous
@@ -50,44 +57,22 @@ final class EmptyStage: NSView {
             icon.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
         ])
 
-        let title = NSTextField(labelWithString: "Drop an APK or Git Repository")
+        let title = NSTextField(labelWithString: "Run an APK")
         title.font = .systemFont(ofSize: 22, weight: .semibold)
         title.textColor = Design.ink
-        let promise = NSTextField(wrappingLabelWithString: "Runs natively in under a second on Apple Silicon.\nEverything stays private on this Mac.")
+        let promise = NSTextField(wrappingLabelWithString: "Drop an APK here, or choose one. It runs natively in under a second\nand stays private on this Mac.")
         promise.font = .systemFont(ofSize: 13.5)
         promise.textColor = Design.mute
         promise.alignment = .center
-        let choose = GlassButton(symbol: nil, title: "Open APK…", label: "Choose an APK to run", style: .accent, target: nil, action: nil)
+        let choose = GlassButton(symbol: nil, title: "Choose an APK…", label: "Choose an APK to run", style: .accent, target: nil, action: nil)
         choose.onPress = { [weak self] in self?.onChoose?() }
-        let connectRepo = GlassButton(symbol: nil, title: "Connect Git Repo…", label: "Connect a Git repository", style: .well, target: nil, action: nil)
-        connectRepo.onPress = { [weak self] in self?.onAddRepo?() }
-        for b in [choose, connectRepo] { b.heightAnchor.constraint(equalToConstant: 34).isActive = true }
-        let buttons = NSStackView(views: [choose, connectRepo])
-        buttons.spacing = 10
-        // No APK: build one from source.
-        let rule = NSBox()
-        rule.boxType = .separator
-        rule.translatesAutoresizingMaskIntoConstraints = false
-        let noAPK = NSTextField(labelWithString: "No APK? Build one from source")
-        noAPK.font = .systemFont(ofSize: 12, weight: .medium)
-        noAPK.textColor = Design.mute
-        let folder = GlassButton(symbol: "folder", title: "Open a project folder…", label: "Build and run an Android project folder on this Mac", style: .well, target: nil, action: nil)
-        folder.onPress = { [weak self] in self?.onFolder?() }
-        let clone = GlassButton(symbol: "arrow.down.circle", title: "Clone from GitHub…", label: "Clone a GitHub repository, then build and run it", style: .well, target: nil, action: nil)
-        clone.onPress = { [weak self] in self?.onClone?() }
-        for b in [folder, clone] { b.heightAnchor.constraint(equalToConstant: 30).isActive = true }
-        let sources = NSStackView(views: [folder, clone])
-        sources.spacing = 10
+        choose.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
-        let column = NSStackView(views: [iconWell, title, promise, buttons, rule, noAPK, sources])
+        let column = NSStackView(views: [iconWell, title, promise, choose])
         column.orientation = .vertical
         column.spacing = 12
         column.setCustomSpacing(14, after: iconWell)
         column.setCustomSpacing(18, after: promise)
-        column.setCustomSpacing(26, after: buttons)
-        column.setCustomSpacing(22, after: rule)
-        column.setCustomSpacing(10, after: noAPK)
-        rule.widthAnchor.constraint(equalToConstant: 360).isActive = true
         column.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(column)
 
@@ -114,9 +99,14 @@ final class EmptyStage: NSView {
         lower.spacing = 10
         recentsBlock = lower
 
-        let all = NSStackView(views: [card, lower])
+        let back = GlassButton(symbol: "chevron.left", title: "Back", label: "Leave the APK screen", style: .plain, target: nil, action: nil)
+        back.onPress = { [weak self] in self?.onBack?() }
+        back.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
+        let all = NSStackView(views: [back, card, lower])
         all.orientation = .vertical
         all.spacing = 24
+        all.setCustomSpacing(10, after: back)
         all.alignment = .leading
         all.translatesAutoresizingMaskIntoConstraints = false
         addSubview(all)
@@ -135,7 +125,7 @@ final class EmptyStage: NSView {
         reload()
     }
 
-    private static var sampleAPK: URL {
+    static var sampleAPK: URL {
         Engine.shared.root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
     }
 
@@ -143,6 +133,11 @@ final class EmptyStage: NSView {
     private var recentsBlock: NSView?
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    // Escape gives the stage back, and clicks on the screen never reach a device under it.
+    override var acceptsFirstResponder: Bool { true }
+    override func cancelOperation(_ sender: Any?) { onBack?() }
+    override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self) }
 
     override func layout() {
         super.layout()

@@ -8,7 +8,7 @@ cask "greenroom" do
 
   url "https://github.com/aglose/greenroom/releases/download/v#{version}/Greenroom-#{version}.dmg"
   name "Greenroom"
-  desc "Run and compare Android apps without an emulator"
+  desc "Workbench where coding agents run and verify Android apps, with no emulator"
   homepage "https://github.com/aglose/greenroom"
 
   # The app updates itself (Sparkle, from the newest published release), so brew upgrade leaves it alone.

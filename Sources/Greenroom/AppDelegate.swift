@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scriptsCheckIfAsked()
         buildsCheckIfAsked()
         mainCheckIfAsked()
+        waitingCheckIfAsked()
+        attentionCheckIfAsked()
+        reviewCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
         recipesCheckIfAsked()
@@ -515,6 +518,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         BuildsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
     }
 
+    /// `Greenroom --waiting-check DIR`: see WaitingCheck.
+    private func waitingCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--waiting-check"), i + 1 < args.count else { return }
+        // It looks at the window, so it would show the person's own sessions and start their fetches: only with a
+        // state folder of its own.
+        guard Engine.agentCheck, ProcessInfo.processInfo.environment["GREENROOM_STATE"]?.hasPrefix("/") == true else {
+            print("waiting check: run it with --agent-check and GREENROOM_STATE set to an empty folder, never on your own state")
+            exit(2)
+        }
+        WaitingCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
+    }
+
+    /// `Greenroom --attention-check DIR`: see AttentionCheck.
+    private func attentionCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--attention-check"), i + 1 < args.count else { return }
+        // It looks at the window's sidebar: only with a state folder of its own, as the waiting check.
+        guard Engine.agentCheck, ProcessInfo.processInfo.environment["GREENROOM_STATE"]?.hasPrefix("/") == true else {
+            print("attention check: run it with --agent-check and GREENROOM_STATE set to an empty folder, never on your own state")
+            exit(2)
+        }
+        AttentionCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
+    }
+
+    /// `Greenroom --review-check DIR`: see ReviewCheck. Only with a state folder of its own, as the attention check.
+    private func reviewCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--review-check"), i + 1 < args.count else { return }
+        guard Engine.agentCheck, ProcessInfo.processInfo.environment["GREENROOM_STATE"]?.hasPrefix("/") == true else {
+            print("review check: run it with --agent-check and GREENROOM_STATE set to an empty folder, never on your own state")
+            exit(2)
+        }
+        ReviewCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
+    }
+
     /// `Greenroom --main-check DIR APK`: see MainCheck.
     private func mainCheckIfAsked() {
         let args = CommandLine.arguments
@@ -571,6 +610,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private let agent = AgentServer()
+    /// Whether the agent endpoint is up (the waiting stage says so).
+    var agentListening: Bool { agent.port != 0 }
     private var termSource: DispatchSourceSignal?
 
     private func startAgentServer() {
@@ -580,6 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.workbench.agentActivity.add(tool, summary, failed: failed, session: session)
         }
         agent.onClient = { [weak self] name in self?.workbench.agentActivity.connected(name) }
+        agent.onReady = { [weak self] in self?.workbench.agentChanged() }
         workbench.agentActivity.onChange = { [weak self] in self?.workbench.agentChanged() }
         do { try agent.start() } catch { NSLog("Greenroom: the agent interface could not start: \(error)") }
         // Checks (--agent-check only): repositories to add to Sessions at launch (GREENROOM_ADD_REPOSITORY, one per line).
@@ -597,7 +639,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         guard workbench != nil else { openedEarly += urls; return }
         for url in urls {
-            if url.pathExtension.lowercased() == "apkrec" { workbench.view(recording: url) } else { workbench.open(url) }
+            if Links.handles(url) { Links.opened(url, in: workbench) }   // greenroom://: a place in the window
+            else if !url.isFileURL { continue }
+            else if url.pathExtension.lowercased() == "apkrec" { workbench.view(recording: url) } else { workbench.open(url) }
         }
     }
 
@@ -667,10 +711,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(submenu(app, title: Variant.name))
 
         let file = NSMenu(title: "File")
-        file.addItem(item("Open APK…", #selector(openDocument(_:)), "o"))
+        file.addItem(to(workbench: #selector(Workbench.runAPK(_:)), "Run an APK…", "o"))   // the APK screen
         file.addItem(to(workbench: #selector(Workbench.compareWithAPK(_:)), "Compare With APK…", "O", [.command, .shift]))
-        file.addItem(to(workbench: #selector(Workbench.addRepository(_:)), "Add Repository…", "o", [.command, .option]))
         file.addItem(item("Clear Recent APKs", #selector(clearRecents(_:)), ""))
+        file.addItem(.separator())
+        file.addItem(to(workbench: #selector(Workbench.connectAgents(_:)), "Connect Agents…", ""))
+        file.addItem(to(workbench: #selector(Workbench.addRepository(_:)), "Add Repository…", "o", [.command, .option]))
+        file.addItem(to(workbench: #selector(Workbench.openProjectFolder(_:)), "Open Project Folder…", ""))
+        file.addItem(to(workbench: #selector(Workbench.cloneFromGitHub(_:)), "Clone from GitHub…", ""))
         file.addItem(.separator())
         file.addItem(to(workbench: #selector(Workbench.toggleRecording(_:)), "Record", "r", [.command, .option]))
         file.addItem(to(workbench: #selector(Workbench.toggleScreenRecording(_:)), "Record Screen", "r", [.command, .control]))   // ⌘R is Rotate
@@ -719,6 +767,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.addItem(to(workbench: #selector(Workbench.toggleInspector(_:)), "Inspector", "i", [.command, .option]))
         win.addItem(to(workbench: #selector(Workbench.toggleLog(_:)), "Log", "L", [.command, .shift]))
         win.addItem(to(workbench: #selector(Workbench.showJobs(_:)), "Jobs", "j", [.command, .option]))
+        win.addItem(.separator())
+        win.addItem(to(workbench: #selector(Workbench.nextNeedingYou(_:)), "Next Session That Needs You", "'"))
+        win.addItem(to(workbench: #selector(Workbench.showSession(_:)), "Review This Session", "'", [.command, .shift]))
+        win.addItem(to(workbench: #selector(Workbench.toggleTakeOver(_:)), "Take Over This Session's Device", ""))
+        win.addItem(to(workbench: #selector(Workbench.toggleGroupByRepository(_:)), "Group Sessions by Repository", ""))
 
         let help = NSMenu(title: "Help")
         help.addItem(item("Report Feedback…", #selector(showFeedback(_:)), ""))
@@ -742,6 +795,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.representedObject as? String == "toggleScreenRecording:" {
             item.title = Recorder.isRecording(workbench.selected) ? "Stop Recording Screen" : "Record Screen"
+        }
+        if item.representedObject as? String == "toggleGroupByRepository:" { item.state = workbench.sessions.groupByRepository ? .on : .off }
+        if item.representedObject as? String == "toggleTakeOver:" {
+            guard let s = workbench.review.session else { item.title = "Take Over This Session's Device"; return false }
+            item.title = workbench.review.isTaken(s) ? "Hand This Session's Device Back" : "Take Over This Session's Device"
         }
         return true
     }

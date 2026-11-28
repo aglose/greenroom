@@ -11,8 +11,12 @@ final class AgentTools {
     }
     /// The recording of an agent's session on a session's simulator (AgentRecording.swift).
     let recording = AgentRecording()
-    /// The simulator the tool being run acts on (set while it runs; tools run one at a time).
-    var currentSim: Simulator?
+    /// The simulator the tool being run acts on, set while it runs. Calls on different simulators run at the same
+    /// time (AgentServer's lanes), each on a thread of its own, so it is kept with the thread.
+    var currentSim: Simulator? {
+        get { Thread.current.threadDictionary["greenroom.currentSim"] as? Simulator }
+        set { Thread.current.threadDictionary["greenroom.currentSim"] = newValue }
+    }
     /// The folder of the newest `changes` answer of each session (by worktree path), for `screenshot`'s `screen`.
     var lastChanges: [String: ChangeSet] = [:]
     let changesLock = NSLock()
@@ -28,6 +32,8 @@ final class AgentTools {
         var cwd: URL?
         var parent: Int32?
         var session: Session?
+        /// With no session: why the folder's repository was not added by this call (AgentAdoption), for the answer.
+        var why: String?
     }
 
     /// The person at the Mac paused the agent: actions are refused until it is lifted.
@@ -35,11 +41,67 @@ final class AgentTools {
 
     private var ids: [ObjectIdentifier: String] = [:]
     private var nextID = 1
+    private let idsLock = NSLock()
 
-    static let instructions = "Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. "
+    // MARK: Taking over one session's device
+
+    /// The sessions (by worktree path) whose device the person took over: their agents' actions wait until it is
+    /// handed back. Kept in memory: a new launch of the app starts with every device the agents'.
+    private var taken: [String: Date] = [:]
+    /// The sessions whose agent was refused meanwhile: it is told when the device is handed back.
+    private var refused = Set<String>()
+    private var notices: [String: [String]] = [:]
+    private let takenLock = NSLock()
+
+    func takenSince(_ worktree: String) -> Date? { takenLock.lock(); defer { takenLock.unlock() }; return taken[worktree] }
+
+    func takeOver(_ worktree: String) {
+        takenLock.lock()
+        if taken[worktree] == nil { taken[worktree] = Date() }
+        takenLock.unlock()
+    }
+
+    func handBack(_ worktree: String) {
+        takenLock.lock()
+        taken[worktree] = nil
+        let tell = refused.remove(worktree) != nil
+        takenLock.unlock()
+        if tell { addNotice(worktree, "The person handed the device back: you can act on it again.") }
+    }
+
+    /// Something Greenroom has to tell the agent of a session, once: the device was handed back, CI ended. It rides
+    /// on the agent's next call's answer, or on its turn's end where the harness's hook carries words.
+    func addNotice(_ worktree: String, _ text: String) {
+        takenLock.lock()
+        var list = notices[worktree] ?? []
+        if !list.contains(text) { list.append(text) }
+        notices[worktree] = Array(list.suffix(8))
+        takenLock.unlock()
+    }
+
+    func takeNotice(_ worktree: String) -> String? {
+        takenLock.lock(); defer { takenLock.unlock() }
+        return notices.removeValue(forKey: worktree)?.joined(separator: "\n")
+    }
+
+    /// The session a call acts on: the one whose simulator it names (or would reach), else the caller's own.
+    private func target(_ name: String, _ args: [String: Any], _ connection: Connection) -> String? {
+        if args["sim"] is String || AgentTools.driving.contains(name) || name == "close",
+           let s = try? sim(args), let owner = sessionOf(s) { return owner.worktree.path }
+        return connection.session?.worktree.path
+    }
+
+    /// What the server tells an agent about itself (`initialize`). The Debug copy says what it is first, so an
+    /// agent that has both servers does not pick it to test an app. Some clients cut this at 4,096 characters.
+    static let instructions = instructions(debug: Variant.isDebug)
+    static let debugNotice = "This is Greenroom Debug, the development build of Greenroom itself. Use it only when asked to test the debug build; for testing an Android app use the greenroom server. "
+    static func instructions(debug: Bool) -> String { (debug ? debugNotice : "") + releaseInstructions }
+    static let releaseInstructions = "Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. "
         + "launch an APK, then tap/type/key/swipe: each action answers with the nodes that changed (+ added, - removed, "
         + "~ changed; refs like e3 stay the same while a node is on screen), so call screen or screenshot only when you "
-        + "need all of it. check verifies texts in one call. APKs and their data stay on this Mac. "
+        + "need all of it. check verifies texts in one call. In a worktree: spec says what you set out to do, check with "
+        + "criterion ticks it for the person, review asks them to look and waits for approved or their comments; a block "
+        + "that begins \"--- from the person\" at the end of an answer is theirs. APKs and their data stay on this Mac. "
         + "Sign-ins are the owner's: never ask for or type passwords. To sign in, run_script a script the owner allowed "
         + "(scripts lists them): it types their stored credentials, which you never see."
 
@@ -105,17 +167,17 @@ final class AgentTools {
                                        "network", "network_rule", "perf", "accessibility", "background", "clipboard", "inspect"]
 
     /// Tools that wait for builds and walks: they run on their own queue so the others still answer meanwhile.
-    static let slow: Set<String> = ["build", "changes", "replay", "tests", "snapshots"]
+    static let slow: Set<String> = ["build", "changes", "replay", "tests", "snapshots", "review"]
 
     static let readOnly: Set<String> = ["simulators", "screen", "screenshot", "logs", "check", "wait_for", "compare", "session", "scripts", "history",
-                                        "network", "perf", "accessibility", "inspect", "sessions", "agent_activity"]
+                                        "network", "perf", "accessibility", "inspect", "sessions", "agent_activity", "feedback"]
 
-    static let tools: [(name: String, description: String, schema: [String: Any])] = core + debugTools + appTools
+    static let tools: [(name: String, description: String, schema: [String: Any])] = core + reviewTools + debugTools + appTools
 
     static let core: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
             + "with its own app data. Answers with the screen's nodes.", schema([
-            "apk": ["type": "string", "description": "path of the .apk (omit in a worktree of a repository added to Greenroom)"],
+            "apk": ["type": "string", "description": "path of the .apk, or \"sample\" for the sample app that comes with Greenroom (omit in a worktree of an Android app's repository: the first call from one adds it to Greenroom)"],
             "device": ["type": "string", "enum": devices],
             "appearance": ["type": "string", "enum": ["light", "dark"]],
             "locale": str, "font_scale": ["type": "number"],
@@ -151,8 +213,14 @@ final class AgentTools {
          schema(["setting": ["type": "string", "enum": settings.keys.sorted()], "value": str], required: ["setting"])),
         ("screen", "The whole screen as compact lines: ref \"label\" click|field. text keeps lines containing it.",
          schema(["text": str, "bounds": bool])),
-        ("check", "Verify the screen in one call: every text in visible must be on screen, none in absent. Answers PASS or FAIL with what is wrong.",
-         schema(["visible": strings, "absent": strings])),
+        ("check", "Verify the screen in one call: every text in visible must be on screen, none in absent. Answers PASS or FAIL with what is wrong. "
+            + "criterion says which of the spec's criteria this check is about: a pass ticks it for the person, a fail marks it failed, "
+            + "with the moment in the recording. For a criterion texts cannot show (a colour, a layout you looked at in a screenshot) "
+            + "give criterion with passed and note instead of visible and absent: it is shown as your word.",
+         schema(["visible": strings, "absent": strings,
+                 "criterion": ["type": "string", "description": "the criterion's number in the spec (1 is the first; several as \"2,3\") or its text"],
+                 "passed": ["type": "boolean", "description": "with criterion and no visible or absent: your own judgement"],
+                 "note": ["type": "string", "description": "with passed: what you saw, in a few words"]])),
         ("wait_for", "Wait until a text is on screen (or, with gone, no longer is). Answers with what changed.",
          schema(["text": str, "gone": bool, "timeout_ms": int], required: ["text"])),
         ("screenshot", "A picture of the screen, for what the nodes do not show. annotate draws each tappable node's ref on it. "
@@ -210,21 +278,28 @@ final class AgentTools {
     func call(_ name: String, _ args: [String: Any], connection: Connection = Connection()) throws -> [[String: Any]] {
         Reports.shared.count(.agentTool)
         guard AgentTools.tools.contains(where: { $0.name == name }) else { throw Failure(message: "unknown tool \(name)") }
-        if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readsOnly(name, args) {
+        if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readsOnly(name, args), !AgentTools.talk.contains(name) {
             throw Failure(message: "The person at the Mac has paused the agent in Greenroom. Ask them to resume it.")
+        }
+        // The person took one session's device over (Take Over, in its loop strip): that session's agent waits, the others go on.
+        if !AgentTools.readsOnly(name, args), !AgentTools.talk.contains(name), let path = target(name, args, connection), takenSince(path) != nil {
+            takenLock.lock(); refused.insert(path); takenLock.unlock()
+            throw Failure(message: "The person at the Mac took over this session's device in Greenroom, so your actions on it wait. Reading still works "
+                + "(screen, check, screenshot, logs). They hand it back there: the answer of your next call after that says so, and session says who has the device.")
         }
         // build and changes wait for minutes and run beside the other tools (AgentServer): they touch no simulator and no recording.
         let slow = AgentTools.slow.contains(name)
         // A paused agent is not recorded, reading included: recording follows what the agent does, and it is not allowed to act.
         let recorded = !slow && !(paused || AgentCheckHooks.pausedByCheck)
-        if !slow { currentSim = nil }
+        currentSim = nil
+        defer { currentSim = nil }
         // An agent driving a session's simulator is recorded (AgentRecording): the first action starts it.
         if recorded, AgentTools.driving.contains(name), !(name == "screenshot" && args["screen"] != nil), let s = try? sim(args) {
             currentSim = s
             beginRecording(s)
         }
         do {
-            let content: [[String: Any]]
+            var content: [[String: Any]]
             switch name {
             case "session": content = text(try sessionTool(connection))
             case "build": content = text(try buildTool(args, connection))
@@ -251,10 +326,13 @@ final class AgentTools {
             case "run_script": content = text(try runScript(args))
             case "compare": content = try compare(args)
             default:
-                guard let extra = try debugCall(name, args, connection) ?? appCall(name, args, connection) else { throw Failure(message: "unknown tool \(name)") }
+                guard let extra = try reviewCall(name, args, connection) ?? debugCall(name, args, connection) ?? appCall(name, args, connection) else { throw Failure(message: "unknown tool \(name)") }
                 content = extra
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
+            if name == "check", let more = noteCheck(first, args, connection) { content = text((content.first?["text"] as? String ?? first) + "\n" + more) }
+            // What the person said since the agent last heard from them rides on the answer (review and feedback hand it over themselves).
+            if !AgentTools.talk.contains(name), let said = handOver(connection) { content += said }
             if recorded, name == "launch", let s = currentSim { beginRecording(s) }
             if recorded { noteRecording(name, args, failed: false) }
             report(name, first, failed: false, connection)
@@ -321,6 +399,7 @@ final class AgentTools {
     // MARK: Finding simulators and nodes
 
     func id(_ sim: Simulator) -> String {
+        idsLock.lock(); defer { idsLock.unlock() }
         let key = ObjectIdentifier(sim)
         if let known = ids[key] { return known }
         let made = "s\(nextID)"
@@ -452,7 +531,12 @@ final class AgentTools {
                 Thread.sleep(forTimeInterval: 0.05)
             }
         }
-        if let path = args["apk"] as? String {
+        var asked = args["apk"] as? String
+        if asked == "sample" {   // the app that comes with Greenroom: no project and no build
+            guard FileManager.default.isReadableFile(atPath: EmptyStage.sampleAPK.path) else { throw Failure(message: "this copy of Greenroom has no sample app: pass the path of an .apk") }
+            asked = EmptyStage.sampleAPK.path
+        }
+        if let path = asked {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             guard url.pathExtension.lowercased() == "apk", FileManager.default.isReadableFile(atPath: url.path) else {
                 throw Failure(message: "\(path) is not a readable .apk file")
@@ -477,7 +561,7 @@ final class AgentTools {
             }
         } else {
             guard let session else {
-                throw Failure(message: "this folder is not a worktree of a repository added to Greenroom: pass apk")
+                throw Failure(message: "this folder is not a worktree of a repository added to Greenroom" + (connection.why.map { " (\($0))" } ?? "") + ": pass apk")
             }
             let label = session.branch ?? session.shortHead
             let found: (alive: Simulator?, apk: URL?) = DispatchQueue.main.sync {
@@ -515,7 +599,7 @@ final class AgentTools {
         sim.logOffset = 0
         let size = DispatchQueue.main.sync { sim.deviceSize }
         let skinNote = DevHooks.value("--skin", in: DispatchQueue.main.sync { sim.options }).map { " | skin \($0)" } ?? ""
-        var head = "\(id(sim)) launched \(name)\(session.map { " for \($0.branch ?? $0.shortHead)" } ?? "") \(Int(size.width))x\(Int(size.height)) | \(activity(sim))\(skinNote)\(note)\(leftOut)"
+        var head = "\(id(sim)) launched \(name)\(session.flatMap { mark ? " for \($0.branch ?? $0.shortHead)" : nil } ?? "") \(Int(size.width))x\(Int(size.height)) | \(activity(sim))\(skinNote)\(note)\(leftOut)"
         if !settled.hasPrefix("settled") { head += " (still animating)" }
         return ([head] + sim.tree.nodes.filter { !$0.label.isEmpty || $0.click }.map(\.line)).joined(separator: "\n")
     }
@@ -682,11 +766,19 @@ final class AgentTools {
 
     private func check(_ args: [String: Any]) throws -> String {
         let s = try sim(args)
+        let visible = args["visible"] as? [String] ?? [], absent = args["absent"] as? [String] ?? []
+        // The agent's own judgement of a criterion that texts cannot show: said as its word, never as seen on screen.
+        if visible.isEmpty, absent.isEmpty, let passed = args["passed"] as? Bool {
+            guard args["criterion"] != nil else { throw Failure(message: "passed goes with criterion: say which of the spec's criteria you judged") }
+            let note = (args["note"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "\(passed ? "PASS" : "FAIL") | \(activity(s)) | the agent's word" + (note.isEmpty ? "" : ": " + String(note.prefix(300)))
+        }
+        if visible.isEmpty, absent.isEmpty { throw Failure(message: "check needs visible or absent texts (or, for a criterion texts cannot show, criterion with passed)") }
         _ = s.sendSync("settle 2500 150", timeout: 10)
         let labels = nodes(s).map(\.label).filter { !$0.isEmpty }
         func on(_ t: String) -> Bool { labels.contains { $0.localizedCaseInsensitiveContains(t) } }
-        let missing = (args["visible"] as? [String] ?? []).filter { !on($0) }
-        let present = (args["absent"] as? [String] ?? []).filter { on($0) }
+        let missing = visible.filter { !on($0) }
+        let present = absent.filter { on($0) }
         if missing.isEmpty, present.isEmpty { return "PASS | \(activity(s))" }
         var parts: [String] = []
         if !missing.isEmpty { parts.append("not on screen: " + missing.map(ScreenNode.quote).joined(separator: ", ")) }

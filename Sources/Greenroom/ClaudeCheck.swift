@@ -162,37 +162,37 @@ enum ClaudeCheck {
             claude.reload()
             sessions.refresh()
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            expect(sessions.sessions.count == 8 && sessions.sessions.allSatisfy { $0.claude == nil }, "switch off: \(sessions.sessions.count) plain rows, none with a Claude session")
+            expect(sessions.sessions.count == 8 && sessions.sessions.allSatisfy { $0.agent == nil }, "switch off: \(sessions.sessions.count) plain rows, none with a Claude session")
             expect(row("live")?.title == "feat-live" && claude.offers.isEmpty && claude.note == nil, "switch off: rows are titled by their branch, nothing offered, no note")
             expect(ClaudeReader.opened.isEmpty, "switch off: no Claude file was opened (\(ClaudeReader.opened.count) opened)")
 
             // 2. On: each shape joins its row.
             claude.enabledOverride = true
             claude.changedSwitch()
-            let joined = await wait("the Claude sessions") { row("live")?.claude != nil && row("desk")?.claude != nil && row("done")?.claude != nil && row("arch")?.claude != nil && row("dead")?.claude != nil && row("sub")?.claude != nil && row("small")?.claude != nil }
+            let joined = await wait("the Claude sessions") { row("live")?.agent != nil && row("desk")?.agent != nil && row("done")?.agent != nil && row("arch")?.agent != nil && row("dead")?.agent != nil && row("sub")?.agent != nil && row("small")?.agent != nil }
             expect(joined, "switch on: seven worktrees have a Claude session")
             let live = row("live"), desk = row("desk"), done = row("done"), arch = row("arch"), dead = row("dead")
-            expect(live?.title == "Fixture: tidy the login form" && live?.branch == "feat-live" && live?.claude?.status == .working && live?.claude?.running == true,
-                   "live terminal session: its name is the row's title, the branch is kept, working (\(live?.title ?? "?"), \(live?.claude?.status.rawValue ?? "?"))")
-            expect(desk?.title == "Fixture: settings screen" && desk?.claude?.status == .waiting && desk?.claude?.pullRequests.map(\.absoluteString) == [pr],
-                   "desktop session in a worktree (named by a symlink): title, waiting for you, pull request (\(desk?.title ?? "?"), \(desk?.claude?.status.rawValue ?? "?"))")
-            expect(done?.title == "Fixture: finished refactor" && done?.claude?.branch == "feat-done" && done?.claude?.running == false
-                   && done?.claude?.status == .idle && done?.claude?.pullRequests.map(\.absoluteString) == [transcriptPr],
+            expect(live?.title == "Fixture: tidy the login form" && live?.branch == "feat-live" && live?.agent?.status == .working && live?.agent?.running == true,
+                   "live terminal session: its name is the row's title, the branch is kept, working (\(live?.title ?? "?"), \(live?.agent?.status.rawValue ?? "?"))")
+            expect(desk?.title == "Fixture: settings screen" && desk?.agent?.status == .waiting && desk?.agent?.pullRequests.map(\.absoluteString) == [pr],
+                   "desktop session in a worktree (named by a symlink): title, waiting for you, pull request (\(desk?.title ?? "?"), \(desk?.agent?.status.rawValue ?? "?"))")
+            expect(done?.title == "Fixture: finished refactor" && done?.agent?.branch == "feat-done" && done?.agent?.running == false
+                   && done?.agent?.status == .idle && done?.agent?.pullRequests.map(\.absoluteString) == [transcriptPr],
                    "finished session known from its transcript only: title, branch, pull request, not running (\(done?.title ?? "?"))")
-            expect(arch?.claude?.archived == true && arch?.claude?.running == false && arch?.title == "Fixture: archived idea", "archived session is not live")
-            expect(dead?.claude?.running == false && dead?.claude?.status == .idle && dead?.title == "Fixture: ended terminal", "a pid file whose process is gone counts as not running")
+            expect(arch?.agent?.archived == true && arch?.agent?.running == false && arch?.title == "Fixture: archived idea", "archived session is not live")
+            expect(dead?.agent?.running == false && dead?.agent?.status == .idle && dead?.title == "Fixture: ended terminal", "a pid file whose process is gone counts as not running")
             expect(row("sub")?.title == "Fixture: from a subfolder", "a session started in a subfolder of a worktree is on that worktree's row")
-            expect(row("small")?.title == "Fixture: small transcript" && row("small")?.claude?.pullRequests.count == 1 && row("small")?.claude?.branch == "feat-small",
+            expect(row("small")?.title == "Fixture: small transcript" && row("small")?.agent?.pullRequests.count == 1 && row("small")?.agent?.branch == "feat-small",
                    "a transcript of under 64 KB has its later lines read (title, pull request)")
             let nested = ClaudeSessions.owner(of: URL(fileURLWithPath: "/x/a/b/c"), among: ["/x/a", "/x/a/b", "/x/ab"].map { URL(fileURLWithPath: $0) })
             let sibling = ClaudeSessions.owner(of: URL(fileURLWithPath: "/x/ab/c"), among: [URL(fileURLWithPath: "/x/a")])
             expect(nested == "/x/a/b" && sibling == nil, "the deepest worktree above a folder owns it, on whole path components (\(nested ?? "nil"), \(sibling ?? "nil"))")
-            expect(mainRow()?.claude == nil && mainRow()?.title == "main", "a worktree with no Claude session stays a plain row")
-            expect(ClaudeUI.dot(for: live?.claude) != nil && ClaudeUI.dot(for: nil) == nil, "a status dot for a row with a session, none without")
+            expect(mainRow()?.agent == nil && mainRow()?.title == "main", "a worktree with no Claude session stays a plain row")
+            expect(ClaudeUI.dot(for: live?.agent) != nil && ClaudeUI.dot(for: nil) == nil, "a status dot for a row with a session, none without")
 
             // 3. Broken files change nothing; the reader says how many it could use.
             let withBroken = ClaudeReader.read(full), without = ClaudeReader.read(clean)
-            func undated(_ s: ClaudeSession?) -> ClaudeSession? { var s = s; s?.lastActivity = nil; return s }   // file times differ between the two trees
+            func undated(_ s: AgentSession?) -> AgentSession? { var s = s; s?.lastActivity = nil; return s }   // file times differ between the two trees
             let same = ["live", "desk", "done", "arch", "dead", "sub", "small"].allSatisfy {
                 undated(ClaudeSessions.best(for: wt($0), in: withBroken.sessions)) == undated(ClaudeSessions.best(for: wt($0), in: without.sessions))
             }
@@ -233,19 +233,19 @@ enum ClaudeCheck {
             // 4. Nothing parses: plain rows and one line saying so.
             claude.roots = onlyBroken
             claude.changedSwitch()
-            let noted = await wait("the note") { claude.note != nil && row("live")?.claude == nil }
-            expect(noted && sessions.sessions.allSatisfy { $0.claude == nil } && row("live")?.title == "feat-live", "files that do not parse: plain rows and a line saying so (\(claude.note ?? "none"))")
+            let noted = await wait("the note") { claude.note != nil && row("live")?.agent == nil }
+            expect(noted && sessions.sessions.allSatisfy { $0.agent == nil } && row("live")?.title == "feat-live", "files that do not parse: plain rows and a line saying so (\(claude.note ?? "none"))")
             claude.roots = full
             claude.changedSwitch()
-            _ = await wait("the sessions back") { row("live")?.claude != nil }
+            _ = await wait("the sessions back") { row("live")?.agent != nil }
             expect(claude.note == nil && row("live")?.title == "Fixture: tidy the login form", "readable files again: the note goes, the titles come back")
 
             // 5. FSEvents, with a busy session: its file is rewritten every half second for ten seconds, and the row
             // follows within the debounce's longest wait, not after the writing stops.
             ClaudeReader.resetOpened()
             let writer = Task { @MainActor in for _ in 0..<20 { writeLive(full, working: false); try? await Task.sleep(nanoseconds: 500_000_000) } }
-            let followed = await wait("the watcher", 9) { row("live")?.claude?.status == .idle }
-            expect(followed && !writer.isCancelled, "a changed file shows up through FSEvents while it is still being written (live: \(row("live")?.claude?.status.rawValue ?? "?"))")
+            let followed = await wait("the watcher", 9) { row("live")?.agent?.status == .idle }
+            expect(followed && !writer.isCancelled, "a changed file shows up through FSEvents while it is still being written (live: \(row("live")?.agent?.status.rawValue ?? "?"))")
             await writer.value
             try? await Task.sleep(nanoseconds: 4_000_000_000)   // the last burst's reload has run
 
@@ -280,7 +280,7 @@ enum ClaudeCheck {
             claude.reload()
             sessions.refresh()
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            expect(sessions.sessions.allSatisfy { $0.claude == nil } && claude.offers.isEmpty, "switch off again: plain rows, no offers")
+            expect(sessions.sessions.allSatisfy { $0.agent == nil } && claude.offers.isEmpty, "switch off again: plain rows, no offers")
             expect(ClaudeReader.opened.isEmpty, "switch off again: no Claude file was opened (\(ClaudeReader.opened.count) opened)")
 
             finish()

@@ -254,10 +254,13 @@ final class Evidence: NSObject, NSMenuItemValidation {
     func entry(of worktree: String) -> Entry? { entries[worktree] }
 
     /// A build of the session was filed (a rebuild landed, a recipe built one, or a session with a build was
-    /// started): walk it when the workspace's `auto` asks to. `onTurnEnd` is treated as `onBuild` until the Claude
-    /// link can tell a turn's end. `withData`: the workspace's "walk with my signed-in data" (off by default).
+    /// started): walk it when the workspace's `auto` asks to. With `onTurnEnd`, a build that lands while an agent is
+    /// in the middle of a turn in that worktree (HookSessions: its hooks say so) is not walked: the agent is likely
+    /// to build again, and the controller sends the build here once more when the turn ends. With no agent heard in
+    /// the worktree it is `onBuild`. `withData`: the workspace's "walk with my signed-in data" (off by default).
     func buildArrived(worktree: String, build: Build, auto: Auto, withData: Bool = false) {
-        request(worktree: worktree, build: build, force: false, walk: auto != .off, withData: withData)
+        let held = auto == .onTurnEnd && HookSessions.shared.midTurn(in: URL(fileURLWithPath: worktree))
+        request(worktree: worktree, build: build, force: false, walk: auto != .off && !held, withData: withData)
     }
 
     /// "Walk again": walks the build now whatever the setting, and whatever is cached.
@@ -1310,6 +1313,9 @@ final class Evidence: NSObject, NSMenuItemValidation {
         shareSignedIn.indentationLevel = 1
         let stop = NSMenuItem(title: "Stop Walking", action: #selector(stopMenu(_:)), keyEquivalent: "")
         let auto = NSMenuItem(title: "Walk New Builds Automatically", action: #selector(autoMenu(_:)), keyEquivalent: "")
+        let turnEnd = NSMenuItem(title: "Wait for the Agent's Turn to End", action: #selector(turnEndMenu(_:)), keyEquivalent: "")
+        turnEnd.toolTip = "Off: every new build is walked as it lands. On: a build that lands while an agent is still working in that worktree is walked when its turn ends, so the builds it makes along the way are not. Needs the agent's hooks (File > Connect Agents…)."
+        turnEnd.indentationLevel = 1
         let data = NSMenuItem(title: "Walk with My Signed-In Data", action: #selector(dataMenu(_:)), keyEquivalent: "")
         let quick = NSMenuItem(title: "Quick Walks Only", action: #selector(quickMenu(_:)), keyEquivalent: "")
         quick.toolTip = "Off: a walk covers the whole app, which is what its history needs; the first one is long, later ones redo only what changed. On: every walk stops two taps deep after two minutes."
@@ -1318,8 +1324,8 @@ final class Evidence: NSObject, NSMenuItemValidation {
         let signIn = NSMenuItem(title: "Sign In Once…", action: #selector(signInMenu(_:)), keyEquivalent: "")
         signIn.toolTip = "Opens the app on a device you can see. Sign in as you would on a phone and press Use This Sign-In: every walk of this repository then starts signed in, on a copy of that device's data. What you do is recorded as a script, with what you type kept in your Keychain."
         let forget = NSMenuItem(title: "Forget Sign-In", action: #selector(forgetSignInMenu(_:)), keyEquivalent: "")
-        for i in [again, everything, verify, stop, save, signIn, forget, auto, data, quick, share, shareSignedIn] { i.target = self }
-        return [.separator(), again, everything, verify, stop, save, .separator(), signIn, forget, data, .separator(), auto, quick, share, shareSignedIn]
+        for i in [again, everything, verify, stop, save, signIn, forget, auto, turnEnd, data, quick, share, shareSignedIn] { i.target = self }
+        return [.separator(), again, everything, verify, stop, save, .separator(), signIn, forget, data, .separator(), auto, turnEnd, quick, share, shareSignedIn]
     }
 
     @objc private func shareMenu(_ sender: Any?) {
@@ -1421,6 +1427,10 @@ final class Evidence: NSObject, NSMenuItemValidation {
         guard let s = clickedSession(), let c = controller else { return }
         c.setAuto(c.auto(of: s) == .off ? .onBuild : .off, for: s)
     }
+    @objc private func turnEndMenu(_ sender: Any?) {
+        guard let s = clickedSession(), let c = controller else { return }
+        c.setAuto(c.auto(of: s) == .onTurnEnd ? .onBuild : .onTurnEnd, for: s)
+    }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let s = clickedSession() else { return false }
@@ -1429,6 +1439,7 @@ final class Evidence: NSObject, NSMenuItemValidation {
         case #selector(verifyMenu(_:))?: return entries[s.worktree.path]?.impact?.full == false && !isWalking(s.worktree.path)
         case #selector(stopMenu(_:))?: return isWalking(s.worktree.path)
         case #selector(autoMenu(_:))?: item.state = controller?.auto(of: s) == .off ? .off : .on; return true
+        case #selector(turnEndMenu(_:))?: item.state = controller?.auto(of: s) == .onTurnEnd ? .on : .off; return controller?.auto(of: s) != .off
         case #selector(dataMenu(_:))?: item.state = controller?.walksWithData(s) == true ? .on : .off; return true
         case #selector(signInMenu(_:))?:
             item.title = keptSignIn(s.worktree.path) != nil ? "Sign In Again…" : "Sign In Once…"

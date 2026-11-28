@@ -47,6 +47,12 @@ final class AgentRecording {
         return newest[worktree].map { ($0, false) }
     }
 
+    /// Where a session's recording is now: the file and the second in it (for a check's moment). Nil: none is being taken.
+    func moment(for worktree: String) -> (recording: String, second: Double)? {
+        guard let t = takes.values.first(where: { $0.session == worktree && ScreenRecording.shared.recorder(for: $0.sim) != nil }) else { return nil }
+        return (t.file.path, max(0, Date().timeIntervalSince(t.started)))
+    }
+
     /// Whether this class is recording `sim` now.
     func isActive(_ sim: Simulator) -> Bool { takes[ObjectIdentifier(sim)] != nil && ScreenRecording.shared.recorder(for: sim) != nil }
 

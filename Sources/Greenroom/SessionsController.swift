@@ -22,6 +22,11 @@ final class SessionsController {
         didSet { sessions = attachPulls(sessions) }
     }
     private var lastPRFetch: [String: Date] = [:]
+    /// A pull request of `workspace` changed from here (it was merged): GitHub is asked again now, not in three minutes.
+    func pullsChanged(in workspace: URL) {
+        lastPRFetch[workspace.path] = nil
+        refreshPulls(for: workspaces.filter { $0.root.path == workspace.path })
+    }
     private var watchers: [String: WorktreeWatcher] = [:]
     private var buildWatcher: BuildWatcher?
     private var watched: [String] = []
@@ -66,6 +71,36 @@ final class SessionsController {
     /// The walk and capture queue (Evidence.swift): every new build of a session is walked in the background.
     let evidence = Evidence()
 
+    /// The session the person last went to, by its worktree's path (a row clicked, ⌘n, ⌘'): it may have no simulator.
+    var focus: String?
+    /// The session the person went to that has no simulator: the stage is about it until a simulator is chosen.
+    private(set) var staged: String?
+    /// That session, while it still has no simulator.
+    var stagedSession: Session? {
+        guard let staged, let s = sessions.first(where: { $0.worktree.path == staged }), simulator(for: s) == nil else { return nil }
+        return s
+    }
+    /// Why nothing runs for it, for the stage.
+    func stageLine(for s: Session) -> String {
+        if buildQueue.isBuilding(s.worktree.path) { return "Building. Its simulator opens here when the build is ready." }
+        if apps(for: s.workspace).isEmpty { return "This repository has no Android app, so there is no simulator for it." }
+        if newestAPK(for: s) == nil { return "No build yet. Its simulator opens here when there is one." }
+        return "Its simulator is starting."
+    }
+    /// CI runs of pushed sessions, watched without being asked (CIWatch.swift).
+    private(set) lazy var ciWatch: CIWatch = {
+        let w = CIWatch(sessions: self)
+        w.onChange = { [weak self] in self?.noteAttention(); self?.onChange?() }
+        w.tell = { [weak self] path, text in self?.workbench?.agentTools?.addNotice(path, text) }
+        return w
+    }()
+    /// The group each shown session is in and since when (Attention.swift), to order the rows and to tell news.
+    var entered: [String: (group: Attention, since: Date)] = [:]
+    var attentionSeen = false
+    var notingAttention = false
+    var lastCounts: [Attention: Int] = [:]
+    var attentionTimer: Timer?
+
     /// Told on the main thread when the rows changed.
     var onChange: (() -> Void)?
     /// Told after each reload a new build made, with the session and the simulator that replaced the old one.
@@ -82,6 +117,11 @@ final class SessionsController {
     func install(workbench: Workbench) {
         self.workbench = workbench
         workspaces = store.loadWorkspaces()
+        WorkStore.shared.use(root: store.root)
+        WorkStore.shared.onChange = { [weak self] in self?.noteAttention(); self?.onChange?() }   // a group is entered when its cause happens, not when the rows are next drawn
+        Notifier.start()
+        startAttentionClock()
+        ciWatch.start()
         if workspaces.contains(where: { !$0.skin.isEmpty }) { LaunchSettings.loadSkins() }   // each skin's device, for launches
         DevHooks.shared.owns = { [weak self] sim in self?.session(forSimulator: sim) != nil }   // reloaded here, once
         evidence.controller = self
@@ -105,23 +145,29 @@ final class SessionsController {
         installBuilds()
         let claude = ClaudeSessions.shared   // W1: Claude Code's sessions, behind the switch in Settings
         claude.workspaceRoots = { [weak self] in self?.workspaces.map(\.root) ?? [] }
-        claude.onChange = { [weak self] in self?.applyClaude() }
+        claude.onChange = { [weak self] in self?.applyAgents() }
         claude.changedSwitch()
         let t3 = T3Sessions.shared   // T3 Code's threads, behind their own switch in Settings
         t3.workspaceRoots = { [weak self] in self?.workspaces.map(\.root) ?? [] }
-        t3.onChange = { [weak self] in self?.applyClaude() }
+        t3.onChange = { [weak self] in self?.applyAgents() }
         t3.changedSwitch()
+        // What the harnesses' own hooks say (A4): the status every harness shares, and the end of a turn.
+        HookSessions.shared.onChange = { [weak self] in self?.applyAgents() }
+        HookSessions.shared.onTurnEnd = { [weak self] in self?.turnEnded(in: $0) }
         refresh()
     }
 
     /// Hands every row its Claude/T3 sessions (or takes them away) without asking git again. Says nothing when no row's
     /// sessions changed in a way the row shows.
-    func applyClaude() {
+    func applyAgents() {
         let next = attachPulls(ClaudeSessions.shared.attach(sessions))
         let changed = next.map { $0.agentSessions.map(\.shown) } != sessions.map { $0.agentSessions.map(\.shown) }
-            || next.map { $0.claude?.shown } != sessions.map { $0.claude?.shown }
+            || next.map { $0.agent?.shown } != sessions.map { $0.agent?.shown }
+        // A pull request an agent's session names may have merged: the row moves to Completed, or back out of it.
+        let moved = next.map(isCompleted) != sessions.map(isCompleted)
         sessions = next
-        if autoArchive() || changed { onChange?() }
+        noteAttention()
+        if changed || moved { onChange?() }
     }
 
     private func attachPulls(_ list: [Session]) -> [Session] {
@@ -171,6 +217,10 @@ final class SessionsController {
     func use(store: SessionStore) {
         self.store = store
         evidence.store = store
+        WorkStore.shared.use(root: store.root)
+        ciWatch.reset()
+        entered = [:]
+        attentionSeen = false
         workspaces = store.loadWorkspaces()
         builds = [:]
         refresh(supersede: true)
@@ -200,13 +250,18 @@ final class SessionsController {
     /// Adds the repository `folder` is in (a worktree of it is as good as the main checkout) and ensures that
     /// worktree is visible in the sidebar. Gives the main checkout it resolved to, or nil with a toast when it is not
     /// a repository.
+    ///
+    /// `byAgent`: an agent's call added it (AgentAdoption), not the person. Nothing is asked (no sheet about a skin
+    /// and launch options), the toast says an agent did it and offers Undo, and the base branch is not fetched or
+    /// built by itself (`keepMain` starts off): an agent's first call must not start a Gradle build nobody asked for.
     @discardableResult
-    func addRepository(_ folder: URL, quietIfExisting: Bool = false) -> Task<URL?, Never> {
+    func addRepository(_ folder: URL, quietIfExisting: Bool = false, byAgent: Bool = false) -> Task<URL?, Never> {
         Task { @MainActor in
             guard let root = await Git.mainCheckout(of: folder)?.resolvingSymlinksInPath() else {
                 self.workbench?.toast.show(Git.available ? "\(folder.lastPathComponent) is not in a git repository" : Self.noGit, problem: true)
                 return nil
             }
+            if !byAgent { AgentAdoption.noteAdded(root) }   // added by hand: agents may bring it again
             let worktree = (await Git.toplevel(of: folder)) ?? root
             let worktreePath = worktree.resolvingSymlinksInPath().path
             let rootPath = root.standardizedFileURL.path
@@ -246,13 +301,20 @@ final class SessionsController {
             } else {
                 var ws = Workspace(root: root)
                 ws.shown = [worktreePath]
-                ws.launchAsked = false   // asked for a skin and launch options before its first simulator starts
+                ws.launchAsked = byAgent   // by hand: asked for a skin and launch options before its first simulator starts
+                if byAgent { ws.keepMain = false }
                 if let defaultApp { ws.module = defaultApp.id }
                 self.workspaces.append(ws)
                 self.store.saveWorkspaces(self.workspaces)
                 ClaudeSessions.shared.workspacesChanged()
                 T3Sessions.shared.reload()
-                if let defaultApp {
+                if byAgent {
+                    let place = worktreePath == rootPath ? "it" : worktree.lastPathComponent
+                    self.workbench?.toast.show("Added \(root.lastPathComponent): an agent is working in \(place)", action: "Undo") { [weak self] in
+                        self?.removeWorkspace(at: root)
+                        self?.workbench?.toast.show("Removed \(root.lastPathComponent). Agents will not add it again; File > Add Repository… does.")
+                    }
+                } else if let defaultApp {
                     self.workbench?.toast.show("Added \(root.lastPathComponent) (\(discoveredApps.count) Android apps — using \(defaultApp.displayName); switch in sidebar)")
                 } else {
                     self.workbench?.toast.show("Added \(root.lastPathComponent)")
@@ -263,7 +325,7 @@ final class SessionsController {
             if !self.sessions.contains(where: { $0.worktree.resolvingSymlinksInPath().path == worktreePath }) {
                 let wsRoot = self.workspaces.first { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }?.root ?? root
                 let initial = Session(worktree: worktree, workspace: wsRoot, branch: nil, head: "", dirty: false,
-                                      ahead: 0, claude: nil, build: self.builds[worktreePath], simulator: nil,
+                                      ahead: 0, agent: nil, build: self.builds[worktreePath], simulator: nil,
                                       outputs: nil, sourcesDate: nil)
                 self.sessions.append(initial)
             }
@@ -348,6 +410,7 @@ final class SessionsController {
 
     func removeWorkspace(at root: URL) {
         let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        AgentAdoption.noteRemoved(root)   // what the person removed, an agent's call does not add again
         for s in sessions where s.workspace.resolvingSymlinksInPath().standardizedFileURL.path == rootPath { evidence.forget(worktree: s.worktree.path) }
         if let ws = workspaces.first(where: { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }) { mainBuilds.close(ws) }
         workspaces.removeAll { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }
@@ -366,11 +429,11 @@ final class SessionsController {
         return simulator(for: s) != nil || (buildQueue.job(for: s)?.isActive ?? false)
     }
 
-    /// Worth suggesting: not shown, not put away, and a Claude session is at work in it or it has an open pull request.
+    /// Worth suggesting: not shown, not put away, and an agent's session is at work in it or it has an open pull request.
     func isSuggested(_ s: Session) -> Bool {
         guard !isShown(s), let ws = workspace(of: s), !ws.hidden.contains(s.worktree.path), !ws.archived.contains(s.worktree.path) else { return false }
         // A worktree with nothing to run is not worth a row until the person adds it (the + menu has it).
-        return (s.claudeActive || s.hasOpenPR) && newestAPK(for: s) != nil
+        return (s.agentActive || s.hasOpenPR) && newestAPK(for: s) != nil
     }
 
     /// The suggestions, active ones first.
@@ -378,11 +441,11 @@ final class SessionsController {
         sessions.filter(isSuggested).sorted { (Self.tier($0, live: false), $0.title) < (Self.tier($1, live: false), $1.title) }
     }
 
-    /// The order rows show in: something running first (a simulator, a Claude session, a build), then an open pull
+    /// The order rows show in: something running first (a simulator, an agent's session, a build), then an open pull
     /// request, then the rest; within each, the order they were added in (newest first). Coarse on purpose: a status
     /// that flickers does not make rows jump.
     private static func tier(_ s: Session, live: Bool) -> Int {
-        if live || s.claudeActive { return 0 }
+        if live || s.agentActive { return 0 }
         return s.hasOpenPR ? 1 : 2
     }
 
@@ -415,34 +478,6 @@ final class SessionsController {
         onChange?()
     }
 
-    /// Whether sessions whose pull request merged leave the sidebar by themselves.
-    static let autoArchiveKey = "sessionsAutoArchive"
-    var autoArchiveEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: Self.autoArchiveKey) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: Self.autoArchiveKey); if newValue, autoArchive() { onChange?() } }
-    }
-
-    /// Archives the shown sessions whose pull requests have all closed with one merged, unless something is still
-    /// going on in them (a simulator, a build, a Claude session that runs) or they are a main checkout. Returns
-    /// whether one was archived.
-    @discardableResult
-    func autoArchive() -> Bool {
-        guard autoArchiveEnabled else { return false }
-        var done: [Session] = []
-        for s in sessions where !s.isMain && s.prMerged && !s.claudeActive && !(s.claude?.running ?? false) {
-            guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }), workspaces[i].shown.contains(s.worktree.path),
-                  simulator(for: s) == nil, !(buildQueue.job(for: s)?.isActive ?? false) else { continue }
-            workspaces[i].shown.removeAll { $0 == s.worktree.path }
-            workspaces[i].archived.append(s.worktree.path)
-            done.append(s)
-        }
-        guard !done.isEmpty else { return false }
-        store.saveWorkspaces(workspaces)
-        let what = done.count == 1 ? "\(done[0].title): its pull request merged" : "\(done.count) sessions whose pull requests merged"
-        workbench?.toast.show("Archived \(what). The + menu brings it back.")
-        return true
-    }
-
     /// The + menu of a repository's header: the sessions it does not show, active ones first, then the archived.
     func addMenu(for workspace: URL) -> NSMenu {
         let menu = NSMenu()
@@ -454,8 +489,8 @@ final class SessionsController {
             i.toolTip = (s.worktree.path as NSString).abbreviatingWithTildeInPath
             return i
         }
-        let active = rest.filter { ($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
-        let others = rest.filter { !($0.claudeActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
+        let active = rest.filter { ($0.agentActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
+        let others = rest.filter { !($0.agentActive || $0.hasOpenPR) && !archived.contains($0.worktree.path) }
         let gone = rest.filter { archived.contains($0.worktree.path) }
         if !rest.isEmpty {
             let find = ClosureMenuItem("Find a Worktree…") { [weak self] in self?.findWorktree(in: workspace) }
@@ -539,7 +574,7 @@ final class SessionsController {
         } else if let n = s.pullRequests.first?.number {
             bits.append("#\(n)")
         }
-        if let agent = s.displayAgent ?? s.claude {
+        if let agent = s.displayAgent ?? s.agent {
             if agent.status == .waiting { bits.append("\(agent.sourceName) waiting for you") }
             else if agent.status == .working && agent.running { bits.append("\(agent.sourceName) working") }
         }
@@ -568,7 +603,7 @@ final class SessionsController {
         workbench?.showPalette(items: items + [checkOut], placeholder: "Search \(rest.count) worktree\(rest.count == 1 ? "" : "s") of \(workspace.lastPathComponent)")
     }
 
-    private func workspace(at root: URL) -> Workspace? { workspaces.first { $0.root.path == root.path } }
+    func workspace(at root: URL) -> Workspace? { workspaces.first { $0.root.path == root.path } }
 
     /// The folders of a drag (files are not repositories).
     static func folders(in info: NSDraggingInfo) -> [URL] {
@@ -630,7 +665,7 @@ final class SessionsController {
                         } else if FileManager.default.fileExists(atPath: ws.root.path) {
                             let path = ws.root.resolvingSymlinksInPath()
                             all.append(Session(worktree: path, workspace: ws.root, branch: nil, head: "", dirty: false,
-                                               ahead: 0, claude: nil, build: known[path.path], simulator: nil,
+                                               ahead: 0, agent: nil, build: known[path.path], simulator: nil,
                                                outputs: nil, sourcesDate: nil))
                         }
                         continue
@@ -649,7 +684,7 @@ final class SessionsController {
                                 let (outputs, state) = await (outputsTask, stateTask)
                                 if let state {
                                     return (idx, Session(worktree: path, workspace: ws.root, branch: state.branch, head: state.head,
-                                                         dirty: state.dirty, ahead: state.ahead, claude: nil, build: known[path.path],
+                                                         dirty: state.dirty, ahead: state.ahead, agent: nil, build: known[path.path],
                                                          simulator: nil, outputs: outputs, sourcesDate: state.sourcesDate))
                                 } else if var old = before.first(where: { $0.worktree.path == path.path }) {
                                     // One failed call (a lock, a busy disk) must not drop the row, and with it the simulator's.
@@ -660,7 +695,7 @@ final class SessionsController {
                                     // Unborn HEAD or transient git failure: still list the worktree from `git worktree list`.
                                     let head = wt.head.allSatisfy({ $0 == "0" }) ? "" : wt.head
                                     return (idx, Session(worktree: path, workspace: ws.root, branch: wt.branch, head: head,
-                                                         dirty: false, ahead: 0, claude: nil, build: known[path.path],
+                                                         dirty: false, ahead: 0, agent: nil, build: known[path.path],
                                                          simulator: nil, outputs: outputs, sourcesDate: nil))
                                 }
                             }
@@ -682,7 +717,7 @@ final class SessionsController {
             var live = scanned.live
             let complete = scanned.complete
             let all = scanned.all
-            if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
+            if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path); WorkStore.shared.forget(old.worktree.path) } }
             self.sessions = self.attachPulls(ClaudeSessions.shared.attach(all))
             self.refreshPulls(for: spaces)
             self.watch(all)
@@ -694,7 +729,6 @@ final class SessionsController {
                 self.reopenWhenListed = nil
                 if let s = self.sessions.first(where: { $0.worktree.path == want }), self.newestAPK(for: s) != nil { self.activate(s) }
             }
-            if complete { self.autoArchive() }
             self.onChange?()
             self.mainBuilds.ensureAll()   // at most every ten minutes each, unless asked
             if complete {
@@ -743,10 +777,18 @@ final class SessionsController {
 
     // MARK: Switching
 
+    /// The person is now at this session: the panel is about it, and so is the stage when it has no simulator.
+    func go(to session: Session) {
+        focus = session.worktree.path
+        staged = simulator(for: session) == nil ? session.worktree.path : nil
+    }
+
     /// Selects the session's simulator, or starts one from its newest build. Returns whether anything happened.
     @discardableResult
     func activate(_ session: Session) -> Bool {
         guard let wb = workbench else { return false }
+        go(to: session)
+        defer { if staged != nil { wb.reload() } }
         show(session)
         if let sim = simulator(for: session) {
             wb.select(sim)
@@ -840,15 +882,21 @@ final class SessionsController {
     }
 
     /// The session whose worktree is `folder` (a path `git rev-parse --show-toplevel` gave), symlinks resolved.
+    /// The session whose worktree FOLDER is, or is inside of (a harness's hook names the folder its agent works in).
+    func session(containing folder: URL) -> Session? {
+        guard let path = ClaudeSessions.owner(of: folder, among: sessions.map(\.worktree)) else { return nil }
+        return sessions.first { $0.worktree.resolvingSymlinksInPath().path == path }
+    }
+
     func session(atWorktree folder: URL) -> Session? {
         let want = folder.resolvingSymlinksInPath().path
         return sessions.first { $0.worktree.resolvingSymlinksInPath().path == want }
     }
 
-    /// ⌃n: the n-th row (0-based) of every repository's sessions, in the order shown.
+    /// ⌘n: the n-th session row (0-based), in the order shown.
     @discardableResult
     func switchTo(_ index: Int) -> Bool {
-        let rows = groups().flatMap(\.sessions)
+        let rows = orderedSessions()
         guard rows.indices.contains(index) else { return false }
         return activate(rows[index])
     }
@@ -862,7 +910,9 @@ final class SessionsController {
 
     /// Called by the workbench whenever a simulator is selected, however it came to be.
     func selected(_ sim: Simulator?) {
+        if sim != nil { staged = nil }
         guard let sim, let s = session(forSimulator: sim) else { return }
+        focus = s.worktree.path
         noteUsed(s.worktree.path)
     }
 
@@ -1180,6 +1230,16 @@ final class SessionsController {
         evidence.buildArrived(worktree: worktree, build: build, auto: auto(of: s), withData: walksWithData(s))
     }
 
+    /// An agent's turn ended in FOLDER (its hook said so): a repository that walks at the end of a turn has the
+    /// build of that worktree walked now, if it was not already.
+    private func turnEnded(in folder: URL) {
+        guard let path = ClaudeSessions.owner(of: folder, among: sessions.map(\.worktree)),
+              let s = sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == path }) else { return }
+        WorkStore.shared.turnEnded(s.worktree.path)   // what makes a session ready for review (Attention)
+        guard auto(of: s) == .onTurnEnd, let build = builds[s.worktree.path] ?? s.build else { return }
+        evidence.buildArrived(worktree: s.worktree.path, build: build, auto: .onTurnEnd, withData: walksWithData(s))
+    }
+
     /// Whether a queued walk is held back now: a recipe of its workspace is building, or the person is using a
     /// simulator (it starts by itself later).
     private func walkShouldWait(_ owner: String) -> Bool {
@@ -1275,7 +1335,7 @@ final class SessionsController {
 
     func paletteItems() -> [PaletteItem] {
         var out: [PaletteItem] = []
-        let rows = groups().flatMap(\.sessions)
+        let rows = orderedSessions()
         let shown = Set(rows.map(\.worktree.path))
         for (i, s) in (rows + sessions.filter { !shown.contains($0.worktree.path) }).enumerated() {
             let kind = s.simulator != nil ? "running" : (s.outputs == nil ? "no build" : "start")
@@ -1318,7 +1378,7 @@ final class SessionsController {
         let buildColor: NSColor?
         let metadataParts: [(text: String, color: NSColor)]
         let metadataKey: String
-        let agent: ClaudeSession?
+        let agent: AgentSession?
         let extraActiveAgents: Int
         let agentTitle: String?
         let agentSnippet: String?
@@ -1467,8 +1527,8 @@ final class SessionsController {
         return h
     }
 
-    private func shortcutIndex(for s: Session) -> Int? {
-        guard let idx = groups().flatMap(\.sessions).firstIndex(where: { $0.worktree.path == s.worktree.path }), idx < 9 else { return nil }
+    func shortcutIndex(for s: Session) -> Int? {
+        guard let idx = orderedSessions().firstIndex(where: { $0.worktree.path == s.worktree.path }), idx < 9 else { return nil }
         return idx + 1
     }
 
@@ -1490,7 +1550,7 @@ final class SessionsController {
         ].joined(separator: "\u{1f}")
     }
 
-    private static func makePill(_ text: String, textColor: NSColor, fill: NSColor, border: NSColor? = nil, font: NSFont = .systemFont(ofSize: 10, weight: .semibold)) -> NSView {
+    static func makePill(_ text: String, textColor: NSColor, fill: NSColor, border: NSColor? = nil, font: NSFont = .systemFont(ofSize: 10, weight: .semibold)) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.font = font
         label.textColor = textColor
@@ -1520,7 +1580,7 @@ final class SessionsController {
         return pill
     }
 
-    private static func agentStatusStyle(for agent: ClaudeSession) -> (text: String, symbol: String, color: NSColor, border: NSColor, fill: NSColor) {
+    private static func agentStatusStyle(for agent: AgentSession) -> (text: String, symbol: String, color: NSColor, border: NSColor, fill: NSColor) {
         let agentPurple = NSColor(srgbRed: 0.616, green: 0.569, blue: 1.0, alpha: 1)
         if agent.status == .waiting {
             return ("Waiting for you", "exclamationmark.circle.fill", Design.warning,
@@ -1547,19 +1607,8 @@ final class SessionsController {
                 Design.stroke, NSColor(white: 0, alpha: 0.18))
     }
 
-    private func openAgent(_ agent: ClaudeSession, in worktree: URL) {
-        if agent.source == .t3 {
-            T3Sessions.open(worktree) { [weak self] why in
-                if let why {
-                    if let link = agent.link { NSWorkspace.shared.open(link) }
-                    else { self?.workbench?.toast.show(why, problem: true) }
-                }
-            }
-        } else {
-            if !ClaudeSessions.openInClaude(agent) {
-                workbench?.toast.show("Claude is not installed on this Mac", problem: true)
-            }
-        }
+    private func openAgent(_ agent: AgentSession, in worktree: URL) {
+        ClaudeSessions.open(agent, in: worktree) { [weak self] why in self?.workbench?.toast.show(why, problem: true) }
     }
 
     // matchFont: an attributed label keeps the field's default 13pt font for its line height and baseline, so
@@ -1678,7 +1727,7 @@ final class SessionsController {
             headerViews.append(modelLabel)
         }
 
-        let openBtn = ClosureButton(symbol: "arrow.up.right", tip: "Open in \(agent.sourceName)") { [weak self] in
+        let openBtn = ClosureButton(symbol: "arrow.up.right", tip: "Open in \(agent.appName)") { [weak self] in
             self?.openAgent(agent, in: s.worktree)
         }
         openBtn.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
@@ -1995,7 +2044,7 @@ final class SessionsController {
             actionRowView = actionRow
         }
 
-        // Rich tooltip with complete PR, Git, and all T3 Code / Claude sessions on this worktree.
+        // Rich tooltip with complete PR, Git, and all the agents' sessions on this worktree.
         var tip: [String] = []
         if let pr = s.githubPR {
             var line = "PR #\(pr.number): \(pr.title) (\(pr.statusBadge))"
@@ -2009,7 +2058,7 @@ final class SessionsController {
         }
         tip.append("Branch: \(p.branchLabel) (\(s.shortHead)\(s.ahead > 0 ? ", \(s.ahead) ahead" : "")\(s.dirty ? ", edited" : ""))")
         tip.append("Worktree: \((s.worktree.path as NSString).abbreviatingWithTildeInPath)")
-        let allAgents = s.agentSessions.isEmpty ? [s.claude].compactMap { $0 } : s.agentSessions
+        let allAgents = s.agentSessions.isEmpty ? [s.agent].compactMap { $0 } : s.agentSessions
         for a in allAgents.prefix(4) {
             let st = Self.agentStatusStyle(for: a).text
             let modelStr = a.shortModel.map { " [\($0)]" } ?? ""
@@ -2099,7 +2148,7 @@ final class SessionsController {
         } else if let n = s.pullRequests.first(where: { $0.state == .open })?.number {
             subBits.append("#\(n) Open")
         }
-        if let agent = s.displayAgent ?? s.claude {
+        if let agent = s.displayAgent ?? s.agent {
             let st = Self.agentStatusStyle(for: agent).text
             subBits.append("\(agent.sourceName) · \(st)")
         }
@@ -2108,7 +2157,7 @@ final class SessionsController {
 
         let sub = NSTextField(labelWithString: subText)
         sub.font = .systemFont(ofSize: 10)
-        sub.textColor = (s.displayAgent?.status == .waiting || s.claude?.status == .waiting) ? Design.warning : .secondaryLabelColor
+        sub.textColor = (s.displayAgent?.status == .waiting || s.agent?.status == .waiting) ? Design.warning : .secondaryLabelColor
         sub.maximumNumberOfLines = 1
         sub.lineBreakMode = .byTruncatingTail
         sub.cell?.usesSingleLineMode = true
@@ -2141,7 +2190,7 @@ final class SessionsController {
 
     /// The suggestion row's key, like `rowKey`.
     func suggestionKey(for s: Session) -> String {
-        let agent = s.displayAgent ?? s.claude
+        let agent = s.displayAgent ?? s.agent
         return [
             s.title,
             s.branch ?? "",
@@ -2157,7 +2206,7 @@ final class SessionsController {
 
     private static let ageFormatter: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated; return f }()
 
-    private static func age(_ date: Date) -> String {
+    static func age(_ date: Date) -> String {
         "built " + ageFormatter.localizedString(for: date, relativeTo: Date())
     }
 }

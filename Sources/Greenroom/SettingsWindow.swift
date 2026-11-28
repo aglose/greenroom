@@ -139,7 +139,10 @@ struct SettingsView: View {
     @State private var claudeSessions = ClaudeSessions.shared.enabled
     @State private var t3Sessions = T3Sessions.shared.enabled
     @State private var reopenLast = LastOpened.enabled
-    @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.autoArchiveKey) as? Bool ?? true
+    @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.completeOnMergeKey) as? Bool ?? true
+    @State private var notifySessions = Notifier.enabled
+    @State private var groupByRepository = CheckedDefault.bool(SessionsController.groupByRepositoryKey)
+    @State private var watchCI = CIWatch.enabled
     @State private var sessionsWarm = max(1, min(6, UserDefaults.standard.object(forKey: "sessionsWarm") as? Int ?? 3))
 
     // Sidebar badges
@@ -162,10 +165,7 @@ struct SettingsView: View {
         variableCount = Variables.shared.names().count
         let scripts = Scripts.list(in: Scripts.folder)
         hasModifiedScripts = scripts.contains { Scripts.approval($0) == .changed }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let connected = ClaudeConnect.status() == .connected
-            DispatchQueue.main.async { claudeConnected = connected }
-        }
+        ConnectModel.shared.refresh { claudeConnected = !ConnectModel.shared.connectedNames.isEmpty }
     }
 
     var body: some View {
@@ -275,7 +275,7 @@ struct SettingsView: View {
                 .help("A script changed since you approved it for agents")
         case .agents where claudeConnected:
             Circle().fill(SettingsTheme.accent).frame(width: 7, height: 7)
-                .help("Claude Code connected")
+                .help("An agent is connected")
         default:
             EmptyView()
         }
@@ -386,22 +386,53 @@ struct SettingsView: View {
             }
 
             SettingsCard {
-                ClaudeConnectView(onStatusChange: { claudeConnected = ($0 == .connected) })
-                Divider().overlay(SettingsTheme.stroke)
+                HarnessList(model: ConnectModel.shared, ticks: false)
+            }
+            .onAppear { ConnectModel.shared.refresh() }
+
+            SettingsCard {
                 settingsToggleRow(
-                    title: "Show Claude Code sessions in sidebar",
-                    subtitle: "Reads local Claude Code transcripts and read-only git status. Sent nowhere.",
+                    title: "Notify me when a session is ready or needs me",
+                    subtitle: "A notification on this Mac when an agent's session becomes ready for review or waits on you, while Greenroom is not in front. ⌘' goes to the next one.",
+                    isOn: $notifySessions
+                )
+                .onChange(of: notifySessions) { _, on in
+                    guard on != Notifier.enabled else { return }
+                    Notifier.set(on) { granted in if on, !granted { notifySessions = false; Notifier.set(false) } }
+                }
+
+                settingsToggleRow(
+                    title: "Group sessions by repository",
+                    subtitle: "The sidebar lists each repository's worktrees under its name, instead of by what they need from you (ready for review, needs you, working, quiet).",
+                    isOn: $groupByRepository
+                )
+                .onChange(of: groupByRepository) { _, on in (NSApp.delegate as? AppDelegate)?.workbench?.sessions.groupByRepository = on }
+
+                settingsToggleRow(
+                    title: "Watch CI for pushed sessions",
+                    subtitle: "For a session whose commit is pushed, asks GitHub (gh, your sign-in) for that commit's runs, shows them in its loop, fetches the APK of a repository that builds on CI, and tells the agent how it ended. It never starts a workflow.",
+                    isOn: $watchCI
+                )
+                .onChange(of: watchCI) { _, on in
+                    CIWatch.enabled = on
+                    (NSApp.delegate as? AppDelegate)?.workbench?.sessions.ciWatch.tick()
+                }
+            }
+
+            SettingsCard {
+                settingsToggleRow(
+                    title: "Read Claude Code's session files",
+                    subtitle: "Titles, pull requests and sessions from before Claude Code was connected, from its local transcripts. A connected agent's status comes from its hooks. Sent nowhere.",
                     isOn: $claudeSessions
                 )
                 .onChange(of: claudeSessions) { _, on in ClaudeSessions.shared.enabled = on }
 
                 settingsToggleRow(
-                    title: "Auto-archive session when its pull request merges",
-                    subtitle: "Moves finished sessions to Archived in the + menu; worktree and data stay.",
+                    title: "Move a session to Completed when its pull request merges",
+                    subtitle: "Completed is at the bottom of the sidebar. Reopening a session, or a new pull request of it, brings it back.",
                     isOn: $autoArchive
                 )
-                .disabled(!claudeSessions && !t3Sessions)
-                .onChange(of: autoArchive) { _, on in UserDefaults.standard.set(on, forKey: SessionsController.autoArchiveKey) }
+                .onChange(of: autoArchive) { _, on in (NSApp.delegate as? AppDelegate)?.workbench?.sessions.completeOnMerge = on }
             }
 
             SettingsCard {

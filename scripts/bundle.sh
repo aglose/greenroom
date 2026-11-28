@@ -72,6 +72,9 @@ if [[ "$VARIANT" == debug ]]; then
       -c "Set :CFBundleDisplayName Greenroom Debug" -c "Add :GreenroomVariant string debug" \
       -c "Delete :SUFeedURL" -c "Delete :SUPublicEDKey" "$C/Info.plist"
   $PB -c "Delete :GreenroomReportsURL" "$C/Info.plist" 2>/dev/null || true
+  # Its links are greenroom-debug://, so a greenroom:// link always opens the release.
+  $PB -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 greenroom-debug" \
+      -c "Set :CFBundleURLTypes:0:CFBundleURLName io.github.aglose.greenroom.debug.link" "$C/Info.plist"
   # Opening an .apk or .apkrec by double-click stays the release's: the debug copy only offers itself.
   i=0; while $PB -c "Print :CFBundleDocumentTypes:$i" "$C/Info.plist" >/dev/null 2>&1; do
     $PB -c "Set :CFBundleDocumentTypes:$i:LSHandlerRank Alternate" "$C/Info.plist"; i=$((i+1))
@@ -84,6 +87,11 @@ fi
 cp -Rc "$ENGINE" "$C/Resources/engine"
 cp "$TESTAPP" "$C/Resources/engine-testapp.apk"
 cp -R Resources/recipes "$C/Resources/recipes"
+# The greenroom command (the Connect screen links it into a folder on the PATH) and the skill it writes for
+# harnesses without the plugin: the plugin's own files, so the two never differ.
+mkdir -p "$C/Resources/bin" "$C/Resources/skill"
+install -m 755 plugin/bin/greenroom "$C/Resources/bin/greenroom"
+install -m 644 plugin/skills/verify/SKILL.md "$C/Resources/skill/SKILL.md"
 chmod -R u+w "$APP"   # a release's JDK files are read-only; signing rewrites them
 xattr -cr "$APP"
 
@@ -129,8 +137,8 @@ if [[ -n "$CHECK" ]]; then
   # The workbench's path: the screen streamed to the app as H.264 and decoded, input over the control channel.
   "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
   # The agent interface, as an agent uses it.
-  CONNECT_DIR=; PLAIN_STATE=; SCRIPTS_DIR=
-  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE" "$SCRIPTS_DIR"' EXIT   # the temporary folders go on failure too
+  CONNECT_DIR=; PLAIN_STATE=; SCRIPTS_DIR=; WAITING_DIR=; ATTENTION_DIR=; REVIEW_DIR=
+  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE" "$SCRIPTS_DIR" "$WAITING_DIR" "$ATTENTION_DIR" "$REVIEW_DIR"' EXIT   # the temporary folders go on failure too
   # Per-device app data, variables (in memory) and scripts with gr, against real simulators, in a state folder of its own.
   SCRIPTS_DIR=$(mktemp -d /tmp/grscripts.XXXXXX)
   scripts_out=$("$C/MacOS/Greenroom" --background --scripts-check "$SCRIPTS_DIR" "$C/Resources/engine-testapp.apk" | grep '^\[greenroom\] scripts:' || true)
@@ -145,6 +153,15 @@ if [[ -n "$CHECK" ]]; then
   "$C/MacOS/Greenroom" --connect-check "$CONNECT_DIR" | tail -3
   # The stage's "Can't reach" notice: which addresses it names and why, from made-up network rows.
   "$C/MacOS/Greenroom" --unreachable-check | tail -1
+  # The stage with no device on it: it waits for an agent, and File > Run an APK… is the only drop target.
+  WAITING_DIR=$(mktemp -d /tmp/grwaiting.XXXXXX)
+  GREENROOM_STATE="$WAITING_DIR/state" "$C/MacOS/Greenroom" --background --agent-check --waiting-check "$WAITING_DIR" | tail -1
+  # The sidebar by what sessions need: groups, counts, the Dock badge and the notification, from stand-in sessions.
+  ATTENTION_DIR=$(mktemp -d /tmp/grattention.XXXXXX)
+  GREENROOM_STATE="$ATTENTION_DIR/state" "$C/MacOS/Greenroom" --background --agent-check --attention-check "$ATTENTION_DIR" | tail -1
+  # The review side: the session panel in each state, Approve and Request Changes, and Merge through a stand-in gh.
+  REVIEW_DIR=$(mktemp -d /tmp/grreview.XXXXXX)
+  GREENROOM_STATE="$REVIEW_DIR/state" "$C/MacOS/Greenroom" --background --agent-check --review-check "$REVIEW_DIR" | tail -1
   # The agent tied to its worktree's session: two worktrees, a state folder of its own.
   "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk" --sessions
   # The Claude Code plugin: its manifests, and its launcher script serving MCP through this app.

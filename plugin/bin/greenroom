@@ -1,0 +1,87 @@
+#!/bin/sh
+# The `greenroom` command: Greenroom from a shell. The same tools an agent has over MCP (`greenroom launch`,
+# `greenroom tap --text Add`, `greenroom check --visible Saved`), plus `greenroom mcp` (the stdio server),
+# `greenroom hook EVENT` (what a harness's hook calls) and `greenroom open` (the window, an APK, a worktree, a link).
+# `greenroom help` lists them. Everything is done by the app's own program; this script only finds it.
+#
+# It is in two places: inside Greenroom.app (Contents/Resources/bin/greenroom, which the Connect screen can link
+# into a folder on your PATH) and in the Claude Code plugin's bin/, which Claude Code puts on its Bash tool's PATH.
+#
+# The app is, in order:
+#   1. the Greenroom.app this script is inside, when it is inside one;
+#   2. $GREENROOM_APP, when set: the path of a Greenroom.app (a build of your own, or a check's);
+#   3. /Applications/Greenroom.app, then ~/Applications/Greenroom.app;
+#   4. Spotlight's answer for the bundle id (io.github.aglose.greenroom).
+#
+# $GREENROOM_MCP_ARGS, when set, is added to the command line (split on spaces). Greenroom's own checks set it to
+# --agent-check, which with GREENROOM_STATE gives the app a state folder of its own; leave it unset otherwise.
+BUNDLE_ID=io.github.aglose.greenroom
+
+# `greenroom hook` is run by a harness after every prompt and tool call: with no app to tell (not installed, or one
+# from before the command) it says nothing and exits 0, so a hook never fails or holds up an agent's turn.
+quiet=
+[ "${1:-}" = hook ] && quiet=1
+
+fail() {
+  [ -n "$quiet" ] && exit 0
+  echo "greenroom: $1" >&2
+  exit 1
+}
+
+program() { # APP: its executable, if it is there
+  [ -x "$1/Contents/MacOS/Greenroom" ] && echo "$1/Contents/MacOS/Greenroom"
+}
+
+first_installed() { # paths of apps on stdin: the program of the first that has one
+  # Spotlight may list several copies. Skipped: one macOS runs from a temporary place (App Translocation), one on
+  # a mounted disk image, one in the Trash. Those paths stop existing.
+  while IFS= read -r app; do
+    case "$app" in
+      */AppTranslocation/* | /Volumes/* | */.Trash/*) continue ;;
+    esac
+    program "$app" && return 0
+  done
+  return 1
+}
+
+# Where this script really is: a link on the PATH leads to the copy inside the app.
+self=$0
+n=0
+while [ -L "$self" ] && [ "$n" -lt 16 ]; do
+  target=$(readlink "$self")
+  case "$target" in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+  n=$((n + 1))
+done
+here=$(cd "$(dirname "$self")" 2>/dev/null && pwd -P)
+
+exe=
+case "$here" in
+  */Contents/Resources/bin) exe=$(program "${here%/Contents/Resources/bin}") || exe= ;;
+esac
+if [ -z "$exe" ]; then
+  if [ -n "${GREENROOM_APP:-}" ]; then
+    exe=$(program "${GREENROOM_APP%/}") || fail "GREENROOM_APP is set to $GREENROOM_APP, which is not a Greenroom.app (no Contents/MacOS/Greenroom in it)."
+  else
+    for app in /Applications/Greenroom.app "$HOME/Applications/Greenroom.app"; do
+      exe=$(program "$app") && break
+    done
+    if [ -z "$exe" ] && command -v mdfind >/dev/null 2>&1; then
+      exe=$(mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null | first_installed)
+    fi
+    [ -n "$exe" ] || fail "Greenroom.app was not found in /Applications, in ~/Applications or by Spotlight. Install Greenroom (https://github.com/aglose/greenroom/releases), move it to Applications and open it once; or set GREENROOM_APP to the path of your Greenroom.app."
+  fi
+fi
+
+# exec, so this command's parent is still the agent: the app ties a call to the agent's worktree by that.
+if [ "${1:-}" = mcp ] && [ $# -eq 1 ]; then
+  # The stdio server, started the way every Greenroom that has one understands.
+  # shellcheck disable=SC2086
+  exec "$exe" --mcp ${GREENROOM_MCP_ARGS:-}
+fi
+# An app from before the command existed would open its window instead of answering.
+[ -f "${exe%/MacOS/Greenroom}/Resources/bin/greenroom" ] || fail "${exe%/Contents/MacOS/Greenroom} is older than the greenroom command (only \`greenroom mcp\` works with it). Update Greenroom: Greenroom > Check for Updates…"
+# shellcheck disable=SC2086
+exec "$exe" ${GREENROOM_MCP_ARGS:-} --cli "$@"

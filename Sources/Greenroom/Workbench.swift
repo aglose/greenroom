@@ -70,6 +70,16 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
     private var agentPanel: AgentPanel?
     private let agentHost = NSView()
+    /// The review side: the session panel that shares the agent pane, the loop strip, pins and Merge (Review.swift).
+    private(set) lazy var review = ReviewController(workbench: self)
+    /// The agent pane shows every agent's calls (the old panel) instead of the chosen session.
+    private(set) var agentPaneAll = false
+    private var gridTop: NSLayoutConstraint!
+    /// The chosen simulator, for the review side.
+    var chosen: Simulator? { selected }
+    func say(_ text: String, problem: Bool = false) { lastSaid = text; toast.show(text, problem: problem) }
+    /// The last thing the review side said in the toast (for a check).
+    private(set) var lastSaid = ""
     private let status = NSTextField(wrappingLabelWithString: "")
     // The floating chrome: a glass bar along the top, a badged rail on the right, override pills & Agent HUD on stage.
     private let header = GlassView()
@@ -126,7 +136,21 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private let recordingsPane = RecordingsPane(frame: .zero)
     private var recordingsLeading: NSLayoutConstraint!
     private static let recordingsWidth: CGFloat = 470
+    /// The APK screen (File > Run an APK…): on the stage only while `showingAPK`.
     private let emptyStage = EmptyStage(frame: .zero)
+    /// What the stage shows with nothing running: waiting for an agent.
+    private let waitingStage = WaitingStage(frame: .zero)
+    /// What the stage shows for a chosen session with no simulator.
+    private let sessionStage = SessionStage(frame: .zero)
+    /// Whether it is shown, and what it says (for a check).
+    var sessionStageShown: Bool { stageWanted[ObjectIdentifier(sessionStage)] ?? !sessionStage.isHidden }
+    var sessionStageTexts: [String] { sessionStage.texts }
+    /// The Connect screen (first run, and File > Connect Agents…): on the stage only while `showingConnect`.
+    private let connectStage = ConnectStage(frame: .zero)
+    private var showingConnect = false
+    private var showingAPK = false
+    private var simulatorsSeen = 0
+    private var stageWanted: [ObjectIdentifier: Bool] = [:]
     let toast = Toast(frame: .zero)
     let palette = Palette(frame: .zero)
     private let scrim = Scrim()
@@ -138,6 +162,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     let walkChip = WalkProgressChip()
     /// The job queue, in the top bar whichever session is shown (JobsUI.swift).
     let jobsChip = JobsChip()
+    /// How many sessions are ready, need the person or are at work, in the top bar (AttentionUI.swift).
+    let attentionChip = AttentionChip()
     // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
     let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
@@ -146,12 +172,19 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// What each row showed when it was drawn (`key(of:)`): a reload redraws only the rows whose key moved.
     private var rowKeys: [String] = []
     private var sidebarPending = false
+    /// Rows are on their way to new places (a session going to Completed): the next look at them waits for that.
+    private var sidebarMoving = 0
+    private var sidebarWaiting = false
     private(set) var selected: Simulator?
     /// The Sessions section of the sidebar (SessionsController.swift).
     let sessions = SessionsController()
 
     private enum Row {
         case header(String)
+        /// A group of the sidebar by attention ("Ready for review"), and how many rows it holds.
+        case attentionHeader(Attention, Int)
+        /// A repository, under the groups: its name and its + menu (the sidebar by attention has no header for it).
+        case repository(String, URL, hidden: Int)
         /// A repository's header, with its + menu; `hidden` is how many of its worktrees the menu holds.
         case sessionsHeader(String, URL, hidden: Int)
         /// "Add a session" under a repository that shows none.
@@ -198,13 +231,24 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         let content = NSViewController()
         let stack = StageBackground()
-        for v in [grid, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        let loopStrip = review.stripView
+        for v in [grid, waitingStage, sessionStage, connectStage, emptyStage, loopStrip, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        // The loop strip sits over the devices of the chosen session, and the stage makes room for it.
+        gridTop = grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8)
+        review.onStrip = { [weak self] on in self?.gridTop.constant = Design.barHeight + 8 + (on ? 44 : 0) }
+        emptyStage.isHidden = true
+        sessionStage.isHidden = true
+        connectStage.isHidden = true
+        connectStage.flow.onDone = { [weak self] in self?.leaveConnectScreen() }
+        connectStage.flow.onRunAPK = { [weak self] in self?.runAPK(nil) }
+        ConnectModel.shared.onChange = { [weak self] in self?.reloadWaitingStage() }
         emptyStage.onOpen = { [weak self] in self?.open($0) }
-        emptyStage.onAddRepo = { [weak self] in self?.addRepository(nil) }
+        emptyStage.onBack = { [weak self] in self?.leaveAPKScreen() }
+        waitingStage.onRunAPK = { [weak self] in self?.runAPK(nil) }
+        waitingStage.onAddRepo = { [weak self] in self?.addRepository(nil) }
+        waitingStage.onConnect = { [weak self] in self?.connectAgents(nil) }
         DevHooks.shared.install(workbench: self, in: stack, over: grid)   // developer hooks (DevHooks.swift)
         emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
-        emptyStage.onFolder = { [weak self] in self?.sessions.chooseProjectToRun() }
-        emptyStage.onClone = { [weak self] in self?.sessions.askToClone() }
         bottomDock.isHidden = true
         bottomDockHeight = bottomDock.heightAnchor.constraint(equalToConstant: 0)
         gridTrailing = grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -68)
@@ -216,7 +260,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
         buildAgentHud()
         NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
+            gridTop,
+            loopStrip.topAnchor.constraint(equalTo: stack.topAnchor, constant: Design.barHeight + 8),
+            loopStrip.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
+            loopStrip.trailingAnchor.constraint(equalTo: grid.trailingAnchor, constant: -14),
+            loopStrip.heightAnchor.constraint(equalToConstant: 38),
             grid.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
             gridTrailing,
             grid.bottomAnchor.constraint(equalTo: bottomDock.topAnchor, constant: -6),
@@ -224,6 +272,18 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             emptyStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
             emptyStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
             emptyStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            sessionStage.topAnchor.constraint(equalTo: grid.topAnchor),
+            sessionStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
+            sessionStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
+            sessionStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            waitingStage.topAnchor.constraint(equalTo: grid.topAnchor),
+            waitingStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
+            waitingStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
+            waitingStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            connectStage.topAnchor.constraint(equalTo: grid.topAnchor),
+            connectStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
+            connectStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
+            connectStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
             overrideBar.trailingAnchor.constraint(equalTo: grid.trailingAnchor, constant: -14),
             overrideBar.topAnchor.constraint(equalTo: grid.topAnchor, constant: 12),
             agentHud.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
@@ -276,6 +336,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         reload()
         sessions.onChange = { [weak self] in self?.setNeedsSidebar() }   // the rows only: the stage did not change
         sessions.install(workbench: self)
+        lookAtFirstRun()   // after the repositories are loaded: someone who has one is past first run
         let quick = QuickSignIn(workbench: self)
         quickSignIn = quick
         ScriptWindow.onOffersChanged = { [weak quick] in quick?.refresh() }
@@ -442,22 +503,52 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         for v in grid.views { if let sim = v.simulator, case .ended(let code) = sim.state { v.setMessage(Self.ended(sim, code)) } }
         for v in grid.views {
-            v.inspecting = inspecting && v.simulator === selected
-            v.onPoint = { [weak self] x, y in self?.inspector.pick(atDeviceX: x, y: y) }
+            // Pinning a comment picks a node too, on the session's own device, with the Inspector closed.
+            let pinning = review.isPinning(v.simulator)
+            v.inspecting = (inspecting && v.simulator === selected) || pinning
+            v.onPoint = { [weak self, weak v] x, y in
+                guard let self else { return }
+                if let sim = v?.simulator, self.review.isPinning(sim) { self.review.point(sim, x: x, y: y) } else { self.inspector.pick(atDeviceX: x, y: y) }
+            }
+            v.onPick = { [weak self, weak v] x, y in
+                guard let self, let sim = v?.simulator else { return }
+                self.review.pick(sim, x: x, y: y)
+            }
         }
     }
 
-    private func reload() {
+    func reload() {
         let sims = Engine.shared.simulators
         if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
         refreshGrid()
         memoryMeter.watch(sims)
-        let nothing = sims.isEmpty
-        if emptyStage.isHidden == nothing {   // shown when nothing runs, gone (after a fade) when something does
-            if nothing { emptyStage.reload(); emptyStage.alphaValue = 0; emptyStage.isHidden = false }
-            Design.animate(Design.arrive, { self.emptyStage.animator().alphaValue = nothing ? 1 : 0 },
-                           done: { if !Engine.shared.simulators.isEmpty { self.emptyStage.isHidden = true } })
+        // An app that opens takes the stage back from the APK screen. With nothing running the stage waits for an agent.
+        if sims.count > simulatorsSeen {
+            showingAPK = false
+            if showingConnect {   // the agent's app is here: the screens have done their work
+                showingConnect = false
+                ConnectModel.firstRunDone = true
+                // First run's last step, in a line: the device is the thing to look at now.
+                if Notifier.asked {
+                    toast.show("You are set: sessions show in the sidebar by what they need, and ⌘' goes to the next that needs you")
+                } else {
+                    toast.show("You are set: sessions show in the sidebar by what they need, and ⌘' goes to the next that needs you", action: "Notify Me") { [weak self] in
+                        Notifier.set(true) { granted in
+                            if !granted { Notifier.set(false) }
+                            self?.toast.show(granted ? "You are told when a session is ready or needs you. Settings > Agents changes it."
+                                                     : "macOS did not allow notifications. System Settings > Notifications turns them on.", problem: !granted)
+                        }
+                    }
+                }
+            }
         }
+        simulatorsSeen = sims.count
+        setStage(emptyStage, shown: showingAPK) { self.emptyStage.reload() }
+        setStage(connectStage, shown: showingConnect && !showingAPK) { self.reloadConnectStage() }
+        setStage(waitingStage, shown: sims.isEmpty && !showingAPK && !showingConnect) { self.reloadWaitingStage() }
+        let staged = sessions.stagedSession
+        if let staged { sessionStage.show(title: staged.title, line: sessions.stageLine(for: staged)) }
+        setStage(sessionStage, shown: staged != nil && !showingAPK && !showingConnect) {}
         if showingLog { logPanel.follow(selected) }
         if showingNetwork { networkPane.follow(selected) }
         if showingDevice { devicePane.follow(selected) }
@@ -470,7 +561,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
 
     /// Asks for the rows to be worked out again, once, at the end of this turn of the run loop: a build line, a
-    /// walk's progress and a Claude session's write arriving together make one redraw, not three.
+    /// walk's progress and an agent session's write arriving together make one redraw, not three.
     private func setNeedsSidebar() {
         guard !sidebarPending else { return }
         sidebarPending = true
@@ -487,19 +578,50 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// redrawn.
     private func reloadSidebar() {
         sidebarPending = false
+        if sidebarMoving != 0 { sidebarWaiting = true; return }
         let sims = Engine.shared.simulators
         // Built aside and swapped in at once: groups() can run the run loop (Git.available waits for xcode-select), and
         // the table laying out there would read rows it was never told about.
         var rows: [Row] = []
         let groups = sessions.groups()
         if !groups.isEmpty && ClaudeUI.offersTitles { rows.append(.claudeTitles) }   // rows read as branches, and nothing is suggested, until it is on
-        for group in groups {
-            guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
-            rows.append(.sessionsHeader(group.header, ws, hidden: group.hidden))
-            let main = sessions.mainRow(for: ws)
-            if let main { rows.append(.main(main)) }
-            if group.sessions.isEmpty && main == nil { rows.append(.addSession(ws, hidden: group.hidden)) }
-            rows += group.sessions.map { .session($0) }
+        sessions.noteAttention()   // which group each session is in, since when, and the news of it
+        attentionChip.show(sessions.lastCounts)
+        reloadReview()
+        // The sessions whose pull request merged: one section at the very bottom, however the rest is grouped.
+        var completed: [Session] = []
+        if sessions.groupByRepository {
+            for group in groups {
+                guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
+                rows.append(.sessionsHeader(group.header, ws, hidden: group.hidden))
+                let main = sessions.mainRow(for: ws)
+                if let main { rows.append(.main(main)) }
+                if group.sessions.isEmpty && main == nil { rows.append(.addSession(ws, hidden: group.hidden)) }
+                for s in group.sessions {
+                    if sessions.attention(of: s).group == .completed { completed.append(s) } else { rows.append(.session(s)) }
+                }
+            }
+        } else {
+            // By what they need (Attention.swift): the groups, then the repositories, each with its + menu.
+            for (group, list) in sessions.attentionGroups() {
+                if group == .completed {
+                    completed = list.compactMap { row -> Session? in if case .session(let s, _) = row { return s }; return nil }
+                    continue
+                }
+                rows.append(.attentionHeader(group, list.count))
+                for row in list {
+                    switch row {
+                    case .session(let s, _): rows.append(.session(s))
+                    case .main(let m, _): rows.append(.main(m))
+                    }
+                }
+            }
+            if !groups.isEmpty {
+                if groups.contains(where: { $0.workspace != nil }) { rows.append(.header("Repositories")) }
+                for group in groups {
+                    if let ws = group.workspace { rows.append(.repository(group.header, ws, hidden: group.hidden)) } else { rows.append(.header(group.header)) }
+                }
+            }
         }
         let suggested = sessions.suggestions()
         let offers = ClaudeSessions.shared.offers
@@ -524,13 +646,26 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             rows.append(.header("Recent"))
             rows += recents.map { .recent($0) }
         }
-        let keys = rows.map(key(of:))
+        if !completed.isEmpty {
+            rows.append(.attentionHeader(.completed, completed.count))
+            if !sessions.completedCollapsed { rows += completed.map { .session($0) } }
+        }
+        var keys = rows.map(key(of:))
         let sameShape = keys.count == rowKeys.count && zip(rows, self.rows).allSatisfy { Self.identity($0) == Self.identity($1) }
         let changed = IndexSet(keys.indices.filter { !sameShape || keys[$0] != rowKeys[$0] })
+        let old = self.rows.map(Self.identity)
+        let oldKeys = Dictionary(zip(old, rowKeys), uniquingKeysWith: { a, _ in a })
         self.rows = rows
-        self.rowKeys = keys
-        if !sameShape { table.reloadData() }
+        if !sameShape, moveRows(from: old, to: rows.map(Self.identity)) {
+            // A row that stayed or moved still shows what it did: it is drawn again when it has arrived.
+            for (i, row) in rows.enumerated() { if let was = oldKeys[Self.identity(row)] { keys[i] = was } }
+            self.rowKeys = keys
+        } else if !sameShape {
+            self.rowKeys = keys
+            table.reloadData()
+        }
         else if !changed.isEmpty {
+            self.rowKeys = keys
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0
                 // New cells first, then their heights: inside one update block the fresh cell was framed at the
@@ -540,7 +675,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             }
         }
         let selected = self.selected
-        let want = selected.flatMap { s in rows.firstIndex(where: {
+        let stagedPath = sessions.stagedSession?.worktree.path
+        let want = stagedPath.flatMap { p in rows.firstIndex(where: { if case .session(let x) = $0 { return x.worktree.path == p }; return false }) }
+            ?? selected.flatMap { s in rows.firstIndex(where: {
             if case .session(let x) = $0 { return x.simulator === s }
             if case .main(let x) = $0 { return x.simulator === s }
             if case .pull(let x) = $0 { return x.simulator === s }
@@ -552,10 +689,63 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac" + notes.map { "\n" + $0 }.joined()
     }
 
+    /// Takes the table from the rows `old` to the rows `new` (their identities) with each row travelling to its
+    /// place: a session that completed slides down to Completed, the ones under it close the gap, a section that
+    /// appears fades in. `self.rows` is already the new rows. Answers false, having done nothing, when the change
+    /// is not one to animate (the first rows, reduced motion, a check, which reads the rows at once, unless it was
+    /// asked to run in slow motion so that this can be looked at).
+    private func moveRows(from old: [String], to new: [String]) -> Bool {
+        guard !old.isEmpty, !new.isEmpty, !Design.reduceMotion, !CheckedDefault.inCheck || Design.slow != 1, table.window != nil,
+              table.numberOfRows == old.count, Set(old).count == old.count, Set(new).count == new.count else { return false }
+        let before = Set(old), after = Set(new)
+        // The rows that keep their order among themselves stay put; the others are the ones that travel.
+        let kept = new.filter(before.contains)
+        var out = Set<String>()
+        for change in kept.difference(from: old.filter(after.contains)) { if case .insert(_, let id, _) = change { out.insert(id) } }
+        let travelling = kept.filter(out.contains)
+        sidebarMoving += 1
+        let move = sidebarMoving
+        let arrived: () -> Void = { [weak self] in
+            guard let self, self.sidebarMoving == move else { return }
+            self.sidebarMoving = 0
+            self.sidebarWaiting = false
+            self.reloadSidebar()   // the rows that moved are drawn as what they now are, and whatever waited is shown
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = Design.move
+            ctx.timingFunction = Design.moveTiming()
+            table.beginUpdates()
+            var now = old
+            for i in now.indices.reversed() where !after.contains(now[i]) {
+                table.removeRows(at: [i], withAnimation: .effectFade)
+                now.remove(at: i)
+            }
+            // Each traveller goes to just under the row it follows in the new order (already in place: the ones
+            // before it were moved first).
+            for id in travelling {
+                guard let from = now.firstIndex(of: id), let at = kept.firstIndex(of: id) else { continue }
+                now.remove(at: from)
+                let to = at == 0 ? 0 : (now.firstIndex(of: kept[at - 1]) ?? -1) + 1
+                now.insert(id, at: to)
+                if from != to { table.moveRow(at: from, to: to) }
+            }
+            for (i, id) in new.enumerated() where !before.contains(id) {
+                table.insertRows(at: [i], withAnimation: .effectFade)
+                now.insert(id, at: i)
+            }
+            table.endUpdates()
+        }, completionHandler: arrived)
+        // Should the table never say it finished (its window closed meanwhile), the sidebar is not left waiting.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Design.move + 0.4, execute: arrived)
+        return true
+    }
+
     /// Which thing a row stands for (not how it looks): rows that keep their identities in place are redrawn one by one.
     private static func identity(_ row: Row) -> String {
         switch row {
         case .header(let t): return "h:" + t
+        case .attentionHeader(let g, _): return "ah:\(g.rawValue)"
+        case .repository(let t, let ws, _): return "repo:" + t + ws.path
         case .sessionsHeader(let t, let ws, _): return "sh:" + t + ws.path
         case .addSession(let ws, _): return "add:" + ws.path
         case .suggestion(let s): return "sg:" + s.worktree.path
@@ -572,12 +762,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// Everything a row shows.
     private func key(of row: Row) -> String {
         switch row {
-        case .sessionsHeader(_, let ws, let hidden):
+        case .sessionsHeader(_, let ws, let hidden), .repository(_, let ws, let hidden):
             let appTag = sessions.apps(for: ws).count > 1 ? (sessions.selectedApp(for: ws)?.id ?? "") : ""
             let scanning = sessions.scanningWorkspaces.contains(ws.path) ? "1" : "0"
             return Self.identity(row) + "|\(hidden)|\(sessions.apps(for: ws).count)|\(appTag)|\(scanning)"
+        case .attentionHeader(let g, let count): return Self.identity(row) + "|\(count)" + (g == .completed ? "|\(sessions.completedCollapsed)" : "")
         case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
-        case .session(let s): return Self.identity(row) + "|" + sessions.rowKey(for: s)
+        case .session(let s):
+            if sessions.groupByRepository { return Self.identity(row) + "|R|" + sessions.rowKey(for: s) }
+            return Self.identity(row) + "|A|" + sessions.attentionKey(for: s, sessions.attention(of: s))
         case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
         case .main(let m): return Self.identity(row) + "|" + sessions.mainRowKey(m)
         case .pull(let p): return Self.identity(row) + "|\(p.state)|\(p.build?.key ?? "")|\(p.simulator?.state == .running)|\(p.simulator != nil)|\(p.pull.title)|\(p.repo)"
@@ -667,13 +860,56 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     private func mountAgentPanel() {
         agentHost.subviews.forEach { $0.removeFromSuperview() }
-        guard let v = agentPanel?.view else { return }
-        v.translatesAutoresizingMaskIntoConstraints = false
-        agentHost.addSubview(v)
-        NSLayoutConstraint.activate([
-            v.topAnchor.constraint(equalTo: agentHost.topAnchor), v.bottomAnchor.constraint(equalTo: agentHost.bottomAnchor),
-            v.leadingAnchor.constraint(equalTo: agentHost.leadingAnchor), v.trailingAnchor.constraint(equalTo: agentHost.trailingAnchor),
-        ])
+        review.model.onClose = { [weak self] in self?.show(nil, closing: .agent) }
+        review.model.onAllAgents = { [weak self] in self?.setAgentPaneAll(true) }
+        agentPanel?.onSession = { [weak self] in self?.setAgentPaneAll(false) }
+        for v in [agentPanel?.view, review.panelView].compactMap({ $0 }) {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            agentHost.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.topAnchor.constraint(equalTo: agentHost.topAnchor), v.bottomAnchor.constraint(equalTo: agentHost.bottomAnchor),
+                v.leadingAnchor.constraint(equalTo: agentHost.leadingAnchor), v.trailingAnchor.constraint(equalTo: agentHost.trailingAnchor),
+            ])
+        }
+        layoutAgentPane()
+    }
+
+    /// Which of the pane's two panels shows: the chosen session's, or every agent's calls when there is no session
+    /// chosen or the person asked for them.
+    private func layoutAgentPane() {
+        let all = agentPaneAll || review.session == nil
+        agentPanel?.view.isHidden = !all
+        review.panelView.isHidden = all
+    }
+
+    func setAgentPaneAll(_ all: Bool) {
+        agentPaneAll = all
+        layoutAgentPane()
+        if all { agentPanel?.refresh() } else { review.reload() }
+    }
+
+    /// The session panel, on the session the person chose.
+    @objc func showSession(_ sender: Any? = nil) {
+        guard agentPanel != nil else { return }
+        agentPaneAll = false
+        review.reload()
+        layoutAgentPane()
+        if !showingAgent { show(.agent) }
+    }
+
+    /// Take Over, or Hand Back: the chosen session's device, from its agent to the person and back.
+    @objc func toggleTakeOver(_ sender: Any? = nil) { review.toggleTakeOver() }
+
+    /// Whether the session panel is what the agent pane shows (for a check).
+    var sessionPanelShown: Bool { showingAgent && !review.panelView.isHidden }
+
+    /// A comment began or stopped being pinned: the device's clicks pick a node meanwhile.
+    func pinChanged() { refreshGrid() }
+
+    /// The review side follows the session the person chose.
+    func reloadReview() {
+        review.reload()
+        layoutAgentPane()
     }
 
     /// An edge of a full-stage sheet that gives way to the window: a sheet that needs more room than a narrow window
@@ -735,9 +971,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         walkChip.onOpen = { [weak self] in self?.showMap() }
         jobsChip.workbench = self
+        attentionChip.onPress = { [weak self] in
+            guard let self else { return }
+            self.showLibrary()
+            self.sessions.goToNextNeedingAttention()
+        }
         let deviceCluster = group([deviceButton, divider()] + deviceButtons)
         let captureCluster = group([shot, divider(), recordButton, saveRecordButton])
-        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, jobsChip, walkChip, exitMatrixButton, mirrorButton, group(layoutButtons), captureCluster, commands])
+        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, attentionChip, jobsChip, walkChip, exitMatrixButton, mirrorButton, group(layoutButtons), captureCluster, commands])
         bar.spacing = 8
         bar.setHuggingPriority(.init(1), for: .horizontal)
         bar.setHuggingPriority(.init(1), for: .vertical)
@@ -1104,7 +1345,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     func updateChrome() {
         guard appChip != nil else { return }
         let alive = Engine.shared.simulators.filter(\.isAlive).count
-        if let sim = selected {
+        if let staged = sessions.stagedSession {
+            let text = NSMutableAttributedString(string: "○ ", attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold), .foregroundColor: Design.mute])
+            text.append(NSAttributedString(string: staged.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: Design.ink]))
+            appChip.title = staged.title
+            appChip.attributedTitle = text
+        } else if let sim = selected {
             let dot = sim.state == .running ? "● " : (sim.state == .starting ? "◌ " : "○ ")
             let text = NSMutableAttributedString(string: dot, attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold),
                                                                            .foregroundColor: sim.state == .running ? Design.accent : Design.mute])
@@ -1512,7 +1758,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             add("set." + id, title, "Device", symbol, keywords: keywords) { [weak self] in self?.run(command, title) }
         }
         // Apps.
-        add("open", "Open APK…", "App", "folder", "⌘O") { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
+        add("open", "Run an APK…", "App", "folder", "⌘O", keywords: "open apk file drop") { [weak self] in self?.runAPK(nil) }
+        add("connect", "Connect agents…", "App", "dot.radiowaves.left.and.right", keywords: "claude codex cursor mcp harness onboarding") { [weak self] in self?.connectAgents(nil) }
         add("compare.apk", "Compare with another build…", "App", "square.on.square.dashed", "⇧⌘O") { [weak self] in self?.compareWithAPK(nil) }
         add("matrix", "Matrix wall: every device, appearance, language and text size", "App", "square.grid.3x3", "⌥⌘X", keywords: "grid locale dark font rtl") { [weak self] in self?.showMatrix(nil) }
         if !matrixSims.isEmpty { add("matrix.close", "Close the matrix wall", "App", "xmark.square") { [weak self] in self?.closeMatrix(nil) } }
@@ -1533,6 +1780,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 }
             }
         }
+        add("attention.next", "Go to the next session that needs you", "Sessions", "bell.badge", "⌘'", keywords: "ready review waiting attention next") { [weak self] in self?.nextNeedingYou(nil) }
+        add("attention.group", sessions.groupByRepository ? "Group sessions by what they need" : "Group sessions by repository", "Sessions", "square.stack.3d.up",
+            keywords: "sidebar group attention ready working quiet repository") { [weak self] in self?.toggleGroupByRepository(nil) }
         add("script.new", "New script…", "Scripts", "plus.rectangle.on.folder", keywords: "script sign in login automate") { [weak self] in self?.newScript(nil) }
         add("variables", "Variables (sign-ins for scripts)…", "Scripts", "key", keywords: "env environment secret password credentials keychain") { [weak self] in self?.showVariables(nil) }
         if live != nil {
@@ -1608,6 +1858,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
         add("pane.inspect", inspecting ? "Stop inspecting" : "Inspect the screen", "Panes", "cursorarrow.rays", "⌥⌘I", keywords: "nodes accessibility tree") { [weak self] in self?.toggleInspector(nil) }
         add("pane.agent", "Agent activity", "Panes", "sparkles", "⌥⌘A", keywords: "claude mcp") { [weak self] in self?.showAgent(nil) }
+        if let s = review.session {
+            add("session.take", review.isTaken(s) ? "Hand the device back to its agent" : "Take over this session's device", "Sessions", "hand.raised",
+                keywords: "pause agent drive take over hand back") { [weak self] in self?.toggleTakeOver(nil) }
+        }
+        add("pane.session", "Review this session", "Panes", "checkmark.seal", "⇧⌘'", keywords: "spec criteria approve request changes comment pin merge review") { [weak self] in self?.showSession(nil) }
         add("snapshots.run", "Run screenshot tests…", "Panes", "photo.stack", keywords: "golden snapshot visual regression compare") { [weak self] in self?.showSnapshots(run: true) }
         add("snapshots.show", "Show screenshot test results", "Panes", "photo.stack", keywords: "golden snapshot visual regression review") { [weak self] in self?.showSnapshots() }
         add("map.walk", "Map the app's screens…", "Map", "point.3.connected.trianglepath.dotted", keywords: "crawl explore walk graph screens") { [weak self] in self?.showMap(walk: true) }
@@ -1705,7 +1960,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .tests: testsPane.setActive(on)
         case .diagnostics: diagnosticsPane.follow(on ? selected : nil)
         case .recordings: recordingsPane.setShown(on, folder: recordings)
-        case .agent: if on { agentPanel?.refresh() }
+        case .agent:
+            if on { agentPanel?.refresh(); reloadReview() } else { review.endPin() }
         }
     }
 
@@ -1917,7 +2173,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Open in Claude", action: #selector(openInClaudeClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Mark as Reviewed", action: #selector(markReviewedClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Reopen", action: #selector(reopenClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Open the Agent's App", action: #selector(openAgentClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove from Sidebar", action: #selector(removeSessionClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
         menu.delegate = self
@@ -1965,13 +2223,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
         if case .header = rows[row] { return true }
+        if case .attentionHeader = rows[row] { return true }
         if case .sessionsHeader = rows[row] { return true }
         return false
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session, .main, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession: return true
+        case .simulator, .session, .main, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession, .repository: return true
         default: return false
         }
     }
@@ -1990,10 +2249,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         if case .header = rows[row] { return 22 }
+        if case .attentionHeader = rows[row] { return 24 }
+        if case .repository = rows[row] { return 30 }
         if case .sessionsHeader = rows[row] { return 24 }
         if case .suggestion = rows[row] { return 38 }
         if case .addSession = rows[row] { return 34 }
-        if case .session(let s) = rows[row] { return sessions.rowHeight(for: s, width: tableView.rect(ofColumn: 0).width) }
+        if case .session(let s) = rows[row] {
+            return sessions.groupByRepository ? sessions.rowHeight(for: s, width: tableView.rect(ofColumn: 0).width) : sessions.attentionHeight(for: s)
+        }
         if case .main = rows[row] { return 44 }
         if case .pull = rows[row] { return 54 }
         if case .claudeOffer = rows[row] { return 38 }
@@ -2011,19 +2274,41 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             let inset = NSStackView(views: [label])
             inset.edgeInsets = NSEdgeInsets(top: 0, left: Self.headerInset, bottom: 0, right: 6)
             return inset
-        case .sessionsHeader(let title, let ws, _):
+        case .attentionHeader(let group, let count):
+            return SessionsController.attentionHeader(group, count: count, inset: Self.headerInset, collapsed: group == .completed ? sessions.completedCollapsed : nil)
+        case .sessionsHeader(let title, let ws, let hidden), .repository(let title, let ws, let hidden):
+            var asRow = false
+            if case .repository = rows[row] { asRow = true }
             let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
-            label.textColor = .secondaryLabelColor
+            label.font = asRow ? .systemFont(ofSize: 12, weight: .medium) : .systemFont(ofSize: 11, weight: .semibold)
+            label.textColor = asRow ? Design.ink.withAlphaComponent(0.85) : .secondaryLabelColor
             label.lineBreakMode = .byTruncatingTail
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let add = ClosureButton(symbol: "plus", tip: "Add a session from \(ws.lastPathComponent)") {}
+            let add = ClosureButton(symbol: "plus", tip: "Add a session from \(ws.lastPathComponent), and the repository's settings") {}
             add.handler = { [weak self, weak add] in
                 guard let self, let add else { return }
                 self.sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 0, y: add.bounds.height + 2), in: add)
             }
             add.contentTintColor = .secondaryLabelColor
             var views: [NSView] = [label]
+            if asRow {
+                let icon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
+                icon.contentTintColor = .tertiaryLabelColor
+                icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+                icon.setContentHuggingPriority(.required, for: .horizontal)
+                views.insert(icon, at: 0)
+                if hidden > 0 {
+                    let more = NSTextField(labelWithString: "\(hidden) more")
+                    more.font = .systemFont(ofSize: 10)
+                    more.textColor = .tertiaryLabelColor
+                    more.toolTip = "\(hidden) worktree\(hidden == 1 ? "" : "s") not in the sidebar: the + menu has \(hidden == 1 ? "it" : "them")"
+                    more.setContentHuggingPriority(.required, for: .horizontal)
+                    views.append(more)
+                }
+                let spacer = NSView()
+                spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+                views.append(spacer)
+            }
             if sessions.scanningWorkspaces.contains(ws.path) {
                 let spin = NSProgressIndicator()
                 spin.style = .spinning
@@ -2064,7 +2349,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .suggestion(let s):
             return sessions.suggestionCell(for: s)
         case .session(let session):
-            return sessions.cell(for: session)
+            return sessions.groupByRepository ? sessions.cell(for: session) : sessions.attentionCell(for: session, sessions.attention(of: session))
         case .main(let m):
             return sessions.mainCell(m)
         case .claudeOffer(let offer):
@@ -2125,11 +2410,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     @objc private func rowClicked() {
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
+        if case .attentionHeader(.completed, _) = rows[row] { sessions.completedCollapsed.toggle() }
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
         if case .main(let m) = rows[row] { sessions.openMain(m.workspace) }
         if case .suggestion(let s) = rows[row] { sessions.show(s) }
         if case .addSession(let ws, _) = rows[row], let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) {
+            sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 8, y: view.bounds.height), in: view)
+        }
+        if case .repository(_, let ws, _) = rows[row], let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) {
             sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 8, y: view.bounds.height), in: view)
         }
         if case .claudeOffer(let offer) = rows[row] { sessions.addRepositories([offer.repository]) }
@@ -2149,8 +2438,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         menu.items.filter { $0.tag == 77 }.forEach { menu.removeItem($0) }
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
-        if let open = menu.items.first(where: { $0.action == #selector(openInClaudeClicked) }) {
-            if case .session(let s) = rows[row], (s.displayAgent ?? s.claude)?.source == .t3 { open.title = "Open in T3 Code" } else { open.title = "Open in Claude" }
+        if let open = menu.items.first(where: { $0.action == #selector(openAgentClicked) }) {
+            if case .session(let s) = rows[row], let agent = s.displayAgent ?? s.agent { open.title = "Open in \(agent.appName)" } else { open.title = "Open the Agent's App" }
         }
         // Main's row, headers and the empty placeholder are not worktrees: hide session-only actions on them.
         var isMain = false
@@ -2158,7 +2447,16 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if case .main = rows[row] { isMain = true }
         if case .sessionsHeader = rows[row] { isWorkspaceOnly = true }
         if case .addSession = rows[row] { isWorkspaceOnly = true }
-        for item in menu.items where [#selector(openInClaudeClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain || isWorkspaceOnly }
+        if case .repository = rows[row] { isWorkspaceOnly = true }
+        for item in menu.items where [#selector(openAgentClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain || isWorkspaceOnly }
+        // "Mark as Reviewed": only on a session that is ready for review.
+        for item in menu.items where item.action == #selector(markReviewedClicked) {
+            if case .session(let s) = rows[row], sessions.attention(of: s).group == .ready { item.isHidden = false } else { item.isHidden = true }
+        }
+        // "Reopen": only on a session whose pull request merged (wherever it is filed: work under way shows it as working).
+        for item in menu.items where item.action == #selector(reopenClicked) {
+            if case .session(let s) = rows[row], sessions.isCompleted(s) { item.isHidden = false } else { item.isHidden = true }
+        }
         for item in menu.items where item.action == #selector(closeClicked) { item.isHidden = isWorkspaceOnly }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
@@ -2177,20 +2475,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if case .pull(let pull) = rows[row] { sessions.closePullSimulator(pull) }
     }
 
-    @objc private func openInClaudeClicked() {
+    @objc private func openAgentClicked() {
         let row = table.clickedRow
         guard row >= 0, row < rows.count, case .session(let session) = rows[row] else { return }
-        let agent = session.displayAgent ?? session.claude
-        if agent?.source == .t3 {
-            T3Sessions.open(session.worktree) { [weak self] why in
-                if let why {
-                    if let link = agent?.link { NSWorkspace.shared.open(link) }
-                    else { self?.toast.show(why, problem: true) }
-                }
-            }
-            return
-        }
-        if !ClaudeSessions.openInClaude(agent) { toast.show("Claude is not installed on this Mac", problem: true) }
+        ClaudeSessions.open(session.displayAgent ?? session.agent, in: session.worktree) { [weak self] why in self?.toast.show(why, problem: true) }
     }
 
     /// The session row under the pointer when the sidebar's context menu opened.
@@ -2198,6 +2486,45 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let row = table.clickedRow
         guard row >= 0, row < rows.count, case .session(let s) = rows[row] else { return nil }
         return s
+    }
+
+    @objc private func markReviewedClicked() {
+        if let s = clickedSession { sessions.markReviewed(s) }
+    }
+
+    @objc private func reopenClicked() {
+        if let s = clickedSession { sessions.reopen(s) }
+    }
+
+    /// Window > Next Session That Needs You (⌘'): the next one that is ready for review or needs the person.
+    @objc func nextNeedingYou(_ sender: Any?) { sessions.goToNextNeedingAttention() }
+
+    /// Window > Group Sessions by Repository: the sidebar as it was, a repository's worktrees under its name.
+    @objc func toggleGroupByRepository(_ sender: Any?) { sessions.groupByRepository.toggle() }
+
+    /// The top bar's counts, as the chip shows them (for a check).
+    var attentionText: String? { attentionChip.text }
+    /// The sidebar's rows in a few words each (for a check): a group's header as "# Title n", a session by its title.
+    var sidebarOutline: [String] {
+        // The sessions' part of the sidebar: what is suggested, to review, running loose or recent comes after it,
+        // and under those the completed sessions, which are the sessions' again.
+        let own = rows.prefix { row in
+            if case .header(let t) = row { return !["Suggested", "Review", "Running", "Recent"].contains(t) }
+            if case .attentionHeader(.completed, _) = row { return false }
+            return true
+        }
+        let done = rows.firstIndex { if case .attentionHeader(.completed, _) = $0 { return true }; return false }.map { rows[$0...] } ?? []
+        return (own + done).compactMap { row in
+            switch row {
+            case .attentionHeader(let g, let n): return "# \(g.title) \(n)"
+            case .sessionsHeader(let t, _, _): return "## \(t)"
+            case .repository(let t, _, _): return "repo \(t)"
+            case .header(let t): return "# \(t)"
+            case .session(let s): return s.title
+            case .main(let m): return "main \(m.name)"
+            default: return nil
+            }
+        }
     }
 
     @objc private func removeSessionClicked() {
@@ -2212,6 +2539,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         guard row >= 0, row < rows.count else { return }
         if case .main(let m) = rows[row] { sessions.removeWorkspace(at: m.workspace); return }
         if case .sessionsHeader(_, let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
+        if case .repository(_, let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
         if case .addSession(let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
         guard case .session(let session) = rows[row] else { return }
         sessions.removeWorkspace(containing: session)
@@ -2683,8 +3011,116 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         show(showingAgent ? nil : .agent, closing: .agent)
     }
 
+    // MARK: The stage with no device on it
+
+    /// Shows or hides one of the stage's screens with a fade. A screen asked for again while it fades out stays.
+    private func setStage(_ view: NSView, shown: Bool, prepare: () -> Void) {
+        let id = ObjectIdentifier(view)
+        stageWanted[id] = shown
+        guard view.isHidden == shown else { return }
+        if shown { prepare(); view.alphaValue = 0; view.isHidden = false }
+        Design.animate(Design.arrive, { view.animator().alphaValue = shown ? 1 : 0 },
+                       done: { [weak self, weak view] in if self?.stageWanted[id] == false { view?.isHidden = true } })
+    }
+
+    private func reloadWaitingStage() {
+        waitingStage.reload(client: agentActivity.client, listening: (NSApp.delegate as? AppDelegate)?.agentListening ?? false,
+                            connected: ConnectModel.shared.connectedNames)
+    }
+
+    /// What the listening step of the Connect screen has heard: the agent's name and its last calls.
+    private func reloadConnectStage() {
+        let flow = connectStage.flow
+        if flow.client != agentActivity.client { flow.client = agentActivity.client }
+        let lines = agentActivity.entries(session: nil, all: true).suffix(4).map { e in
+            (e.label.map { $0 + " · " } ?? "") + e.tool + (e.summary.isEmpty ? "" : ": " + e.summary)
+        }
+        if flow.lines != lines { flow.lines = lines }
+    }
+
+    /// The first time, with no repository added and nothing running, the Connect screen comes first. Otherwise the
+    /// harnesses are looked at once, so the waiting stage can name what is connected.
+    private func lookAtFirstRun() {
+        guard Engine.shared.simulators.isEmpty else { return }
+        ConnectModel.shared.refresh()
+        guard !ConnectModel.firstRunDone, sessions.workspaces.isEmpty else { return }
+        showingConnect = true
+        reload()
+        DispatchQueue.main.async { [weak self] in   // Escape leaves it
+            guard let self, self.showingConnect, self.window.firstResponder === self.window else { return }
+            self.window.makeFirstResponder(self.connectStage)
+        }
+    }
+
+    /// File > Connect Agents…: the Connect screen takes the stage, over running devices too.
+    @objc func connectAgents(_ sender: Any?) {
+        if showingAPK { showingAPK = false }
+        guard !showingConnect else { reload(); return }
+        showingConnect = true
+        connectStage.flow.step = 1
+        ConnectModel.shared.refresh()
+        reload()
+        window.makeFirstResponder(connectStage)
+    }
+
+    private func leaveConnectScreen() {
+        guard showingConnect else { return }
+        showingConnect = false
+        ConnectModel.firstRunDone = true
+        reload()
+        if let sel = selected, let v = grid.view(for: sel) { window.makeFirstResponder(v) }
+    }
+
+    /// What the person sees on the stage, in a few words (the `app` tool says it).
+    var stageSummary: String {
+        if showingAPK { return "the APK screen" }
+        if showingConnect {
+            let what = ["connecting agents", "waiting for an agent's first call", "what the sidebar says"][max(0, min(2, connectStage.flow.step - 1))]
+            return "the Connect screen (step \(connectStage.flow.step) of \(ConnectFlow.steps): \(what))"
+        }
+        return Engine.shared.simulators.isEmpty ? "waiting for an agent" : "the devices"
+    }
+
+    /// Whether the Connect screen has the stage, and its step (for a check).
+    var connectShown: Bool { showingConnect && (stageWanted[ObjectIdentifier(connectStage)] ?? false) }
+    var connectFlow: ConnectFlow { connectStage.flow }
+
+    /// File > Run an APK… (⌘O): the APK screen takes the stage, over running devices too.
+    @objc func runAPK(_ sender: Any?) {
+        guard !showingAPK else { return }
+        showingAPK = true
+        reload()
+        window.makeFirstResponder(emptyStage)
+    }
+
+    /// The devices take the stage back from the Connect and APK screens: what a link to a session asks for.
+    func showDevices() {
+        leaveAPKScreen()
+        leaveConnectScreen()
+    }
+
+    private func leaveAPKScreen() {
+        guard showingAPK else { return }
+        showingAPK = false
+        reload()
+        if let sel = selected, let v = grid.view(for: sel) { window.makeFirstResponder(v) }
+    }
+
+    /// Whether the APK screen has the stage (for a check).
+    var apkScreenShown: Bool { showingAPK && !emptyStage.isHidden }
+    /// Whether the stage waits for an agent, and what it says (for a check).
+    var waitingShown: Bool { stageWanted[ObjectIdentifier(waitingStage)] ?? !waitingStage.isHidden }
+    var waitingTexts: [String] { waitingStage.texts }
+
+    /// File > Open Project Folder… and Clone from GitHub…: an app from source, by hand.
+    @objc func openProjectFolder(_ sender: Any?) { sessions.chooseProjectToRun() }
+    @objc func cloneFromGitHub(_ sender: Any?) { sessions.askToClone() }
+
     func agentChanged() {
+        reloadWaitingStage()
+        if showingConnect { reloadConnectStage() }
         agentPanel?.refresh()
+        reloadReview()
         updateAgentHud()
         updateChrome()
     }

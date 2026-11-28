@@ -150,8 +150,9 @@ Video comes from the H.264 stream the app already receives: a `Recorder` writes 
 If local display moves to shared IOSurfaces (PLAN.md phase 0, S1), the stream stays on, or is started, whenever
 something records, or the Recorder encodes from the surfaces itself.
 
-- **When** (`Workspace.auto`): `off`, `onBuild` (default: every new build is walked), `onTurnEnd` (when the
-  session's Claude turn ends and the sources are newer than the build: build, then walk). A walk is cancelled when
+- **When** (`Workspace.auto`): `off`, `onBuild` (default: every new build is walked), `onTurnEnd` (as built in
+  agent-first step A4: a build that lands while an agent is mid-turn in the worktree is walked when its turn ends,
+  as the harness's hook says; it starts no build). A walk is cancelled when
   a newer build of the same session arrives; one walk runs at a time.
 - **Sign-ins**: by default a walk is fresh: no session's data is used, so nothing taps through the person's real
   session on every build. A workspace can opt in ("Walk with my signed-in data", off by default): the walk then runs
@@ -277,7 +278,8 @@ it self-sufficient; W3 and W4 are the reason to keep it open.
 ## Open decisions
 
 1. Automatic building: `onBuild` walks are cheap, but `onTurnEnd` starts a Gradle build after every agent turn.
-   Proposed default: off, offered per workspace.
+   Proposed default: off, offered per workspace. (Decided in agent-first step A4: `onTurnEnd` starts no build; it
+   only holds a walk until the agent's turn ends.)
 2. The default base: the merge base with `origin/main` (what the PR would show) or `origin/main`'s tip.
    Proposed: the merge base.
 3. Posting evidence to a pull request (pictures need hosting): proposed as a later step.

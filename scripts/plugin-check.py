@@ -3,7 +3,7 @@
 the manifests agree with each other and with what Settings shows, the skill is where Claude Code looks, and the
 launcher script finds an app, says why when there is none, and serves MCP through it.
 usage: scripts/plugin-check.py /path/to/Greenroom.app"""
-import json, os, re, shutil, subprocess, sys, tempfile, time
+import json, os, plistlib, re, shutil, subprocess, sys, tempfile, time
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else sys.exit(__doc__)
@@ -38,6 +38,16 @@ expect("its script is inside the plugin", os.path.isfile(script) and os.path.rea
 expect("the plugin's files name no home folder", not any(re.search(r"/Users/|/home/", open(os.path.join(d, f), errors="replace").read())
                                                          for d, _, fs in os.walk(plugin) for f in fs))
 
+# The repository's own .mcp.json: the Debug copy, for agents working in this repository and its worktrees only.
+project = json.load(open(root + "/.mcp.json"))
+expect("the repository's .mcp.json declares one server, greenroom-debug", list(project.get("mcpServers", {})) == ["greenroom-debug"], list(project.get("mcpServers", {})))
+debug = project["mcpServers"].get("greenroom-debug", {})
+debug_argv = [debug.get("command", "")] + debug.get("args", [])
+debug_script = root + "/scripts/greenroom-debug-mcp.sh"
+expect("it runs scripts/greenroom-debug-mcp.sh from the worktree's own root", "git rev-parse --show-toplevel" in debug_argv[-1] and "scripts/greenroom-debug-mcp.sh" in debug_argv[-1] and os.access(debug_script, os.X_OK), debug_argv)
+expect(".mcp.json and its script name no home folder", not any(re.search(r"/Users/|/home/", open(f).read()) for f in (root + "/.mcp.json", debug_script)))
+expect("the Debug copy is never added for every project", "repositoryOnly" in connect and '"--scope", "user"' in connect)
+
 # The skill: skills/verify/SKILL.md is /greenroom:verify, and it names the loop's tools.
 skill = open(plugin + "/skills/verify/SKILL.md").read()
 front = skill.split("---")[1] if skill.startswith("---") else ""
@@ -50,15 +60,61 @@ named = set(loop) | {t for t in ("simulators", "screen", "wait_for", "logs", "se
 for words in ("paused", "consent", "what changed"):
     expect(f"the skill says: {words}", words in skill.lower())
 
+# The greenroom command and the skill: the plugin's own files, and the copies inside the app are the same bytes.
+command = plugin + "/bin/greenroom"
+expect("the plugin has the greenroom command in bin/, which Claude Code puts on its Bash tool's PATH", os.access(command, os.X_OK), command)
+bundled = app + "/Contents/Resources/bin/greenroom"
+expect("the app carries the same command", os.access(bundled, os.X_OK) and open(bundled, "rb").read() == open(command, "rb").read(), bundled)
+bundled_skill = app + "/Contents/Resources/skill/SKILL.md"
+expect("the app carries the same skill", os.path.isfile(bundled_skill) and open(bundled_skill).read() == skill, bundled_skill)
+expect("the skill says the command's exit statuses and how to find it", "command -v greenroom" in skill and "`greenroom help TOOL`" in skill and "3 when" in skill)
+info = plistlib.load(open(app + "/Contents/Info.plist", "rb"))
+scheme = "greenroom-debug" if info.get("GreenroomVariant") == "debug" else "greenroom"
+schemes = [s for t in info.get("CFBundleURLTypes", []) for s in t.get("CFBundleURLSchemes", [])]
+expect(f"the app opens {scheme}:// links, and no other", schemes == [scheme], schemes)
+
+# The hooks: hooks/hooks.json is what Claude Code runs for the plugin, each the plugin's own command, and the same
+# set Greenroom writes to ~/.claude/settings.json for a Claude Code connected without the plugin.
+hooks = json.load(open(plugin + "/hooks/hooks.json")).get("hooks", {})
+in_plugin, shapes = [], True
+for event, groups in hooks.items():
+    for g in groups:
+        handlers = g.get("hooks", [])
+        m = re.fullmatch(r'"\$\{CLAUDE_PLUGIN_ROOT\}/bin/greenroom" hook ([A-Za-z]+) --harness claude', handlers[0].get("command", "") if len(handlers) == 1 else "")
+        shapes = shapes and bool(m) and handlers[0].get("type") == "command" and set(g) <= {"matcher", "hooks"}
+        in_plugin.append((event, m.group(1) if m else "", g.get("matcher", "")))
+expect("every hook of the plugin runs the plugin's own greenroom command, as greenroom hook EVENT --harness claude", shapes and in_plugin, hooks)
+swift = open(root + "/Sources/Greenroom/Hooks.swift").read()
+block = swift.split("static let claude = Place(")[1].split("static let codex")[0]
+in_app = [(e, w or e, m or "") for e, w, m in re.findall(r'Spec\(event: "(\w+)"(?:, word: "(\w+)")?(?:, matcher: "([^"]*)")?\)', block)]
+expect("the plugin's hooks are the ones Greenroom writes to Claude Code's settings", in_plugin == in_app and len(in_app) >= 5, (in_plugin, in_app))
+
 # The launcher, with no app to find.
 def launch(env, stdin=""):
     return subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=60, env=env)
 plain = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/")}
 r = launch(dict(plain, GREENROOM_APP="/nowhere/Greenroom.app"))
 expect("a GREENROOM_APP that is no app is refused, in words", r.returncode == 1 and "not a Greenroom.app" in r.stderr and r.stdout == "", r.stderr)
+r = subprocess.run(debug_argv, capture_output=True, text=True, timeout=60, cwd=root, env=dict(plain, GREENROOM_DEBUG_APP="/nowhere/Greenroom Debug.app"))
+expect("the Debug launcher refuses a GREENROOM_DEBUG_APP that is no app, in words", r.returncode == 1 and "not a Greenroom Debug.app" in r.stderr and r.stdout == "", r.stderr)
 empty = tempfile.mkdtemp(prefix="grplugin-")
 fake = empty + "/bin"
 os.makedirs(fake)
+# An app from before the command: `greenroom mcp` still runs it, anything else says to update (it would open a window).
+old = empty + "/old/Greenroom.app"
+os.makedirs(old + "/Contents/MacOS")
+open(old + "/Contents/MacOS/Greenroom", "w").write("#!/bin/sh\necho ran \"$@\"\n")   # (a copied system program does not start)
+os.chmod(old + "/Contents/MacOS/Greenroom", 0o755)
+r = subprocess.run([command, "tools"], capture_output=True, text=True, timeout=60, env=dict(plain, GREENROOM_APP=old))
+expect("the command refuses an app older than itself, in words", r.returncode == 1 and "is older than the greenroom command" in r.stderr and "Check for Updates" in r.stderr and r.stdout == "", (r.returncode, r.stderr))
+r = subprocess.run([command, "mcp"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, env=dict(plain, GREENROOM_APP=old))
+expect("... and still starts its MCP server", r.returncode == 0 and r.stdout.strip() == "ran --mcp" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
+# A hook runs at every prompt and tool call, app or no app: with none to tell it is silent and exits 0.
+for where, what in ((old, "an app older than the command"), ("/nowhere/Greenroom.app", "no app")):
+    r = subprocess.run([command, "hook", "Stop", "--harness", "claude"], input='{"session_id": "s", "cwd": "/"}', capture_output=True, text=True, timeout=60, env=dict(plain, GREENROOM_APP=where))
+    expect(f"greenroom hook with {what} says nothing and exits 0", (r.returncode, r.stdout, r.stderr) == (0, "", ""), (r.returncode, r.stdout, r.stderr))
+r = subprocess.run([command, "tools"], capture_output=True, text=True, timeout=60, env=dict(plain, GREENROOM_APP="/nowhere/Greenroom.app"))
+expect("the command refuses a GREENROOM_APP that is no app, in words", r.returncode == 1 and "not a Greenroom.app" in r.stderr and r.stdout == "", r.stderr)
 open(fake + "/mdfind", "w").write("#!/bin/sh\necho /nowhere/Greenroom.app\n")
 os.chmod(fake + "/mdfind", 0o755)
 if not os.path.exists("/Applications/Greenroom.app"):
@@ -92,6 +148,7 @@ try:
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "plugin-check", "version": "1"}}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))
+    names_of_app = set()
     def served(env, how):
         r = launch(env, messages)
         try:
@@ -102,7 +159,35 @@ try:
         expect(f"the launcher serves MCP {how}", {"session", "build", "changes", "launch", "check", "compare"} <= names, (r.returncode, r.stdout[:300], r.stderr[:300]))
         if names:
             expect("... and every tool the skill names is one of the app's", named <= names, sorted(named - names))
+            names_of_app.update(names)
     served(dict(plain, GREENROOM_APP=app, GREENROOM_MCP_ARGS="--agent-check", GREENROOM_STATE=state), "from GREENROOM_APP")
+    # The repository's .mcp.json, as Claude Code would run it from a subfolder of a worktree.
+    r = subprocess.run(debug_argv, input=messages, capture_output=True, text=True, timeout=60, cwd=root + "/scripts",
+                       env=dict(plain, GREENROOM_DEBUG_APP=app, GREENROOM_MCP_ARGS="--agent-check", GREENROOM_STATE=state))
+    try:
+        debug_names = {t["name"] for t in [json.loads(l) for l in r.stdout.splitlines() if l.strip()][-1]["result"]["tools"]}
+    except Exception:
+        debug_names = set()
+    expect("the repository's .mcp.json serves MCP from a subfolder of the worktree", {"launch", "check"} <= debug_names, (r.returncode, r.stdout[:300], r.stderr[:300]))
+    # The command: inside the app (as a link on the PATH leads to it), and the plugin's copy told where the app is.
+    checking = dict(plain, GREENROOM_MCP_ARGS="--agent-check", GREENROOM_STATE=state)
+    def said(argv, env):
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env, cwd=empty)
+        return r.returncode, r.stdout, r.stderr
+    code, out, err = said([bundled, "tools"], checking)
+    listed = {l.split()[0] for l in out.splitlines() if l.strip()}
+    expect("the command inside the app lists the app's tools", code == 0 and names_of_app <= listed, (code, sorted(names_of_app - listed)[:8], err[:300]))
+    os.symlink(bundled, fake + "/greenroom")
+    code, out, err = said(["greenroom", "version"], dict(checking, PATH=fake + ":/usr/bin:/bin"))
+    expect("a link to it on the PATH runs the app it is inside", code == 0 and info["CFBundleShortVersionString"] in out and ("Debug" in out) == (scheme == "greenroom-debug"), (code, out, err[:300]))
+    code, out, err = said([command, "simulators"], dict(checking, GREENROOM_APP=app))
+    expect("the plugin's command reaches the app GREENROOM_APP names", code == 0 and out.strip() != "" and err == "", (code, out[:200], err[:300]))
+    r = subprocess.run([command, "hook", "Stop", "--harness", "claude"], input=json.dumps({"session_id": "plugin-check", "cwd": empty}), capture_output=True, text=True, timeout=60,
+                       env=dict(checking, GREENROOM_APP=app), cwd=empty)
+    code, out, err = said([command, "agent_activity"], dict(checking, GREENROOM_APP=app))
+    expect("the plugin's hook command is heard by the app, and prints nothing", (r.returncode, r.stdout, r.stderr) == (0, "", "") and "hook claude Stop" in out, (r.returncode, r.stdout, r.stderr, out[-300:]))
+    code, out, err = said([command, "nope"], dict(checking, GREENROOM_APP=app))
+    expect("... and a wrong tool is a usage error (2), not a window", code == 2 and "greenroom tools" in err and out == "", (code, out[:200], err[:300]))
     if found:
         served({"PATH": fake + ":/usr/bin:/bin", "HOME": empty, "GREENROOM_MCP_ARGS": "--agent-check", "GREENROOM_STATE": state}, "from the app Spotlight names, past a translocated copy")
 finally:

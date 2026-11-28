@@ -217,6 +217,15 @@ enum MainCheck {
             sessions.removeWorkspace(at: fresh)
             expect(!sessions.groups().contains { $0.workspace?.resolvingSymlinksInPath().path == fresh.resolvingSymlinksInPath().path },
                    "removing the repository takes it out of the sidebar")
+            // What the person removed, an agent's call does not add again; adding it by hand lifts that.
+            expect(AgentAdoption.isRemoved(fresh), "a removed repository is remembered as removed, so no agent's call adds it again")
+            _ = await sessions.addRepository(fresh, quietIfExisting: true, byAgent: true).value
+            expect(AgentAdoption.isRemoved(fresh), "... and an add on an agent's behalf does not lift that")
+            sessions.removeWorkspace(at: fresh)
+            _ = await sessions.addRepository(fresh, quietIfExisting: true).value
+            expect(!AgentAdoption.isRemoved(fresh), "adding it by hand lets agents bring it again")
+            expect(sessions.workspace(at: fresh.resolvingSymlinksInPath())?.keepMain == true, "a repository added by hand keeps its main built")
+            sessions.removeWorkspace(at: fresh)
 
             // 8. Monorepo with multiple Android apps (shared repo + multiple composite builds):
             //    discovers all apps, scopes APKs to the selected app, auto-selects when adding a subfolder, and switches cleanly.

@@ -7,7 +7,7 @@ import AppKit
 // running on this Mac; with none running it fails and the rows stay as they are. Nothing is written: T3 Code's
 // database is never opened. Every field is optional here: a shape that does not parse gives no thread, not a fault.
 //
-// A thread becomes a `ClaudeSession` (source `.t3`), so the rows treat it exactly like a Claude Code session: its
+// A thread becomes a `AgentSession` (source `.t3`), so the rows treat it exactly like a Claude Code session: its
 // title names the row, its status gives the dot, its pull requests the suggestions and the archiving.
 
 /// Reads T3 Code's threads. Pure of UI; blocks (runs `t3`): never on the main thread.
@@ -33,7 +33,7 @@ enum T3Reader {
     }
 
     /// What one read gives, and why there is nothing when there is nothing.
-    struct Result { var sessions: [ClaudeSession] = []; var note: String? }
+    struct Result { var sessions: [AgentSession] = []; var note: String? }
 
     /// The `t3` program: the login shell's PATH, then where T3 Code puts it (`~/.t3/bin`, the desktop app's command;
     /// `~/.local/bin` and `~/bin`, its installers').
@@ -87,7 +87,7 @@ enum T3Reader {
     /// Every recent thread of every repository in `roots`. `cache` keeps each thread's details by id and update time.
     static func read(roots: [URL], cache: inout [String: (updated: String, detail: Detail)]) -> Result {
         guard let (exe, env) = find() else { return Result(note: "T3 Code's t3 command was not found (opening T3 Code once installs it in ~/.t3/bin).") }
-        var out: [ClaudeSession] = []
+        var out: [AgentSession] = []
         var shows = 0
         var reached = false
         var seen = Set<String>()
@@ -176,30 +176,30 @@ enum T3Reader {
 
     /// One list item (and its details, when known) as a session of the rows. A thread whose worktree is not known
     /// belongs to the repository's main checkout, where T3 Code runs a thread without one.
-    static func session(_ item: [String: Any], detail: Detail?, root: URL) -> ClaudeSession? {
+    static func session(_ item: [String: Any], detail: Detail?, root: URL) -> AgentSession? {
         guard let id = string(item["threadId"]) else { return nil }
         let raw = string(item["status"]) ?? "idle"
         let live: Set = ["preparing", "queued", "starting", "running"]
-        var status = ClaudeSession.Status.idle
+        var status = AgentSession.Status.idle
         if live.contains(raw) { status = .working }
         if raw == "waiting" || (detail?.pending ?? 0) > 0 { status = .waiting }
-        var prs: [ClaudePR] = []
+        var prs: [AgentPR] = []
         let list = (item["pullRequests"] as? [[String: Any]]) ?? []
         for p in list {
             guard let u = string(p["url"]).flatMap(URL.init(string:)) else { continue }
-            let state = string(p["state"]).flatMap { ClaudePR.State(rawValue: $0.uppercased()) }
-            prs.append(ClaudePR(url: u, state: state, branch: detail?.branch))
+            let state = string(p["state"]).flatMap { AgentPR.State(rawValue: $0.uppercased()) }
+            prs.append(AgentPR(url: u, state: state, branch: detail?.branch))
         }
         if let linked = item["linkedPullRequest"] as? [String: Any], let u = string(linked["url"]).flatMap(URL.init(string:)), !prs.contains(where: { $0.url == u }) {
-            let state = string(linked["state"]).flatMap { ClaudePR.State(rawValue: $0.uppercased()) }
-            prs.append(ClaudePR(url: u, state: state, branch: detail?.branch))
+            let state = string(linked["state"]).flatMap { AgentPR.State(rawValue: $0.uppercased()) }
+            prs.append(AgentPR(url: u, state: state, branch: detail?.branch))
         }
         let folder = detail?.worktree.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() } ?? root.resolvingSymlinksInPath()
         let settled = (item["settled"] as? Bool) ?? (detail?.settled ?? false)
         let model = detail?.model ?? string(item["model"])
         let provider = detail?.provider ?? string(item["providerInstanceId"])
         let link = detail?.link ?? string(item["link"]).flatMap(URL.init(string:))
-        return ClaudeSession(folder: folder, repository: root.resolvingSymlinksInPath(), title: string(item["title"]), status: status,
+        return AgentSession(folder: folder, repository: root.resolvingSymlinksInPath(), title: string(item["title"]), status: status,
                              branch: detail?.branch, pullRequests: prs.map(\.url), prs: prs, lastActivity: date(string(item["updatedAt"]) ?? ""),
                              running: status != .idle, archived: detail?.archived ?? false, source: .t3, id: id,
                              settled: settled, model: model, provider: provider, summary: detail?.summary, rawStatus: raw, link: link)
@@ -243,7 +243,7 @@ final class T3Sessions {
     }
 
     /// The threads of the last read (none with the switch off).
-    private(set) var sessions: [ClaudeSession] = []
+    private(set) var sessions: [AgentSession] = []
     /// Why there are none, when that is worth a line in the sidebar.
     private(set) var note: String?
     /// Told on the main thread when a read changed what the rows show.

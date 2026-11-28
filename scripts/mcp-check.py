@@ -9,9 +9,18 @@ of its own), and the session tools: session, build (a stand-in recipe), changes 
 a base that differs through crawl.py's --base-option), screenshot's screen, and the recording of the agent's session;
 without it, the interface itself against the person's own state folder.
 Starts Greenroom (its executable, in the background) if it is not running, and quits the copy it started."""
-import glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.request, zipfile
+import glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.parse, urllib.request, zipfile
 
 exe, apk = sys.argv[1], sys.argv[2]
+
+
+def remove(folder):
+    """The engine's children can still be writing their cache for a moment after the app quit."""
+    for _ in range(10):
+        if subprocess.run(["rm", "-rf", folder], stderr=subprocess.DEVNULL).returncode == 0:
+            return
+        time.sleep(0.5)
+    subprocess.run(["rm", "-rf", folder])
 
 def sessions_mode():
     """Two worktrees of a temporary repository, each with the test app as its build; the repository is added to a
@@ -42,6 +51,15 @@ def sessions_mode():
     git("init", "-q", "-b", "main", cwd=repo2); git("add", ".", cwd=repo2); git("commit", "-q", "-m", "first", cwd=repo2)
     os.makedirs(repo2 + "/app/build/outputs/apk/debug")
     subprocess.run(["cp", apk, repo2 + "/app/build/outputs/apk/debug/app-debug.apk"], check=True)
+    # Two repositories nobody added: one with an app in it, one with none. An agent's call adds the first only.
+    repo3, repo4 = root + "/repo3", root + "/repo4"
+    for r in (repo3, repo4):
+        os.makedirs(r)
+        open(r + "/README.md", "w").write("hello\n")
+        open(r + "/.gitignore", "w").write("build/\n")
+        git("init", "-q", "-b", "main", cwd=r); git("add", ".", cwd=r); git("commit", "-q", "-m", "first", cwd=r)
+    os.makedirs(repo3 + "/app/build/outputs/apk/debug")
+    subprocess.run(["cp", apk, repo3 + "/app/build/outputs/apk/debug/app-debug.apk"], check=True)
     def variant(name):
         """The test APK with one more file in it: another build (another key) that runs the same."""
         dst = f"{root}/{name}.apk"
@@ -62,7 +80,7 @@ cp "{built_apk}" "$GREENROOM_OUT"
 """)
     os.chmod(recipe, 0o755)
     env = dict(os.environ, GREENROOM_STATE=state_dir, GREENROOM_ADD_REPOSITORY=repo + "\n" + repo2, GREENROOM_CHECK_FEEDS="1",
-               GREENROOM_CHECK_RECIPE=recipe, GREENROOM_CHECK_AUTO="off", GREENROOM_CHECK_AGENT_IDLE="3", GREENROOM_CHECK_RECORD_OFF=repo2,
+               GREENROOM_CHECK_RECIPE=recipe, GREENROOM_CHECK_AUTO="off", GREENROOM_CHECK_ADOPT="1", GREENROOM_CHECK_AGENT_IDLE="3", GREENROOM_CHECK_RECORD_OFF=repo2,
                GREENROOM_CHECK_CRAWL_START="apksim://slot", GREENROOM_CHECK_CRAWL_DEPTH="1", GREENROOM_CHECK_CRAWL_SECONDS="40",
                GREENROOM_CHECK_BASE_OPTION="--setting global:apksim_slot_seed=base")
     app_log = open(root + "/app.log", "w")
@@ -203,6 +221,9 @@ cp "{built_apk}" "$GREENROOM_OUT"
         if "--tools" not in sys.argv:
             session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up)
         more_tools(a, away, trees, state_dir, apk, expect)
+        command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait)
+        review_loop(exe, env, a, b, trees, other, state_dir, expect, wait, Shim)
+        adoption(repo3, repo4, state_dir, Shim, expect)
     finally:
         for s in shims:
             try:
@@ -216,9 +237,451 @@ cp "{built_apk}" "$GREENROOM_OUT"
             app.kill()
         if failures:
             print("the app's output:\n" + open(root + "/app.log", errors="replace").read()[-3000:])
-        subprocess.run(["rm", "-rf", root])
+        remove(root)
     print(f"mcp-check --sessions: {len(failures)} failed" if failures else "mcp-check --sessions: all passed")
     sys.exit(1 if failures else 0)
+
+def adoption(repo3, repo4, state_dir, Shim, expect):
+    """A repository adds itself (docs/AGENT-FIRST-SPEC.md): the first call from a worktree with an Android app in it adds
+    its repository, so the agent brings the work. Not while agents are paused, and not a repository with no app in it."""
+    stranger, plain = Shim(repo3), Shim(repo4)
+    open(state_dir + "/agent-paused-check", "w").write("1")
+    try:
+        t, err = stranger.call("session")
+        expect("paused: a call from a repository nobody added does not add it, and says why",
+               err and "agents are paused, so repo3 was not added" in t, t)
+    finally:
+        os.remove(state_dir + "/agent-paused-check")
+    t, err = stranger.call("session")
+    expect("a call from a repository with an app in it adds the repository: the agent brings the work", not err and "main" in t, t)
+    t, _ = stranger.call("sessions")
+    expect("... and its session is listed", "repo3" in t, t)
+    t, _ = stranger.call("workspace")
+    expect("... its base branch is not fetched and built by itself", "keep_main = off" in t, t)
+    t, err = stranger.call("launch")
+    expect("... and launch without apk starts the worktree's build", not err and "launched app-debug.apk" in t, t)
+    stranger.call("close")
+    t, err = plain.call("session")
+    expect("a repository with no Android app in it is not added, and the answer says why",
+           err and "no Android app was found in repo4" in t, t)
+    t, err = plain.call("launch")
+    expect("... launch says the same, and still takes an apk",
+           err and "no Android app was found in repo4" in t and t.endswith(": pass apk"), t)
+    t, _ = plain.call("sessions")
+    expect("... and it is not among the repositories", "repo4" not in t, t)
+
+
+def command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait):
+    """The `greenroom` command (Greenroom --cli ..., what bin/greenroom runs): the same tools from a shell, with an exit
+    status a script can branch on; `greenroom hook`, which tells the app four words and nothing else; `greenroom open`
+    and the links, which only navigate."""
+    def cli(*args, cwd=trees["a"], stdin=None, state=None, seconds=120):
+        e = dict(env, GREENROOM_STATE=state) if state else env
+        started = time.time()
+        p = subprocess.run([exe, "--agent-check", "--cli", *args], cwd=cwd, env=e, input=stdin if stdin is not None else "",
+                           capture_output=True, text=True, timeout=seconds)
+        return p.returncode, p.stdout.strip(), p.stderr.strip(), time.time() - started
+    listed = [t["name"] for t in a.rpc("tools/list")["result"]["tools"]]
+    code, out, err, _ = cli("tools")
+    expect("greenroom tools lists every tool the MCP server has, one a line", code == 0 and [l.split()[0] for l in out.split("\n")] == listed, out[:300])
+    code, out, err, _ = cli("help")
+    expect("greenroom help says how it is used", code == 0 and "greenroom TOOL [ARGUMENTS]" in out and "greenroom hook EVENT" in out and "Exit status" in out, out[:300])
+    code, out, err, _ = cli()
+    expect("... and so does greenroom alone", code == 0 and "greenroom TOOL [ARGUMENTS]" in out, out[:200])
+    code, out, err, _ = cli("help", "tap")
+    expect("greenroom help TOOL gives one tool's arguments as flags", code == 0 and out.startswith("usage: greenroom tap") and "--text" in out and "--ref" in out, out[:400])
+    code, out, err, _ = cli("help", "check")
+    expect("... a list is shown as one", code == 0 and "[VISIBLE...]" in out.split("\n")[0] and "--absent  list (repeat the flag)" in out, out[:300])
+    code, out, err, _ = cli("version")
+    expect("greenroom version names the copy", code == 0 and out.startswith("Greenroom"), out)
+    scheme = "greenroom-debug" if out.startswith("Greenroom Debug") else "greenroom"
+    # A tool, with the same answer an agent gets.
+    want, _ = a.call("session")
+    code, out, err, _ = cli("session")
+    expect("greenroom session, run in a worktree, is that worktree's session with the tool's own answer", code == 0 and out == want.strip() and err == "", out + "\n" + err)
+    code, out, err, _ = cli("session", "-C", trees["b"], cwd=other)
+    expect("-C DIR is the folder it acts in", code == 0 and "feat-b" in out and "feat-a" not in out, out + "\n" + err)
+    code, out, err, _ = cli("session", cwd=other)
+    expect("a tool that fails exits 1 and says why on stderr", code == 1 and out == "" and "not a worktree" in err, f"{code} {out!r} {err!r}")
+    code, out, err, _ = cli("launch")
+    sim = re.match(r"(s\d+)", out).group(1) if code == 0 and re.match(r"s\d+", out) else None
+    expect("greenroom launch selects the session's running simulator", sim is not None and "already running" in out, out + "\n" + err)
+    sim = sim or "s1"
+    code, out, err, _ = cli("tap", "--text", "Add", "--sim", sim)
+    expect("greenroom tap --text Add drives it and prints what changed", code == 0 and "FAB clicks" in out, out + "\n" + err)
+    code, out, err, _ = cli("tap", "Add", f"--sim={sim}")
+    expect("... the text given bare, a flag with =", code == 0 and "FAB clicks" in out, out + "\n" + err)
+    code, out, err, _ = cli("tap", "--json", json.dumps({"text": "Add", "sim": sim}))
+    expect("... and as JSON", code == 0 and "FAB clicks" in out, out + "\n" + err)
+    code, out, err, _ = cli("check", "FAB clicks", "--sim", sim)
+    expect("greenroom check answers PASS and exits 0", code == 0 and out.startswith("PASS"), f"{code} {out} {err}")
+    code, out, err, _ = cli("check", "--visible", "FAB clicks", "--visible", "No such text here", "--absent", "Add", "--sim", sim)
+    expect("... FAIL exits 1 with the answer on stdout, a list repeating its flag",
+           code == 1 and out.startswith("FAIL") and "No such text here" in out and "Add" in out, f"{code} {out} {err}")
+    shot = root + "/cli shots/one.png"
+    code, out, err, _ = cli("screenshot", "--sim", sim, "--out", shot, "--max-size", "400")
+    png = os.path.exists(shot) and open(shot, "rb").read(8) == b"\x89PNG\r\n\x1a\n"
+    expect("greenroom screenshot --out FILE writes the picture there and prints its path", code == 0 and png and f"picture: {shot}" in out, f"{code} {out} {err}")
+    code, out, err, _ = cli("screenshot", "--sim", sim, "--max-size", "200")
+    at = next((l[len("picture: "):] for l in out.split("\n") if l.startswith("picture: ")), "")
+    expect("... without --out, in the temporary folder", code == 0 and "/greenroom/screenshot-" in at and os.path.exists(at), f"{code} {out} {err}")
+    if at and os.path.exists(at) and "/greenroom/screenshot-" in at:
+        os.remove(at)
+    # A wrong command line exits 2 and reaches nothing.
+    for args, word in [(("nope",), "there is no nope"), (("tap", "--nope", "x"), "tap has no --nope"), (("wait_for",), "wait_for needs text"),
+                       (("tap", "--x-pos",), "tap has no --x-pos"), (("perf", "--sample-ms", "soon"), "whole number"),
+                       (("session", "extra"), "one argument too many"), (("session", "-C", root + "/nowhere"), "is not a folder"),
+                       (("help", "nope"), "there is no tool nope")]:
+        code, out, err, _ = cli(*args)
+        expect(f"greenroom {' '.join(args)[:30]} exits 2 and says what is wrong", code == 2 and word in err and out == "", f"{code} {out!r} {err!r}")
+    # Paused: the command is refused what an agent is.
+    open(state_dir + "/agent-paused-check", "w").write("1")
+    try:
+        code, out, err, _ = cli("tap", "--text", "Add", "--sim", sim)
+        expect("paused: the command is an agent like any other, refused with exit 1", code == 1 and "paused" in err, f"{code} {out} {err}")
+        code, out, err, _ = cli("screen", "--sim", sim)
+        expect("paused: reading still works", code == 0 and "FAB clicks" in out, f"{code} {out} {err}")
+    finally:
+        os.remove(state_dir + "/agent-paused-check")
+    # No app: a tool call from an empty state folder would start one, so only what must not start one is tried.
+    nobody = root + "/nobody-state"
+    os.makedirs(nobody)
+    code, out, err, took = cli("hook", "Stop", "--harness", "codex", state=nobody, stdin='{"session_id": "s", "cwd": "/"}')
+    expect("greenroom hook with no app running does nothing: exit 0, no word, no app started",
+           code == 0 and out == "" and err == "" and took < 3 and not os.path.exists(nobody + "/agent.json"), f"{code} {out!r} {err!r} {took:.1f} s {os.listdir(nobody)}")
+    # A hook tells the app the harness, its session id, the folder and the event. Never what else the harness wrote.
+    payload = json.dumps({"session_id": "sess-42", "cwd": trees["b"], "hook_event_name": "UserPromptSubmit", "prompt": "HOOKSECRET the prompt",
+                          "transcript_path": "/tmp/HOOKSECRET.jsonl", "tool_input": {"command": "HOOKSECRET"}})
+    code, out, err, took = cli("hook", "--harness", "claude-code", stdin=payload, cwd=other)
+    expect("greenroom hook prints nothing and exits 0", code == 0 and out == "" and err == "" and took < 5, f"{code} {out!r} {err!r} {took:.1f} s")
+    code, out, err, _ = cli("hook", "Stop", "--harness", "codex", "--session", "abc-1", "--cwd", trees["a"], cwd=other)
+    cli("hook", "bad event; rm -rf", "--harness", "codex", "--cwd", trees["a"])
+    cli("hook", "Stop", "--harness", "codex", "--cwd", root + "/nowhere")
+    act = wait(lambda: (lambda t: t if "hook codex Stop" in t else None)(a.call("agent_activity", all=True)[0]), 10) or a.call("agent_activity", all=True)[0]
+    b_name, a_name = os.path.basename(trees["b"]), os.path.basename(trees["a"])
+    expect("the app heard both: harness, event and folder, the event and folder read from the hook's JSON or given as flags",
+           f"hook claude-code UserPromptSubmit | {b_name}" in act and f"hook codex Stop | {a_name}" in act, "\n".join(l for l in act.split("\n") if " hook " in l) or act[-300:])
+    expect("... and nothing else of what the harness wrote", "HOOKSECRET" not in act and "HOOKSECRET" not in open(root + "/app.log", errors="replace").read(), act[-600:])
+    expect("... an event that is not a plain name, or a folder that is not there, is dropped", act.count("hook codex") == 1 and "rm -rf" not in act, act[-600:])
+    own, _ = a.call("agent_activity")
+    expect("... a worktree's agent sees its own worktree's hooks", f"hook codex Stop | {a_name}" in own and "hook claude-code" not in own, own[-300:])
+    hits = subprocess.run(["grep", "-rl", "HOOKSECRET", state_dir], capture_output=True, text=True).stdout.strip()
+    expect("... and nothing of it is written to the state folder", hits == "", hits)
+    # One status model for every harness: what its hooks say is what the worktree's session says.
+    def said():
+        return next((l for l in a.call("session")[0].split("\n") if l.startswith("agent session: ")), "")
+    def becomes(want):
+        return wait(lambda: said() if said() == want else None, 10) or said()
+    def codex(event):
+        cli("hook", event, "--harness", "codex", "--session", "abc-1", "--cwd", trees["a"], cwd=other)
+    expect("a turn that ended leaves the worktree's session idle, under the harness's name", becomes("agent session: Codex (idle)") == "agent session: Codex (idle)", said())
+    codex("UserPromptSubmit")
+    expect("a prompt's hook shows it working", becomes("agent session: Codex (working)") == "agent session: Codex (working)", said())
+    codex("PermissionRequest")
+    expect("a permission request shows it waiting for the person", becomes("agent session: Codex (waiting)") == "agent session: Codex (waiting)", said())
+    codex("PostToolUse")
+    expect("the tool finishing shows it working again", becomes("agent session: Codex (working)") == "agent session: Codex (working)", said())
+    codex("Stop")
+    expect("the turn's end shows it idle", becomes("agent session: Codex (idle)") == "agent session: Codex (idle)", said())
+    # Where the sidebar files the session: the two checks above looked at its simulator, on a build that is current.
+    def filed():
+        line = next((l for l in a.call("sessions")[0].split("\n") if l.strip().split(" | ")[0] == "feat-a"), "")
+        return next((p for p in line.split(" | ") if p.split(":")[0] in ("ready for review", "needs you", "working")), "quiet")
+    def files(want):
+        return wait(lambda: filed() if filed() == want else None, 10) or filed()
+    # How many checks count depends on whether the session's build changed since an earlier part of this script
+    # checked its screen: the two above are on the build it has now, one of them failed.
+    def ready(line):
+        m = re.fullmatch(r"ready for review: (\d+) of (\d+) passed · 1 failed", line)
+        return bool(m) and int(m.group(2)) == int(m.group(1)) + 1 and int(m.group(2)) >= 2
+    def files_ready():
+        return wait(lambda: filed() if ready(filed()) else None, 10) or filed()
+    expect("a session whose turn ended on a current build with checks on it is ready for review, a failed check said",
+           ready(files_ready()), filed() + "\n" + a.call("sessions")[0])
+    codex("UserPromptSubmit")
+    expect("... a new turn takes it back to working", files("working: Codex is working") == "working: Codex is working", filed())
+    codex("PermissionRequest")
+    expect("... a permission asked for is the person's to answer", files("needs you: Codex is waiting for you") == "needs you: Codex is waiting for you", filed())
+    codex("PostToolUse")
+    codex("Stop")
+    expect("... and its turn's end makes it ready again", ready(files_ready()), filed())
+    # Cursor reads a hook's answer, and writes the account's address on stdin: answered, and the address never kept.
+    def cursor(event, **more):
+        body = json.dumps({"conversation_id": "conv-7", "workspace_roots": [trees["a"]], "hook_event_name": event, "cursor_version": "9.9",
+                           "user_email": "HOOKSECRET@example.com", "prompt": "HOOKSECRET"})
+        return cli("hook", event, "--harness", "cursor", stdin=body, cwd=other, **more)
+    code, out, err, took = cursor("beforeSubmitPrompt")
+    expect("Cursor's prompt hook is answered with continue, and nothing else", code == 0 and out == '{"continue":true}' and err == "" and took < 5, f"{code} {out!r} {err!r}")
+    expect("... and its session is the worktree's, working", becomes("agent session: Cursor (working)") == "agent session: Cursor (working)", said())
+    code, out, err, _ = cursor("stop")
+    expect("Cursor's other hooks are answered with an empty object", code == 0 and out == "{}" and err == "", f"{code} {out!r} {err!r}")
+    expect("... and its turn ended", becomes("agent session: Cursor (idle)") == "agent session: Cursor (idle)", said())
+    code, out, err, _ = cursor("beforeSubmitPrompt", state=nobody)
+    code2, out2, err2, _ = cursor("stop", state=nobody)
+    expect("with no app running Cursor is answered the same, and no app is started",
+           (code, out, err, code2, out2, err2) == (0, '{"continue":true}', "", 0, "{}", "") and not os.path.exists(nobody + "/agent.json"), f"{code} {out!r} {err!r} {code2} {out2!r} {err2!r}")
+    # Cursor also runs the hooks in Claude Code's settings: heard as Cursor's session, answered as Claude Code is.
+    body = json.dumps({"conversation_id": "conv-7", "workspace_roots": [trees["a"]], "cursor_version": "9.9", "user_email": "HOOKSECRET@example.com"})
+    code, out, err, _ = cli("hook", "UserPromptSubmit", "--harness", "claude", stdin=body, cwd=other)
+    expect("Claude Code's hook run by Cursor prints nothing, and is Cursor's session", code == 0 and out == "" and err == ""
+           and becomes("agent session: Cursor (working)") == "agent session: Cursor (working)", f"{code} {out!r} {err!r} {said()}")
+    act = a.call("agent_activity", all=True)[0]
+    hits = subprocess.run(["grep", "-rl", "HOOKSECRET", state_dir], capture_output=True, text=True).stdout.strip()
+    expect("the account Cursor names is never kept: not in the activity, the log or the state folder",
+           "HOOKSECRET" not in act and "HOOKSECRET" not in open(root + "/app.log", errors="replace").read() and hits == "", act[-400:] + hits)
+    # A session that ended is gone, and so is the line.
+    cli("hook", "sessionEnd", "--harness", "cursor", "--session", "conv-7", "--cwd", trees["a"], cwd=other)
+    codex("SessionEnd")
+    cli("hook", "SessionEnd", "--harness", "claude-code", "--session", "sess-42", "--cwd", trees["b"], cwd=other)
+    expect("a session that ended is no longer shown", becomes("") == "", said())
+    # open, and the links: they navigate, and that is all.
+    def stage():
+        t, _ = a.call("app")
+        return next((l for l in t.split("\n") if l.startswith("stage: ")), t[:200])
+    code, out, err, _ = cli("open")
+    expect("greenroom open brings the window forward", code == 0 and out == "Greenroom's window", f"{code} {out} {err}")
+    code, out, err, _ = cli("open", f"{scheme}://apk")
+    expect("greenroom open LINK goes where the link says: the APK screen", code == 0 and out == "the APK screen" and stage() == "stage: the APK screen", f"{code} {out} {err} | {stage()}")
+    code, out, err, _ = cli("open", f"{scheme}://connect")
+    expect("... the Connect screen", code == 0 and out == "the Connect screen" and stage().startswith("stage: the Connect screen"), f"{code} {out} {err} | {stage()}")
+    code, out, err, _ = cli("open", f"{scheme}://session?path=" + urllib.parse.quote(trees["a"]))
+    expect("... a session Greenroom has, and its simulator", code == 0 and out.startswith("feat-a") and "its simulator" in out, f"{code} {out} {err}")
+    sessions_before, _ = a.call("sessions")
+    code, out, err, _ = cli("open", f"{scheme}://session?path=" + urllib.parse.quote(root + "/nowhere"))
+    sessions_after, _ = a.call("sessions")
+    expect("a link to a session Greenroom does not have says so, exits 1 and adds nothing",
+           code == 1 and "has no session for nowhere" in err and sessions_before == sessions_after, f"{code} {out} {err}")
+    code, out, err, _ = cli("open", f"{scheme}://launch?apk=" + urllib.parse.quote(apk))
+    sims, _ = a.call("simulators")
+    expect("a link never runs anything: a place Greenroom does not have is refused", code == 1 and "has no place called launch" in err, f"{code} {out} {err}")
+    other_scheme = "greenroom" if scheme == "greenroom-debug" else "greenroom-debug"
+    code, out, err, _ = cli("open", f"{other_scheme}://connect")
+    expect("the other copy's link is not this copy's", code == 2 and "link, and this is Greenroom" in err, f"{code} {out} {err}")
+    code, out, err, _ = cli("open", root + "/nowhere")
+    expect("greenroom open with nothing there exits 2", code == 2 and "there is no" in err, f"{code} {out} {err}")
+    code, out, err, _ = cli("open", trees["b"], cwd=other)
+    expect("greenroom open DIR opens that worktree's session, and the devices take the stage back", code == 0 and "feat-b" in out and stage() == "stage: the devices", f"{code} {out} {err} | {stage()}")
+    cli("open", f"{scheme}://apk")
+    code, out, err, _ = cli("open", f"{scheme}://session?path=" + urllib.parse.quote(trees["a"]))
+    expect("... as they do for a link to a session", code == 0 and stage() == "stage: the devices", f"{code} {out} {err} | {stage()}")
+    count = sum(1 for l in sims.split("\n") if re.match(r"s\d+ ", l))
+    code, out, err, _ = cli("open", os.path.relpath(apk, other), cwd=other)
+    now, _ = a.call("simulators")
+    started = re.match(r"(s\d+)", out)
+    expect("greenroom open APK runs it, the path taken from the shell's folder",
+           code == 0 and started is not None and "launched" in out and sum(1 for l in now.split("\n") if re.match(r"s\d+ ", l)) == count + 1, f"{code} {out} {err}\n{now}")
+    if started:
+        a.call("close", sim=started.group(1))
+
+
+def review_loop(exe, env, a, b, trees, other, state_dir, expect, wait, Shim):
+    """The loop's two ends (A6): spec says what a session is for, check ticks its criteria, review waits for the
+    person's answer, and what the person says reaches the agent: with the review's answer, on the next tool's answer,
+    by feedback, and when a turn ends (the hook's answer, in each harness's own form). The person is played through
+    review-person-check.json, which the app reads only with --agent-check and acts on with the panel's own functions."""
+    import threading, base64
+    def cli(*args, cwd=trees["a"], stdin=None):
+        p = subprocess.run([exe, "--agent-check", "--cli", *args], cwd=cwd, env=env, input=stdin if stdin is not None else "", capture_output=True, text=True, timeout=60)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    def person(**what):
+        done = state_dir + "/review-person-check.json.done"
+        if os.path.exists(done):
+            os.remove(done)
+        tmp = state_dir + "/review-person-check.tmp"
+        json.dump(dict(what, worktree=trees["a"]), open(tmp, "w"))
+        os.rename(tmp, state_dir + "/review-person-check.json")
+        return wait(lambda: open(done).read() if os.path.exists(done) else None, 60)
+    def blocks(shim, tool, **args):
+        r = shim.rpc("tools/call", {"name": tool, "arguments": args}).get("result", {})
+        return r.get("content", []), bool(r.get("isError"))
+    def session_line(start):
+        return next((l for l in a.call("session")[0].split("\n") if l.startswith(start)), "")
+    def filed():
+        line = next((l for l in a.call("sessions")[0].split("\n") if l.strip().split(" | ")[0] == "feat-a"), "")
+        return next((p for p in line.split(" | ") if p.split(":")[0] in ("ready for review", "needs you", "working")), "quiet")
+    m = re.search(r"simulator: (s\d+) running", a.call("session")[0])
+    sim = m.group(1) if m else "s1"
+    listed = {t["name"] for t in a.rpc("tools/list")["result"]["tools"]}
+    expect("tools/list has spec, review and feedback", {"spec", "review", "feedback"} <= listed, sorted(listed))
+    t, err = a.call("spec")
+    expect("spec with nothing declared says so", not err and t.startswith("no spec yet"), t)
+    away = Shim(other)
+    t, err = away.call("spec", title="Nowhere")
+    expect("spec outside a session is refused", err and "not a worktree" in t, t)
+    t, err = a.call("spec", text="No title")
+    expect("a first spec needs a title", err and "title" in t, t)
+    t, err = a.call("spec", title="Count the taps", text="Each tap on Add is counted.", link="https://example.invalid/issues/7",
+                    criteria=["The counter shows the taps", "No sign-in is asked for", "The header is green"])
+    expect("spec declares the task and its criteria, numbered and unticked",
+           not err and t.startswith("the person now sees: Count the taps") and "1. [ ] The counter shows the taps" in t and "3. [ ] The header is green" in t and "tick each with check" in t, t)
+    expect("session says the spec", session_line("spec: ") == 'spec: "Count the taps", 0 of 3 criteria passed', a.call("session")[0])
+    t, err = a.call("check", sim=sim, visible=["FAB clicks"], criterion="1")
+    expect("check with a criterion ticks it", not err and t.startswith("PASS") and "criterion 1 passed: The counter shows the taps" in t and "2 not checked yet" in t, t)
+    t, err = a.call("check", sim=sim, absent=["FAB clicks"], criterion="No sign-in is asked for")
+    expect("... named by its words, a failed check marks it failed", t.startswith("FAIL") and "criterion 2 FAILED: No sign-in is asked for" in t and "1 not checked yet, 1 failed" in t, t)
+    t, err = a.call("spec")
+    expect("spec answers how each stands, the failed one with why", "1. [passed] The counter" in t and "2. [FAILED] No sign-in is asked for (on screen but should not be" in t, t)
+    t, err = a.call("check", sim=sim, absent=["Sign in to continue"], criterion="2")
+    expect("... and passing it later ticks it", t.startswith("PASS") and "criterion 2 passed" in t, t)
+    t, err = a.call("check", sim=sim, visible=["FAB clicks"], criterion="9")
+    expect("a criterion the spec does not have is said, and the check still answers", t.startswith("PASS") and 'no criterion "9": the spec has 3' in t, t)
+    t, err = a.call("check", sim=sim, passed=True)
+    expect("the agent's own judgement needs a criterion", err and "criterion" in t, t)
+    t, err = a.call("check", sim=sim)
+    expect("check with nothing to verify is refused", err and "visible or absent" in t, t)
+    t, err = a.call("check", sim=sim, criterion="3", passed=True, note="green in the screenshot")
+    expect("a criterion texts cannot show is the agent's word, and said to be",
+           t.startswith("PASS") and "the agent's word: green in the screenshot" in t and "criterion 3 passed" in t and "every criterion has passed: call review" in t, t)
+    t, err = a.call("spec", title="Count the taps", criteria=["The counter shows the taps", "Nothing asks for a sign-in", "The header is green"])
+    expect("a spec declared again keeps the ticks of criteria whose words did not change",
+           "1. [passed] The counter" in t and "2. [ ] Nothing asks for a sign-in" in t and "3. [passed] The header is green" in t and "Each tap on Add is counted." in t, t)
+    a.call("check", sim=sim, absent=["Sign in to continue"], criterion="2")
+    # review waits for the person; their answer is the call's answer.
+    a2 = Shim(trees["a"])
+    got = {}
+    def ask(key, **args):
+        got[key] = blocks(a2, "review", **args)
+    th = threading.Thread(target=ask, args=("first",), kwargs={"summary": "Counted the taps and checked all three.", "timeout_s": 90})
+    th.start()
+    expect("a session that asked for a review is ready for review while its call waits", wait(lambda: filed().startswith("ready for review"), 20), filed())
+    expect("... and session says it waits", session_line("review: ") == "review: waiting for the person", a.call("session")[0])
+    expect("the person approves", person(answer="approved") == "ok", "")
+    th.join(30)
+    text = "\n".join(c["text"] for c in got.get("first", ([], False))[0] if c["type"] == "text")
+    expect("review answers approved", not th.is_alive() and text == "approved", text)
+    expect("... session says so, for the commit it was given on", re.fullmatch(r"review: approved at [0-9a-f]{7}", session_line("review: ")), a.call("session")[0])
+    expect("... and the session is no longer waiting for a review", wait(lambda: not filed().startswith("ready for review"), 10), filed())
+    # A comment with nobody waiting rides on the next tool's answer, once.
+    expect("the person writes a comment", person(comment="Make the counter bold") == "ok", "")
+    t, err = a.call("screen", sim=sim)
+    expect("the next tool's answer carries what the person said", t.rstrip().endswith("--- from the person at the Mac, in Greenroom\n1 comment from the person:\n- Make the counter bold"), t[-300:])
+    t, err = a.call("screen", sim=sim)
+    expect("... once", "from the person" not in t, t[-300:])
+    t, err = a.call("feedback")
+    expect("feedback with nothing new says so", not err and t == "nothing new from the person", t)
+    t, err = a.call("feedback", all=True)
+    expect("feedback all answers the review and every comment again", "review: approved" in t and "- Make the counter bold" in t, t)
+    # Changes requested, with a comment pinned to a node: its name, where it is, and a picture.
+    t, _ = a.call("screen", sim=sim, bounds=True, text="Add")
+    box = re.search(r"\[(\d+),(\d+),(\d+),(\d+)\]", t)
+    x, y = ((int(box.group(1)) + int(box.group(3))) // 2, (int(box.group(2)) + int(box.group(4))) // 2) if box else (100, 100)
+    th = threading.Thread(target=ask, args=("second",), kwargs={"summary": "Again.", "timeout_s": 90})
+    th.start()
+    wait(lambda: filed().startswith("ready for review"), 20)
+    said = person(comment="This says Add: it should say Add a tap", pin=[x, y], answer="changes")
+    expect("the person pins a comment to a node of the screen and asks for changes", said == "ok", str(said) + " " + t[:200])
+    th.join(30)
+    content = got.get("second", ([], False))[0]
+    text = "\n".join(c["text"] for c in content if c["type"] == "text")
+    pictures = [c for c in content if c["type"] == "image"]
+    expect("review answers changes requested, with the comment and the node it is pinned to",
+           text.startswith("changes requested:\n- This says Add: it should say Add a tap\n  pinned to \"Add\" [") and "(picture 1)" in text, text)
+    expect("... and a picture of it", len(pictures) == 1 and base64.b64decode(pictures[0]["data"])[:8] == b"\x89PNG\r\n\x1a\n" and pictures[0]["mimeType"] == "image/png",
+           str([(c["type"], len(c.get("data", ""))) for c in content]))
+    expect("... session says changes were asked for", session_line("review: ") == "review: changes requested", a.call("session")[0])
+    # A comment written while a review waits, with no answer: handed over at once, and the request stays open.
+    th = threading.Thread(target=ask, args=("third",), kwargs={"summary": "Third time.", "timeout_s": 90})
+    th.start()
+    wait(lambda: filed().startswith("ready for review"), 20)
+    person(comment="Before I answer: what about tablets?")
+    th.join(30)
+    text = "\n".join(c["text"] for c in got.get("third", ([], False))[0] if c["type"] == "text")
+    expect("a comment written while review waits ends the wait with it, the request still open",
+           not th.is_alive() and text == "the person has not answered yet, but wrote:\n- Before I answer: what about tablets?\nYour request stays open: deal with this, then call review again.", text)
+    expect("... and the session is still ready for review", filed().startswith("ready for review"), filed())
+    # Nobody waiting when the answer comes: the turn's end carries it, in the harness's own form.
+    t, err = a.call("review", timeout_s=10)
+    expect("a review nobody answers in time says it is still waiting", not err and t.startswith("still waiting: the person has not answered after 10 s"), t)
+    person(answer="approved")
+    code, out, errs = cli("hook", "Stop", "--harness", "codex", "--session", "rev-1", "--cwd", trees["a"], cwd=other)
+    try:
+        said = json.loads(out)
+    except Exception:
+        said = {}
+    expect("Codex's turn-end hook is answered with what the person said, as a reason to go on",
+           code == 0 and said.get("decision") == "block" and said.get("reason", "").endswith("approved") and "in Greenroom" in said.get("reason", ""), f"{code} {out!r} {errs!r}")
+    def agent_line():
+        return session_line("agent session: ")
+    expect("... and the session is still working: the turn goes on", wait(lambda: agent_line() == "agent session: Codex (working)", 10), agent_line())
+    code, out, errs = cli("hook", "Stop", "--harness", "codex", "--session", "rev-1", "--cwd", trees["a"], cwd=other)
+    expect("with nothing more to say the turn's end prints nothing, and the turn ends", code == 0 and out == "" and wait(lambda: agent_line() == "agent session: Codex (idle)", 10), f"{code} {out!r} {agent_line()}")
+    cli("hook", "SessionEnd", "--harness", "codex", "--session", "rev-1", "--cwd", trees["a"], cwd=other)
+    # Cursor: a turn the person stopped carries nothing; Claude Code's hook run by Cursor carries nothing; its own does.
+    person(comment="And make it blue")
+    def cursor(event, harness="cursor", status="completed"):
+        body = json.dumps({"conversation_id": "rev-2", "workspace_roots": [trees["a"]], "hook_event_name": event, "cursor_version": "9.9", "status": status})
+        return cli("hook", event, "--harness", harness, stdin=body, cwd=other)
+    code, out, errs = cursor("stop", status="aborted")
+    expect("a turn the person stopped in Cursor is not continued", code == 0 and out == "{}", f"{code} {out!r}")
+    code, out, errs = cursor("Stop", harness="claude")
+    expect("Claude Code's hook run by Cursor does not take the comment (Cursor's own hook does)", code == 0 and out == "", f"{code} {out!r}")
+    code, out, errs = cursor("stop")
+    try:
+        said = json.loads(out)
+    except Exception:
+        said = {}
+    expect("Cursor's turn-end hook is answered with a follow-up message", code == 0 and list(said) == ["followup_message"] and said["followup_message"].endswith("1 comment from the person:\n- And make it blue"), f"{code} {out!r}")
+    code, out, errs = cursor("stop")
+    expect("... once", code == 0 and out == "{}", f"{code} {out!r}")
+    cli("hook", "sessionEnd", "--harness", "cursor", "--session", "rev-2", "--cwd", trees["a"], cwd=other)
+    # A paused agent may still say what it is doing and hear the person.
+    open(state_dir + "/agent-paused-check", "w").write("1")
+    try:
+        t, err = a.call("spec")
+        t2, err2 = a.call("feedback")
+        expect("paused: spec and feedback still answer", not err and not err2 and "Count the taps" in t, t + " | " + t2)
+    finally:
+        os.remove(state_dir + "/agent-paused-check")
+    hits = subprocess.run(["grep", "-rl", "Make the counter bold", state_dir], capture_output=True, text=True).stdout.strip().split("\n")
+    expect("what the person wrote is kept in the session's work file only", all("/work/" in h for h in hits) and hits != [""], str(hits))
+    # Take Over (A7): one session's device is the person's, its agent waits, the other session's agent goes on.
+    mb = re.search(r"simulator: (s\d+) running", b.call("session")[0])
+    sim_b = mb.group(1) if mb else None
+    if sim_b is None:
+        t, _ = b.call("launch")
+        mb = re.match(r"(s\d+)", t)
+        sim_b = mb.group(1) if mb else "s2"
+    expect("the person takes feat-a's device over", person(take=True) == "ok", "")
+    t, err = a.call("tap", sim=sim, text="Add")
+    expect("its agent's action is refused, and told why", err and "took over this session's device" in t and "Reading still works" in t, t)
+    t, err = a.call("screen", sim=sim)
+    expect("... reading still answers", not err and "FAB clicks" in t, t[:200])
+    t, err = a.call("build", timeout_s=10)
+    expect("... a build of that session waits too", err and "took over" in t, t)
+    t, err = b.call("tap", sim=sim_b, text="Add")
+    expect("the other session's agent goes on", not err and "FAB clicks" in t, t[:200])
+    t, err = b.call("tap", sim=sim, text="Add")
+    expect("... but not on the device that was taken over", err and "took over" in t, t)
+    expect("session says who has the device", session_line("device: ").startswith("device: the person took it over"), a.call("session")[0])
+    expect("... and the session needs the person, to hand it back", wait(lambda: filed() == "needs you: You have the device: hand it back", 10), filed())
+    expect("the person hands it back", person(take=False) == "ok", "")
+    t, err = a.call("tap", sim=sim, text="Add")
+    expect("the agent acts again, and its answer says the device was handed back", not err and "FAB clicks" in t and t.rstrip().endswith("--- from Greenroom\nThe person handed the device back: you can act on it again."), t[-300:])
+    t, err = a.call("screen", sim=sim)
+    expect("... once", not err and "handed the device back" not in t and session_line("device: ") == "", t[-200:])
+    # A lane a simulator: an agent waiting on its device does not hold up another's; two calls on one device still take turns.
+    slow = {}
+    def waits(shim, key, which):
+        started = time.time()
+        shim.call("wait_for", sim=which, text="Never on this screen", timeout_ms=6000)
+        slow[key] = time.time() - started
+    th = threading.Thread(target=waits, args=(b, "b", sim_b))
+    th.start()
+    time.sleep(0.5)
+    started = time.time()
+    t, err = a.call("screen", sim=sim)
+    quick = time.time() - started
+    th.join(30)
+    expect("while one agent waits on its simulator, another's call on its own answers at once", not err and quick < 3 and slow.get("b", 0) > 5, f"{quick:.1f} s beside a wait of {slow.get('b', 0):.1f} s")
+    th = threading.Thread(target=waits, args=(a2, "a", sim))
+    th.start()
+    time.sleep(0.5)
+    started = time.time()
+    t, err = a.call("screen", sim=sim)
+    behind = time.time() - started
+    th.join(30)
+    expect("two calls on one simulator take turns", not err and behind > 3, f"{behind:.1f} s behind a wait of {slow.get('a', 0):.1f} s")
+
 
 def more_tools(a, away, trees, state_dir, apk, expect):
     """The tools for the rest of Greenroom: the panes (network, perf, accessibility, background, clipboard, inspect, the
@@ -651,7 +1114,7 @@ def history_mode():
         except subprocess.TimeoutExpired: app.kill()
         if failures:
             print("the app's output:\n" + open(root + "/app.log", errors="replace").read()[-3000:])
-        subprocess.run(["rm", "-rf", root])
+        remove(root)
     print(f"mcp-check --history: {len(failures)} failed" if failures else "mcp-check --history: all passed")
     sys.exit(1 if failures else 0)
 
@@ -668,6 +1131,9 @@ def running_pid():
     except Exception:
         return None
 was_running = running_pid()
+# A state folder of the check's own with nothing in it yet: the app this starts is on its first run.
+first_run = bool(os.environ.get("GREENROOM_STATE")) and not was_running and not os.path.exists(os.path.dirname(state) + "/connect-seen") \
+    and not os.path.exists(os.path.dirname(state) + "/sessions/workspaces.json")
 started = None
 if not was_running:
     # Started here rather than by the shim (which uses LaunchServices: on CI's runners the app it opened never served
@@ -709,6 +1175,27 @@ def expect(what, ok, got=""):
 try:
     r = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp-check", "version": "1"}})
     expect("initialize answers with the asked version", r["result"]["protocolVersion"] == "2025-06-18", json.dumps(r))
+    # What the server says about itself. The release copy's words are as they were; the Debug copy (Info.plist's
+    # GreenroomVariant) says what it is first, so an agent that has both does not pick it to test an app.
+    words, title = r["result"].get("instructions", ""), r["result"].get("serverInfo", {}).get("title")
+    release_words = ("Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. launch an APK, then tap/type/key/swipe: "
+                     "each action answers with the nodes that changed (+ added, - removed, ~ changed; refs like e3 stay the same while a node is on screen), "
+                     "so call screen or screenshot only when you need all of it. check verifies texts in one call. In a worktree: spec says what you set out to do, "
+                     "check with criterion ticks it for the person, review asks them to look and waits for approved or their comments; a block that begins "
+                     "\"--- from the person\" at the end of an answer is theirs. APKs and their data stay on this Mac. "
+                     "Sign-ins are the owner's: never ask for or type passwords. To sign in, run_script a script the owner allowed (scripts lists them): "
+                     "it types their stored credentials, which you never see.")
+    try:
+        import plistlib
+        variant = plistlib.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(exe))), "Info.plist"), "rb")).get("GreenroomVariant", "release")
+    except Exception:
+        variant = "release"
+    if variant == "debug":
+        expect("the Debug copy's instructions open by saying what it is, then say the same",
+               words.startswith("This is Greenroom Debug, the development build of Greenroom itself. Use it only when asked to test the debug build")
+               and words.endswith(release_words) and len(words) < 4096 and title == "Greenroom Debug", (title, words))
+    else:
+        expect("the release copy's instructions are as they were", words == release_words and title == "Greenroom", (title, words))
     p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()
     listed = rpc("tools/list")
     if "result" not in listed:
@@ -722,8 +1209,13 @@ try:
     r = rpc("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "1999-01-01"}})
     expect("an unknown protocol version is refused", r.get("error", {}).get("code") == -32022, json.dumps(r))
 
+    # First run (a state folder with nothing in it): the window shows the Connect screen until an agent's app opens.
+    stage = lambda: next((l for l in call("app")[0].split("\n") if l.startswith("stage: ")), "")
+    if first_run:
+        expect("on first run the window shows the Connect screen", stage().startswith("stage: the Connect screen"), stage())
     t, err, _ = call("launch", apk=apk, fresh=True)
     expect("launch answers with the screen", not err and "launched" in t and '"FAB clicks: 0"' in t, t)
+    expect("the agent's app takes the stage", stage() == "stage: the devices", stage())
     t, err, _ = call("tap", text="Add")
     expect("a tap answers with what changed", not err and '"FAB clicks: 0" -> "FAB clicks: 1"' in t, t)
     ref = next((l.split()[1] for l in t.split("\n") if l.startswith("~ ") and "FAB clicks" in l), "")
@@ -753,9 +1245,9 @@ try:
     expect("wait_for gives up at its timeout", err and "not on screen after" in t, t)
     call("set", setting="rotate", value="portrait")
     call("tap", text="Home")
-    t, err, _ = call("launch", apk=apk, fresh=True)
+    t, err, _ = call("launch", apk="sample", fresh=True)   # the app that comes with Greenroom, by name
     second = t.split()[0]
-    expect("a second launch runs beside the first", not err and second == "s2", t)
+    expect("a second launch, of the sample app by name, runs beside the first", not err and second == "s2" and '"FAB clicks: 0"' in t, t)
     call("tap", sim="s2", text="Add")
     call("tap", sim="s2", text="Add")
     # s1 was tapped twice at the start of the session: both now show "FAB clicks: 2".

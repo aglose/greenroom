@@ -433,7 +433,7 @@ final class MainBuilds {
         if let why = await Self.checkout(sha, at: trunk, repo: ws.root) { states[key] = .failed(why); change(); return }
         attempted[key] = sha
         states[key] = .idle
-        let session = Session(worktree: trunk, workspace: ws.root, branch: name, head: sha, dirty: false, ahead: 0, claude: nil,
+        let session = Session(worktree: trunk, workspace: ws.root, branch: name, head: sha, dirty: false, ahead: 0, agent: nil,
                               build: nil, simulator: nil, outputs: nil, sourcesDate: nil)
         sessions?.buildQueue.start(session, workspace: ws, recipeName: "local", store: store) { [weak self] why in
             self?.states[key] = .failed(why)
