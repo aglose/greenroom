@@ -345,7 +345,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let i = args.firstIndex(of: "--visual-check"), i + 2 < args.count else { return }
         let dir = URL(fileURLWithPath: args[i + 1])
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false)
+        // Light at launch, whatever the APK's default (the bundled sample's is dark), so step 3 shows the change.
+        workbench.open(URL(fileURLWithPath: args[i + 2]), remember: false, options: ["--appearance", "light"])
         try? FileManager.default.createDirectory(at: Engine.shared.screenshots, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var waited = 0.0
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] timer in
@@ -357,7 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ("1-launch", 5, {}),
                 ("2-click", 2, { self.workbench.debugClick(atFraction: CGPoint(x: 0.5, y: 0.5)) }),
                 ("2b-typed", 2, { self.workbench.debugType("typed in Greenroom") }),
-                ("3-dark", 3, { self.workbench.appearance(nil) }),
+                ("3-dark", 3, { sim.send("appearance dark") }),
                 ("4-rotated", 3, { self.workbench.rotate(nil) }),
                 ("5-tablet", 4, { self.workbench.rotate(nil); sim.send("device tablet") }),
                 ("6-beside", 14, { sim.send("device phone"); self.workbench.openBeside(apk: sim.apk, device: "tablet") }),
