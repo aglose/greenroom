@@ -9,6 +9,11 @@ import AppKit
 
 extension AgentTools {
     static let noSession = "this folder is not a worktree of a repository added to Greenroom: run the agent from a worktree of one"
+    /// The same, with why this call did not add the folder's repository when there is a reason to give.
+    static func noSession(_ connection: Connection) -> String {
+        guard let why = connection.why else { return noSession }
+        return "this folder is not a worktree of a repository added to Greenroom (\(why))"
+    }
 
     // MARK: Plumbing
 
@@ -28,7 +33,7 @@ extension AgentTools {
 
     /// The session this connection is tied to, as the app has it now, with its workspace and git state read again.
     func tied(_ connection: Connection) throws -> (session: Session, workspace: Workspace) {
-        guard let wb = workbench, let old = connection.session else { throw Failure(message: Self.noSession) }
+        guard let wb = workbench, let old = connection.session else { throw Failure(message: Self.noSession(connection)) }
         var found: (Session, Workspace)?
         mainSync {
             let s = wb.sessions.session(atWorktree: old.worktree) ?? old

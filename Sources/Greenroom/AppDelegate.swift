@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scriptsCheckIfAsked()
         buildsCheckIfAsked()
         mainCheckIfAsked()
+        waitingCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
         recipesCheckIfAsked()
@@ -514,6 +515,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         BuildsCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1]), apk: URL(fileURLWithPath: args[i + 2]))
     }
 
+    /// `Greenroom --waiting-check DIR`: see WaitingCheck.
+    private func waitingCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--waiting-check"), i + 1 < args.count else { return }
+        // It looks at the window, so it would show the person's own sessions and start their fetches: only with a
+        // state folder of its own.
+        guard Engine.agentCheck, ProcessInfo.processInfo.environment["GREENROOM_STATE"]?.hasPrefix("/") == true else {
+            print("waiting check: run it with --agent-check and GREENROOM_STATE set to an empty folder, never on your own state")
+            exit(2)
+        }
+        WaitingCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
+    }
+
     /// `Greenroom --main-check DIR APK`: see MainCheck.
     private func mainCheckIfAsked() {
         let args = CommandLine.arguments
@@ -570,6 +584,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private let agent = AgentServer()
+    /// Whether the agent endpoint is up (the waiting stage says so).
+    var agentListening: Bool { agent.port != 0 }
     private var termSource: DispatchSourceSignal?
 
     private func startAgentServer() {
@@ -579,6 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.workbench.agentActivity.add(tool, summary, failed: failed, session: session)
         }
         agent.onClient = { [weak self] name in self?.workbench.agentActivity.connected(name) }
+        agent.onReady = { [weak self] in self?.workbench.agentChanged() }
         workbench.agentActivity.onChange = { [weak self] in self?.workbench.agentChanged() }
         do { try agent.start() } catch { NSLog("Greenroom: the agent interface could not start: \(error)") }
         // Checks (--agent-check only): repositories to add to Sessions at launch (GREENROOM_ADD_REPOSITORY, one per line).
@@ -666,10 +683,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(submenu(app, title: Variant.name))
 
         let file = NSMenu(title: "File")
-        file.addItem(item("Open APK…", #selector(openDocument(_:)), "o"))
+        file.addItem(to(workbench: #selector(Workbench.runAPK(_:)), "Run an APK…", "o"))   // the APK screen
         file.addItem(to(workbench: #selector(Workbench.compareWithAPK(_:)), "Compare With APK…", "O", [.command, .shift]))
-        file.addItem(to(workbench: #selector(Workbench.addRepository(_:)), "Add Repository…", "o", [.command, .option]))
         file.addItem(item("Clear Recent APKs", #selector(clearRecents(_:)), ""))
+        file.addItem(.separator())
+        file.addItem(to(workbench: #selector(Workbench.addRepository(_:)), "Add Repository…", "o", [.command, .option]))
+        file.addItem(to(workbench: #selector(Workbench.openProjectFolder(_:)), "Open Project Folder…", ""))
+        file.addItem(to(workbench: #selector(Workbench.cloneFromGitHub(_:)), "Clone from GitHub…", ""))
         file.addItem(.separator())
         file.addItem(to(workbench: #selector(Workbench.toggleRecording(_:)), "Record", "r", [.command, .option]))
         file.addItem(to(workbench: #selector(Workbench.toggleScreenRecording(_:)), "Record Screen", "r", [.command, .control]))   // ⌘R is Rotate

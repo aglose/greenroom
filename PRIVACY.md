@@ -65,6 +65,17 @@ the Agent popover, which ends a running recording at once; a paused agent is not
 (Settings) runs `claude mcp add` with your own `claude` program, which changes Claude Code's own list of servers on
 this Mac and nothing else.
 
+## Repositories an agent brings
+
+When an agent you connected calls Greenroom from a folder, Greenroom runs `git` in that folder (read-only) to find
+its repository, as it always has. New: if the folder is a worktree with an Android app in it and its repository is
+not in Sessions, Greenroom adds it, says so in the window and offers Undo. Adding looks through the repository's
+folders for Gradle build files and built APKs, on this Mac, and nothing else: a repository an agent added does not
+fetch its base branch, ask GitHub for a build or run a recipe until the agent or you ask for a build, or you turn
+"Keep main built" on for it. A repository you removed from Sessions is not added again by an agent, and none is added
+while agents are paused. The list of removed repositories is a file in the state folder (`sessions/removed.json`,
+folder paths only).
+
 ## Build recipes
 
 If you add a git repository (Sessions) and build it, Greenroom runs a **recipe**: a program that makes an APK, told

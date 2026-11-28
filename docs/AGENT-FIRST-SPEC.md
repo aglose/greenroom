@@ -1,0 +1,297 @@
+# Greenroom, agent-first: the spec
+
+A spec (2026-11-27). The owner's decisions are at the end. **A1 is built** (`AgentAdoption.swift`,
+`WaitingStage.swift`, the APK screen in `EmptyStage.swift`, `--waiting-check`, `mcp-check.py --sessions`); the rest
+is not. It changes what Greenroom is for, what a new user sees first, and how the
+window is arranged. The engine, the simulators, the tools in [AGENTS-INTERFACE.md](AGENTS-INTERFACE.md) and the
+sessions model in [SESSIONS-PLAN.md](SESSIONS-PLAN.md) stay; most of this is a new front on what they already do.
+The clickable prototype is [prototype/agent-first.html](prototype/agent-first.html).
+
+## What Greenroom is
+
+**Before:** a Mac app that runs an APK you drop on it, which agents can also drive.
+
+**After:** the place an agent's Android work shows up to be watched, checked and steered. An agent is given a
+spec, writes the code, and gets an APK built on this Mac or on CI. From the moment that APK reaches Greenroom it is
+launched, driven and verified in a simulator the person can see the whole time. Many agents work at once; the
+window says which one is ready for you.
+
+Five rules everything below follows:
+
+1. **The agent brings the work.** Nothing is dragged in. A session appears when an agent calls Greenroom.
+2. **Any harness.** Claude Code, Codex, Cursor, Antigravity, Copilot, opencode, T3 Code and the rest connect the
+   same way and look the same in the window. No screen says "Claude" where it means "agent".
+3. **The person watches, judges and steers.** Every click still works: the mouse is still the finger. What is new
+   is that the person can answer the agent from the window.
+4. **The whole loop is on screen.** Spec, code, build, run, verify, review: each session shows where it is.
+5. **Attention is routed.** The window, the Dock and a notification say which session needs you, so switching to
+   whichever agent finished first is one key.
+
+## The loop
+
+| Stage | Who | What the window shows | Today |
+| --- | --- | --- | --- |
+| Spec | the person, in their harness | the task's title and its acceptance criteria, as a checklist | title only, read from Claude Code's and T3 Code's files |
+| Code | the agent | "working", the files it changed, how long | a working/idle/waiting dot, Claude Code and T3 Code only |
+| Build | the agent's `build`, or CI | the recipe, a timer, the log's last line; for CI the run and its link | built: local, ci, remote recipes, `link_apk`, the job queue |
+| Run | Greenroom | the build on a device, reloaded in place with its data kept | built |
+| Verify | the agent | each tool call as it happens, a pointer on the device, each criterion ticked by the `check` that proved it | calls and video are recorded; nothing ties a `check` to a criterion |
+| Review | the person | a verdict (checks passed, screens changed), Approve or Request changes, comments pinned to the screen | missing: the person can only pause |
+
+The row marked missing is the largest change: today the loop ends when the agent stops calling tools, and
+Greenroom never learns whether the agent thinks it is done or what the person thought of it.
+
+## Connecting agents
+
+The question was whether MCP is the best way to connect harnesses. Researched on 2026-11-27 against each
+harness's own documentation; what could not be confirmed is listed under "To check before building".
+
+**Answer: MCP stays the tool channel, and it is not enough by itself.** Three facts decide it:
+
+- **The part of MCP every harness implements is small**: tools, pictures in results, and (mostly) server
+  instructions, over stdio or HTTP. Elicitation, resources, tasks and MCP Apps each work in two or three clients.
+- **MCP 2026-07-28 took out what an app with a person watching would want**: sessions and requests from server to
+  client are gone, and push moved to an Events extension no coding harness ships yet. A server cannot tell a
+  running agent "the person left a comment".
+- **Which session is working, finished or waiting is not in any tool protocol.** Harness hooks answer it.
+
+So Greenroom has one core API and four ways in. Xcode, Chrome DevTools, Playwright, Figma and XcodeBuildMCP
+arrived at the same shape.
+
+| Way in | What it is for | Reaches | Today |
+| --- | --- | --- | --- |
+| **MCP server** (stdio shim to the running app) | the tools; a process per agent, which is how a call is tied to a worktree | every harness | built (`Greenroom --mcp`) |
+| **`greenroom` CLI and one skill** | the same tools from a shell: for harnesses with weak MCP, for scripts and CI, and for hooks to call. The skill teaches the loop | any harness with a shell; skills in Claude Code, Codex, Cursor, Copilot, opencode, Antigravity | `gr` exists for sign-in scripts only; the skill ships in the Claude Code plugin only |
+| **Hooks** | session start and end, turn finished, waiting for permission, file edited: what the sidebar's status needs, without the agent calling anything. A turn-end hook can also hand the agent the person's queued comments | Claude Code, Codex, Cursor, Antigravity | missing. Status comes from reading Claude Code's and T3 Code's private files, which neither promises to keep |
+| **Per-harness package** | installs the three above in one step | Claude Code plugin; Agent Plugins 1.0 for Codex, Copilot, VS Code | Claude Code plugin with the MCP server and skill |
+
+Getting word back to a running agent, most portable first:
+
+1. **A tool that waits.** `review` (below) blocks until the person decides, as `build` waits today.
+2. **The turn-end hook** returns the person's comments as the reason to continue. Works in the four harnesses with
+   hooks.
+3. **MCP Tasks**, where the client has them (Claude Code today): the call returns at once and the result wakes an
+   idle agent. Right for "CI finished".
+4. **Claude Code channels and plugin monitors**: real push, but a research preview behind an allowlist. Behind a
+   flag at most.
+
+Not building: A2A (nothing local uses it), MCP sampling, roots and resource subscriptions (deprecated in
+2026-07-28), Claude Code's IDE lockfile protocol (undocumented), `.mcpb` bundles (Claude Desktop only). ACP and Codex's
+app-server are for an app that starts agents itself, which Greenroom does not (decision 1). Later, if wanted: an
+MCP Apps panel that puts the simulator inside Cursor's or VS Code's chat.
+
+### Installing, per harness
+
+The Connect screen finds what is installed and connects each with that harness's own command where it has one,
+shown before it runs, as Connect Claude Code does today. It writes a config file only where there is no command.
+
+| Harness | Tools | Status (hooks) | Skill |
+| --- | --- | --- | --- |
+| Claude Code | the plugin (`claude plugin install`), or `claude mcp add` | the plugin's `hooks/hooks.json` | in the plugin |
+| Codex (CLI, IDE, desktop) | `codex mcp add greenroom -- <shim>` | `~/.codex/hooks.json` (the person trusts it once with `/hooks`) | `~/.agents/skills/greenroom` |
+| Cursor | the `cursor://…/mcp/install` link, else `~/.cursor/mcp.json` | `~/.cursor/hooks.json` | `~/.cursor/skills/greenroom` |
+| Antigravity, Gemini CLI | `~/.gemini/config/mcp_config.json`; `gemini mcp add` | `~/.gemini/config/hooks.json` | its skills folder |
+| VS Code Copilot, Copilot CLI | the `vscode:mcp/install` link; `~/.copilot/mcp-config.json` | Copilot CLI hooks | `~/.agents/skills/greenroom` |
+| opencode | `opencode mcp add` | none | `~/.config/opencode/skills` |
+| Zed, Goose, Amp, Devin Local | the settings file, or Goose's `goose://extension` link | none | `~/.agents/skills` where read |
+| T3 Code, Conductor and other hosts | nothing of their own: they run Claude Code and Codex, which are connected above | the hosted harness's hooks | |
+| Anything else | the stdio command, shown to copy | none: the session shows as "connected", with no working or finished state | the CLI |
+
+A harness without hooks still works. Its sessions show what Greenroom can see for itself (calls arriving, a
+build, a `review` asked for) and nothing about the time between.
+
+### What a hook sends
+
+`greenroom hook <event>` posts the harness's name, its session id, the working folder and the event to the
+running app over the same loopback channel as the shim, and exits in a few milliseconds whether or not the app is
+open. It never reads the transcript and never sends a prompt or a file's content. PRIVACY.md changes with it.
+Once hooks are in, reading Claude Code's and T3 Code's files becomes the fallback for sessions started before
+connecting, then goes.
+
+### To check before building
+
+- Whether a Claude Code plugin's hooks and `bin/` load for a plugin installed by `claude plugin install` from our
+  marketplace as documented (the CLI flags in `ClaudeConnect.swift` were never run for real either).
+- Codex's hook trust step: what the person sees, and whether a hook can be offered without it.
+- Antigravity's file names and skills folder: sources disagree.
+- Whether Cursor and VS Code show pictures from a tool result. Only Claude Code documents it.
+- MCP Tasks in a second client. If only Claude Code has them, `review` and the CI wait stay blocking calls.
+
+## Onboarding
+
+The first screen today says "Drop an APK or Git Repository". It goes. First run is three steps, and each can be
+left at any time.
+
+1. **Connect your agents.** A list of the harnesses found on this Mac, each with what connecting does ("adds
+   Greenroom's tools, a skill, and session status") and the exact command or file behind a disclosure. One button
+   connects all that are ticked; each row then reads Connected, or says what the harness answered. Harnesses not
+   installed are listed dimmed; "Another agent…" shows the stdio command.
+2. **Give it something to do.** A prompt to paste into the agent, in two forms: for the person's own project
+   ("Build this app and open it in Greenroom, then verify …") and for the bundled sample app, which needs no
+   project and no build. The window listens: the moment an agent calls, it says which harness, from which folder,
+   and opens the session. This is the proof the connection works, and it is the product's first impression: the
+   agent's pointer moving on a device within a minute of installing.
+3. **You are set.** What the sidebar's states mean, the key that jumps to the next session that needs you, and
+   whether to notify.
+
+Below all three, small: "Run an APK yourself…" (⌘O).
+
+**The APK screen.** Running an APK by hand has a screen of its own, reached from the Mac menu bar: File > Run an
+APK… (⌘O). It takes the stage and holds what the first screen held: the drop outline, "Choose an APK…", the recent
+APKs and the sample app, with a way back. An APK still opens from Finder and from `greenroom open` too. "Connect
+Git Repo…", "Open a project folder…" and "Clone from GitHub…" leave the stage for the File menu and the sidebar's +
+menu, for someone preparing a project before any agent runs.
+
+**A repository adds itself.** Today an agent in a folder Greenroom has not been shown gets "this folder is not a
+worktree of a repository added to Greenroom". Agent-first, the first call from a git worktree adds its repository
+and makes the session, and the window says so ("Added homesafe: an agent called from feat/trip-rename", with
+Undo). Three limits: only a repository with an Android app in it is added (an agent that launches an APK by its
+path from some other repository adds nothing); a repository the person removed is not added again by an agent,
+only by hand; and nothing is added while agents are paused. The same trust applies as now: the caller is a local
+program holding the token, and adding a repository runs `git` in it and nothing else until a build is asked for.
+The question about a device skin and launch options that follows adding by hand is not asked. And where a
+repository added by hand fetches its base branch and builds it at once, one an agent added does not: "Keep main
+built" starts off for it, so an agent's first call never starts a Gradle build nobody asked for. Until the person
+turns it on, `changes` against the base branch has a build to compare with only when CI made one, and otherwise
+says what would build it.
+
+With no session and agents connected, the stage reads "Waiting for an agent" with the prompt to paste and the
+connected harnesses, in place of a drop target.
+
+## The window
+
+```
+┌───────────────┬────────────────────────────────────────────┬──────────────────┐
+│ 1 ready · 1 needs you · 2 working            jobs · agents · ⌘K               │
+├───────────────┼────────────────────────────────────────────┼──────────────────┤
+│ READY         │  Spec ─ Code ─ Build ─ Run ─ Verify ─ Review │ Rename a trip   │
+│  Rename a trip│                                            │ 5 of 5 passed    │
+│  Rounding  ✗  │                                            │ [Approve] [Ask…] │
+│ NEEDS YOU     │              the device                    │ Spec             │
+│  Empty inbox  │         (agent's ring and pointer)         │  ✓ criterion …   │
+│ WORKING       │                                            │ Activity         │
+│  Dark mode    │                                            │  12:04 tap …     │
+│  Offline      │   driving: Claude Code · Take over         │ ───────────────  │
+│ QUIET         │                                            │ Tell the agent…  │
+└───────────────┴────────────────────────────────────────────┴──────────────────┘
+```
+
+**Sessions, by what they need.** The sidebar groups sessions by state, not by repository (a switch gives the
+grouping by repository back):
+
+| Group | A session is here when | Card shows |
+| --- | --- | --- |
+| Ready for review | the agent called `review`, or its turn ended after a build and checks | checks passed and failed, screens changed, how long ago; oldest first, so the first to finish is on top |
+| Needs you | the harness waits on a permission, the app needs a sign-in, a remote build needs a yes, the agent is paused | the question, and the button that answers it when Greenroom can |
+| Working | a turn is running, a build or CI run is going, calls are arriving | the stage of the loop it is in, and for how long |
+| Quiet | nothing for a while; the base branch | the build's age |
+
+Each card carries the harness's mark, the task's title, repository and branch, and six small steps for the loop.
+⌘1-9 still pick a row; a new key (proposed ⌘') goes to the next session in Ready or Needs you. The top bar
+carries the counts and the Dock icon a badge. A notification is sent when a session enters Ready or Needs you
+while Greenroom is not in front, if the person said yes in step 3.
+
+**The loop strip** sits over the stage for the selected session: Spec, Code, Build, Run, Verify, Review, each
+done, going, failed or not yet, with one line of detail (`local · 42 s`, `CI run 4812 · 3 min`, `4 of 5`). A
+click opens that stage's detail: the build log, the CI run, the checks.
+
+**The stage** is as now: the device is the hero and every click reaches it. While an agent drives, the device
+has its ring and pointer and a line under it reads "Claude Code is driving · Take over". Take over pauses that
+agent's actions for this session only (today's pause is all agents at once) until Hand back.
+
+**The session panel** (right) replaces the Agent popover and is about one session:
+
+- **Verdict**, when there is one: "5 of 5 checks passed · 2 screens changed", Approve and Request changes.
+  Approve answers the agent. Once approved, a session with a pull request offers **Merge**: the pull request's
+  number, its checks and whether it can merge, and one button that runs `gh pr merge` as the person, with the
+  method the repository allows (squash where it is allowed). A session with no pull request says so and offers
+  to ask the agent for one. Merging is the person's alone: no tool lets an agent do it, and it is asked once
+  more when checks are failing.
+- **Spec**: the task as the agent declared it, each criterion with its state and the evidence behind it: the
+  `check` that passed, at its second in the recording. A click plays that moment.
+- **Activity**: the calls, as the Agent feed has them, with the person's comments in line.
+- **Tell the agent**: a comment, optionally pinned to a node picked on the device (the Inspector's picker). It is
+  queued and delivered by the first of: the `review` call that is waiting, the turn-end hook, the next tool call's
+  answer. The panel says which ("delivered when its turn ends").
+
+Changes, Screen Map, Jobs, Log, Network and the Device drawer are where they are.
+
+## What agents get
+
+Four additions; everything else is the existing tool list.
+
+| Tool | |
+| --- | --- |
+| `spec` | declares what the session is for: `title`, `text`, `criteria` (a list of short sentences), and optionally a link to an issue or pull request. Calling it again replaces it. Shown in the session panel |
+| `check` | takes `criterion` (its number or text): a `PASS` ticks it and a `FAIL` marks it failed, with the moment in the recording |
+| `review` | says the agent is done: `summary`. Moves the session to Ready and waits, as `build` does (200 s, then "still waiting"; calling again joins). Answers `approved`, or `changes requested:` with the person's comments and, for a pinned one, the node and a picture of it |
+| `feedback` | the person's comments not yet delivered, for an agent that did not call `review` |
+
+Every tool answer also ends with a line when comments are waiting ("1 comment from the person: call feedback"),
+so an agent in a harness with no hooks still hears.
+
+The skill's loop becomes: `spec`, `build`, `changes`, `launch`, drive and `check` each criterion, `review`. An
+agent that calls none of the new tools still works as today; its session shows its calls and checks without
+criteria, and goes to Ready when its turn ends, if a hook says so.
+
+**CI.** An agent that pushes and calls `build` with the `ci` recipe waits for the run, as now. New: a session
+whose commit is pushed and has a run is watched without being asked; the strip shows the run; when the artifact
+lands the session's simulator reloads, and a waiting `build` call (or a Task, or the next turn-end hook) tells
+the agent. An agent still never starts a workflow.
+
+## Feature gaps
+
+What the loop needs that Greenroom does not have, largest effect first.
+
+| # | Gap | Why it matters | Size |
+| --- | --- | --- | --- |
+| 1 | Onboarding and empty stage are built around dropping a file; Connect is Claude Code only and lives in Settings | the first screen teaches the old product | M |
+| 2 | A call from a repository not added is refused | the agent cannot bring the work; the person has to prepare each repository by hand | S |
+| 3 | No way to connect any harness but Claude Code in a click | "any agent" is a doc page today | M: one connector per harness, each with a stand-in check |
+| 4 | No hooks: status is scraped from two harnesses' private files; `onTurnEnd` is declared and never fires | status for every other harness is blank; the scrape can break on any release | M |
+| 5 | No `review`, no verdict, nothing from person to agent but pause | the loop has no end and no way to steer | M |
+| 6 | No `spec`; checks are not tied to criteria | "verified" cannot be shown against what was asked | S |
+| 7 | Sidebar is grouped by repository with no order by attention; no notification, no Dock badge, no "next ready" key | with many sessions, finding the one that finished is a search | M |
+| 8 | The Agent popover is one feed for all; there is no per-session panel or loop strip | the person cannot see where a session is | M |
+| 9 | Pause is global; no Take over for one session | taking the device from one agent stops them all | S |
+| 10 | CI builds arrive only when asked for | "compiles via CI" needs someone to press Build | S |
+| 11 | No `greenroom` CLI on the PATH, no skill outside the Claude Code plugin, no `greenroom://` link | hooks have nothing to call; harnesses with weak MCP have no way in | M |
+| 12 | Calls run one at a time across all agents | five agents verifying at once queue behind each other's `launch` and `wait_for` | M: a queue per simulator |
+| 13 | Words: Settings > Claude Code, `ClaudeSession`, "Open in Claude", "Show my Claude Code sessions" | rule 2 | S, but wide |
+| 14 | README, AGENTS-INTERFACE.md, the plugin's skill and the Homebrew cask's description say "drop an APK" | the outside matches the old product | S |
+| 15 | A pull request can be opened, fetched and compared, not merged | the review ends in another app | S: `gh pr merge` through the code that already runs `gh` |
+
+Not gaps, already there and reused as they are: a session per worktree with its own simulator and data, builds
+from local, CI, remote and a linked APK, the walk and Changes against a base, the recording with a chapter per
+call, sign-in scripts the agent can run without seeing a password, the job queue, pull request rows.
+
+## Order of work
+
+Each step ends in a build that can be installed, and each has its own `--…-check`.
+
+| | Step | Closes |
+| --- | --- | --- |
+| A1 | A repository adds itself on an agent's first call; the empty stage becomes "Waiting for an agent"; the APK screen behind File > Run an APK… | 2, part of 1 |
+| A2 | The Connect screen: detection, a connector per harness (Claude Code, Codex, Cursor first), first-run steps 1 to 3, the sample-app prompt | 1, 3 |
+| A3 | `greenroom` CLI (`mcp`, `hook`, `open`, and the driving tools), the skill in each harness's folder, `greenroom://` | 11 |
+| A4 | Hooks in for Claude Code, Codex and Cursor; one status model for every harness; `onTurnEnd` wired; renames | 4, 13 |
+| A5 | Sidebar by attention, top-bar counts, notification, Dock badge, next-ready key | 7 |
+| A6 | `spec`, `check` with a criterion, `review`, `feedback`; the session panel and the loop strip; comments pinned to a node; Merge | 5, 6, 8, 15 |
+| A7 | Take over per session; a call queue per simulator | 9, 12 |
+| A8 | CI runs watched for pushed sessions | 10 |
+| A9 | README, docs, plugin, cask, PRIVACY.md | 14 |
+
+A1 and A2 are the redesign of onboarding and can ship alone. A6 is the reason to keep the window open.
+
+## Decisions (the owner's, 2026-11-27)
+
+1. **Greenroom does not start agents.** It receives sessions from wherever the person runs them. No ACP, no
+   app-server; "New session…" only copies a prompt.
+2. **A repository is added without asking** on an agent's first call, said in the window, with Undo.
+3. **Running an APK by hand has a screen of its own, reached from the Mac menu bar** (File > Run an APK…). No
+   other screen offers a drop target.
+4. **The sidebar is grouped by attention**, with the repository on each card and the old grouping one click away.
+5. **A session becomes Ready without `review`** when its turn ended, its build is current and at least one
+   `check` ran. Otherwise it goes Quiet.
+6. **Approve answers the agent; Merge is beside it.** A session's pull request can be merged from Greenroom, by
+   the person only.

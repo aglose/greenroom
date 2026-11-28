@@ -122,8 +122,14 @@ the lines say exactly what moved, appeared or went.
 
 ## Worktrees and sessions
 
-When the person has added a git repository to Greenroom (Sessions), each of its worktrees is a session, with its
-own simulator and its own app data. The shim (`Greenroom --mcp`) tells the app where it was started, with every
+Each worktree of a git repository in Greenroom's Sessions is a session, with its own simulator and its own app
+data. A repository gets there by itself: the first tool call from a worktree with an Android app in it (a Gradle
+application module, or a built APK in its outputs) adds its repository, and the window says so, with Undo. Three
+things are not added: a repository with no Android app (an agent that launches an APK by its path from some other
+repository adds nothing), one the person removed from Sessions (only they can add it back, with File > Add
+Repository…), and any repository while agents are paused. A repository an agent added does not fetch or build its
+base branch by itself (`keep_main` starts off; `workspace` shows it), and the person is not asked for a skin or
+launch options. The person can also add one by hand. The shim (`Greenroom --mcp`) tells the app where it was started, with every
 request it forwards:
 
 | Header | Value |
@@ -140,7 +146,8 @@ Older shims send neither header and everything works as before.
 - `launch` **without `apk`** starts the connection's session's simulator from its newest build, with the session's
   data and as a click on its row does; if that simulator is already running it is selected (device and other
   options are not applied to a running one). Without a session it answers `this folder is not a worktree of a
-  repository added to Greenroom: pass apk`; with a session that has no build, `no build yet for <branch>`.
+  repository added to Greenroom: pass apk`, with the reason the folder's repository was not added in brackets when
+  there is one (`(no Android app was found in tools, so it was not added)`); with a session that has no build, `no build yet for <branch>`.
 - `launch` **with `apk`** that is the session's own build (its newest output or stored build) runs on the session's
   data and replaces the session's running simulator, if any: one simulator per data slot, and the old one exits
   first so its data is kept. Any other APK starts a simulator of its own, on its device's data (as a person's plain
@@ -183,7 +190,7 @@ From a worktree of a repository added to Greenroom, with the agent started in th
   `base` says `session:BRANCH`, `pr:NUMBER`, a branch, tag or commit, or the full path of an `.apk` (anything else with a path is refused). It is also an action,
   refused while paused. `session` only reads, and works while paused.
 - All three work only for a connection tied to a session; from any other folder they answer `this folder is not a
-  worktree of a repository added to Greenroom`.
+  worktree of a repository added to Greenroom`, and why it was not added.
 
 ## The agent's session is recorded
 

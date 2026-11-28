@@ -126,7 +126,13 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private let recordingsPane = RecordingsPane(frame: .zero)
     private var recordingsLeading: NSLayoutConstraint!
     private static let recordingsWidth: CGFloat = 470
+    /// The APK screen (File > Run an APK…): on the stage only while `showingAPK`.
     private let emptyStage = EmptyStage(frame: .zero)
+    /// What the stage shows with nothing running: waiting for an agent.
+    private let waitingStage = WaitingStage(frame: .zero)
+    private var showingAPK = false
+    private var simulatorsSeen = 0
+    private var stageWanted: [ObjectIdentifier: Bool] = [:]
     let toast = Toast(frame: .zero)
     let palette = Palette(frame: .zero)
     private let scrim = Scrim()
@@ -198,13 +204,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         let content = NSViewController()
         let stack = StageBackground()
-        for v in [grid, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        for v in [grid, waitingStage, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        emptyStage.isHidden = true
         emptyStage.onOpen = { [weak self] in self?.open($0) }
-        emptyStage.onAddRepo = { [weak self] in self?.addRepository(nil) }
+        emptyStage.onBack = { [weak self] in self?.leaveAPKScreen() }
+        waitingStage.onRunAPK = { [weak self] in self?.runAPK(nil) }
+        waitingStage.onAddRepo = { [weak self] in self?.addRepository(nil) }
+        waitingStage.onConnect = { SettingsWindow.shared.show(tab: .agents) }
         DevHooks.shared.install(workbench: self, in: stack, over: grid)   // developer hooks (DevHooks.swift)
         emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
-        emptyStage.onFolder = { [weak self] in self?.sessions.chooseProjectToRun() }
-        emptyStage.onClone = { [weak self] in self?.sessions.askToClone() }
         bottomDock.isHidden = true
         bottomDockHeight = bottomDock.heightAnchor.constraint(equalToConstant: 0)
         gridTrailing = grid.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -68)
@@ -224,6 +232,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             emptyStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
             emptyStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
             emptyStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            waitingStage.topAnchor.constraint(equalTo: grid.topAnchor),
+            waitingStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
+            waitingStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
+            waitingStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
             overrideBar.trailingAnchor.constraint(equalTo: grid.trailingAnchor, constant: -14),
             overrideBar.topAnchor.constraint(equalTo: grid.topAnchor, constant: 12),
             agentHud.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
@@ -441,12 +453,11 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if let s = selected, !sims.contains(where: { $0 === s }) { selected = sims.last; window.subtitle = selected?.name ?? "" }
         refreshGrid()
         memoryMeter.watch(sims)
-        let nothing = sims.isEmpty
-        if emptyStage.isHidden == nothing {   // shown when nothing runs, gone (after a fade) when something does
-            if nothing { emptyStage.reload(); emptyStage.alphaValue = 0; emptyStage.isHidden = false }
-            Design.animate(Design.arrive, { self.emptyStage.animator().alphaValue = nothing ? 1 : 0 },
-                           done: { if !Engine.shared.simulators.isEmpty { self.emptyStage.isHidden = true } })
-        }
+        // An app that opens takes the stage back from the APK screen. With nothing running the stage waits for an agent.
+        if sims.count > simulatorsSeen { showingAPK = false }
+        simulatorsSeen = sims.count
+        setStage(emptyStage, shown: showingAPK) { self.emptyStage.reload() }
+        setStage(waitingStage, shown: sims.isEmpty && !showingAPK) { self.reloadWaitingStage() }
         if showingLog { logPanel.follow(selected) }
         if showingNetwork { networkPane.follow(selected) }
         if showingDevice { devicePane.follow(selected) }
@@ -1501,7 +1512,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             add("set." + id, title, "Device", symbol, keywords: keywords) { [weak self] in self?.run(command, title) }
         }
         // Apps.
-        add("open", "Open APK…", "App", "folder", "⌘O") { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
+        add("open", "Run an APK…", "App", "folder", "⌘O", keywords: "open apk file drop") { [weak self] in self?.runAPK(nil) }
         add("compare.apk", "Compare with another build…", "App", "square.on.square.dashed", "⇧⌘O") { [weak self] in self?.compareWithAPK(nil) }
         add("matrix", "Matrix wall: every device, appearance, language and text size", "App", "square.grid.3x3", "⌥⌘X", keywords: "grid locale dark font rtl") { [weak self] in self?.showMatrix(nil) }
         if !matrixSims.isEmpty { add("matrix.close", "Close the matrix wall", "App", "xmark.square") { [weak self] in self?.closeMatrix(nil) } }
@@ -2672,7 +2683,49 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         show(showingAgent ? nil : .agent, closing: .agent)
     }
 
+    // MARK: The stage with no device on it
+
+    /// Shows or hides one of the stage's screens with a fade. A screen asked for again while it fades out stays.
+    private func setStage(_ view: NSView, shown: Bool, prepare: () -> Void) {
+        let id = ObjectIdentifier(view)
+        stageWanted[id] = shown
+        guard view.isHidden == shown else { return }
+        if shown { prepare(); view.alphaValue = 0; view.isHidden = false }
+        Design.animate(Design.arrive, { view.animator().alphaValue = shown ? 1 : 0 },
+                       done: { [weak self, weak view] in if self?.stageWanted[id] == false { view?.isHidden = true } })
+    }
+
+    private func reloadWaitingStage() {
+        waitingStage.reload(client: agentActivity.client, listening: (NSApp.delegate as? AppDelegate)?.agentListening ?? false)
+    }
+
+    /// File > Run an APK… (⌘O): the APK screen takes the stage, over running devices too.
+    @objc func runAPK(_ sender: Any?) {
+        guard !showingAPK else { return }
+        showingAPK = true
+        reload()
+        window.makeFirstResponder(emptyStage)
+    }
+
+    private func leaveAPKScreen() {
+        guard showingAPK else { return }
+        showingAPK = false
+        reload()
+        if let sel = selected, let v = grid.view(for: sel) { window.makeFirstResponder(v) }
+    }
+
+    /// Whether the APK screen has the stage (for a check).
+    var apkScreenShown: Bool { showingAPK && !emptyStage.isHidden }
+    /// Whether the stage waits for an agent, and what it says (for a check).
+    var waitingShown: Bool { stageWanted[ObjectIdentifier(waitingStage)] ?? !waitingStage.isHidden }
+    var waitingTexts: [String] { waitingStage.texts }
+
+    /// File > Open Project Folder… and Clone from GitHub…: an app from source, by hand.
+    @objc func openProjectFolder(_ sender: Any?) { sessions.chooseProjectToRun() }
+    @objc func cloneFromGitHub(_ sender: Any?) { sessions.askToClone() }
+
     func agentChanged() {
+        reloadWaitingStage()
         agentPanel?.refresh()
         updateAgentHud()
         updateChrome()

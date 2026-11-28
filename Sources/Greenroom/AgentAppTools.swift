@@ -369,7 +369,12 @@ extension AgentTools {
             let folder = URL(fileURLWithPath: (p as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
             var dir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &dir), dir.boolValue else { throw Failure(message: "\(p) is not a folder") }
-            let task = mainSync { wb.sessions.addRepository(folder, quietIfExisting: true) }
+            // What the person took out of Sessions is theirs to put back.
+            if let known = blocking({ await Git.mainCheckout(of: folder) })?.resolvingSymlinksInPath(), AgentAdoption.isRemoved(known),
+               mainSync({ wb.sessions.workspace(at: known) }) == nil {
+                throw Failure(message: "\(known.lastPathComponent) was removed from Greenroom by the person at the Mac: only they can add it back, with File > Add Repository…")
+            }
+            let task = mainSync { wb.sessions.addRepository(folder, quietIfExisting: true, byAgent: true) }
             guard let root = blocking({ await task.value }) else { throw Failure(message: "\(p) is not a git repository Greenroom can add") }
             return "added \(root.lastPathComponent) (\(Self.tilde(root.path))): its worktrees are sessions; sessions lists them"
         }

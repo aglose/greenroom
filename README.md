@@ -1,7 +1,11 @@
 # Greenroom
 
-A Mac app for building and testing Android apps: drop an APK on it and the app is running in under a second, as an
-ordinary Mac process. No emulator, no virtual machine.
+A Mac app where coding agents run and verify the Android apps they are working on, while you watch. An agent builds
+your app and opens it in Greenroom; it is running in under a second, as an ordinary Mac process, on a device you can
+see, click and judge. No emulator, no virtual machine.
+
+Greenroom is being rebuilt around agents ([docs/AGENT-FIRST-SPEC.md](docs/AGENT-FIRST-SPEC.md) is the spec and says
+what is done). Running an APK by hand is still there: File > Run an APK… (⌘O).
 
 Greenroom is the app around [apksim](https://github.com/aglose/apksim), the open-source engine that runs unmodified
 APKs on Apple Silicon. apksim stays a command-line tool with every switch it has; Greenroom bundles a released
@@ -9,9 +13,16 @@ version of it and adds the workbench.
 
 **Status: early.** Today:
 
-- Open APKs (drop, ⌘O, double-click in Finder, recent list); each runs as a simulator inside the Greenroom window.
-- No APK yet? The first screen builds one from source: "Open a project folder…" adds an Android app's repository
-  to Sessions and builds its working copy, and "Clone from GitHub…" clones a repository into `~/Developer` and does
+- **An agent brings the work.** With nothing running, the window waits for an agent and shows the words to give
+  yours. The first call an agent makes from a git worktree with an Android app in it adds that repository to
+  Sessions (the window says so, with Undo), so nothing is prepared by hand. A repository you removed is never added
+  again by an agent, nothing is added while agents are paused, and a repository an agent added does not fetch or
+  build its base branch until you turn "Keep main built" on.
+- Run an APK yourself from the APK screen: File > Run an APK… (⌘O) puts it on the stage, with a drop target, a file
+  picker, the recent APKs and the sample app; Escape gives the stage back. An APK double-clicked in Finder opens too.
+  Each runs as a simulator inside the Greenroom window.
+- An app from source, by hand: File > Open Project Folder… adds an Android app's repository
+  to Sessions and builds its working copy, and File > Clone from GitHub… clones a repository into `~/Developer` and does
   the same. The app opens when the build lands. For large repositories where local Gradle builds are expensive, each
   repository in Settings > Build Recipes (or its `+` menu) can skip local APK scanning (or stop an in-flight scan from
   the sidebar header), disable local Gradle builds, and run a local **PR APK script** of your own (receiving

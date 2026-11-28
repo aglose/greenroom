@@ -22,6 +22,8 @@ final class AgentServer {
     private(set) var port: UInt16 = 0
     /// Called on the main thread when an agent first talks to the server.
     var onClient: ((String) -> Void)?
+    /// Called on the main thread once the endpoint listens (the waiting stage says so).
+    var onReady: (() -> Void)?
 
     static var file: URL { Engine.shared.state.appendingPathComponent("agent.json") }
 
@@ -41,6 +43,7 @@ final class AgentServer {
             guard let self, case .ready = state, let port = listener.port?.rawValue else { return }
             self.port = port
             self.publish()
+            DispatchQueue.main.async { self.onReady?() }
         }
         listener.start(queue: queue)
         self.listener = listener
@@ -163,11 +166,49 @@ final class AgentServer {
             var top: URL?
             Task.detached { top = await Git.toplevel(of: cwd); done.signal() }
             done.wait()
-            if let top { c.session = DispatchQueue.main.sync { tools.workbench?.sessions.session(atWorktree: top) } }
+            if let top {
+                c.session = DispatchQueue.main.sync { tools.workbench?.sessions.session(atWorktree: top) }
+                if c.session == nil { (c.session, c.why) = adopt(top) }
+            }
         }
         let key = "\(hint.parent.map(String.init) ?? "-")|\(hint.cwd?.path ?? "-")"
         knownLock.lock(); known[key] = c; knownLock.unlock()
         return c
+    }
+
+    /// A repository adds itself (AgentAdoption): a call from a worktree no session has adds its repository, when the
+    /// worktree holds an Android app, the person did not remove that repository, and agents are not paused. A new
+    /// worktree of a repository already added is only shown. Answers the session, or why there is none. On the tool
+    /// queue, never the main thread.
+    private func adopt(_ top: URL) -> (Session?, String?) {
+        guard AgentAdoption.enabled, let sessions = DispatchQueue.main.sync(execute: { tools.workbench?.sessions }) else { return (nil, nil) }
+        let done = DispatchSemaphore(value: 0)
+        var found: URL?
+        Task.detached { found = await Git.mainCheckout(of: top)?.resolvingSymlinksInPath(); done.signal() }
+        done.wait()
+        guard let root = found else { return (nil, nil) }
+        let name = root.lastPathComponent
+        let known = DispatchQueue.main.sync { sessions.workspace(at: root) != nil }
+        if !known {
+            if AgentAdoption.isRemoved(root) {
+                return (nil, "\(name) was removed from Greenroom by the person at the Mac: only they can add it back, with File > Add Repository…")
+            }
+            if tools.paused || AgentCheckHooks.pausedByCheck { return (nil, "agents are paused, so \(name) was not added") }
+            // An agent that launches an APK by its path from some other repository adds nothing.
+            guard AndroidProject.isApp(top) else { return (nil, "no Android app was found in \(top.lastPathComponent), so it was not added") }
+        }
+        let task = DispatchQueue.main.sync { sessions.addRepository(top, quietIfExisting: true, byAgent: true) }
+        Task.detached { _ = await task.value; done.signal() }
+        done.wait()
+        // The row is there at once; its branch, commit and build are read from git a moment later. The call that
+        // added it is answered from what was read, not from the empty row (ten seconds at most, for a large one).
+        let end = Date().addingTimeInterval(10)
+        var session = DispatchQueue.main.sync { sessions.session(atWorktree: top) }
+        while session?.head.isEmpty ?? false, Date() < end {
+            Thread.sleep(forTimeInterval: 0.1)
+            session = DispatchQueue.main.sync { sessions.session(atWorktree: top) }
+        }
+        return (session, nil)
     }
 
     private static func same(_ a: String, _ b: String) -> Bool {

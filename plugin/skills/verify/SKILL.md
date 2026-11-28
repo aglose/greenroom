@@ -17,8 +17,9 @@ those.
 
 ## The loop
 
-Work from the worktree you are changing. Each worktree of a repository the person added to Greenroom is a
-session, with its own build, simulator and app data.
+Work from the worktree you are changing. Each worktree of a repository in Greenroom is a session, with its own
+build, simulator and app data. Your first call from a worktree with an Android app in it adds its repository; the
+person sees that and can undo it.
 
 1. **`session`**: the branch, whether its build is `current` or `stale`, the default recipe and the base. It only
    reads.
@@ -87,9 +88,10 @@ When something looks wrong, look before you guess:
 - **`ci`** fetches what CI already built for the commit and never starts a workflow. With no run, it says so.
 - **`changes` never builds the base.** For a base nothing has built it says what would build it; pass `base` as
   `session:BRANCH`, `pr:NUMBER`, a branch, tag or commit, or the full path of an `.apk`.
-- **Not a session.** `this folder is not a worktree of a repository added to Greenroom` means the person has not
-  added this repository (Sessions, in Greenroom's sidebar). `session`, `build` and `changes` need that; without it,
-  `launch` with the full path of an `apk` and the driving tools still work.
+- **Not a session.** `this folder is not a worktree of a repository added to Greenroom` comes with the reason in
+  brackets: no Android app was found in this repository, the person removed it from Greenroom (only they can add it
+  back: do not try `session_action add_repository`), or agents are paused. `session`, `build` and `changes` need a
+  session; without one, `launch` with the full path of an `apk` and the driving tools still work.
 - `build` and `changes` wait at most 200 s per call, then say they are still going: call again, which joins the same
   run.
 - Sign-ins are the person's: never ask for or type passwords. If the app needs one, call `scripts`: a sign-in script the person allowed can be run with `run_script` (it types their stored credentials, which you never see); otherwise ask the person to sign in.

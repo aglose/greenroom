@@ -200,13 +200,18 @@ final class SessionsController {
     /// Adds the repository `folder` is in (a worktree of it is as good as the main checkout) and ensures that
     /// worktree is visible in the sidebar. Gives the main checkout it resolved to, or nil with a toast when it is not
     /// a repository.
+    ///
+    /// `byAgent`: an agent's call added it (AgentAdoption), not the person. Nothing is asked (no sheet about a skin
+    /// and launch options), the toast says an agent did it and offers Undo, and the base branch is not fetched or
+    /// built by itself (`keepMain` starts off): an agent's first call must not start a Gradle build nobody asked for.
     @discardableResult
-    func addRepository(_ folder: URL, quietIfExisting: Bool = false) -> Task<URL?, Never> {
+    func addRepository(_ folder: URL, quietIfExisting: Bool = false, byAgent: Bool = false) -> Task<URL?, Never> {
         Task { @MainActor in
             guard let root = await Git.mainCheckout(of: folder)?.resolvingSymlinksInPath() else {
                 self.workbench?.toast.show(Git.available ? "\(folder.lastPathComponent) is not in a git repository" : Self.noGit, problem: true)
                 return nil
             }
+            if !byAgent { AgentAdoption.noteAdded(root) }   // added by hand: agents may bring it again
             let worktree = (await Git.toplevel(of: folder)) ?? root
             let worktreePath = worktree.resolvingSymlinksInPath().path
             let rootPath = root.standardizedFileURL.path
@@ -246,13 +251,20 @@ final class SessionsController {
             } else {
                 var ws = Workspace(root: root)
                 ws.shown = [worktreePath]
-                ws.launchAsked = false   // asked for a skin and launch options before its first simulator starts
+                ws.launchAsked = byAgent   // by hand: asked for a skin and launch options before its first simulator starts
+                if byAgent { ws.keepMain = false }
                 if let defaultApp { ws.module = defaultApp.id }
                 self.workspaces.append(ws)
                 self.store.saveWorkspaces(self.workspaces)
                 ClaudeSessions.shared.workspacesChanged()
                 T3Sessions.shared.reload()
-                if let defaultApp {
+                if byAgent {
+                    let place = worktreePath == rootPath ? "it" : worktree.lastPathComponent
+                    self.workbench?.toast.show("Added \(root.lastPathComponent): an agent is working in \(place)", action: "Undo") { [weak self] in
+                        self?.removeWorkspace(at: root)
+                        self?.workbench?.toast.show("Removed \(root.lastPathComponent). Agents will not add it again; File > Add Repository… does.")
+                    }
+                } else if let defaultApp {
                     self.workbench?.toast.show("Added \(root.lastPathComponent) (\(discoveredApps.count) Android apps — using \(defaultApp.displayName); switch in sidebar)")
                 } else {
                     self.workbench?.toast.show("Added \(root.lastPathComponent)")
@@ -348,6 +360,7 @@ final class SessionsController {
 
     func removeWorkspace(at root: URL) {
         let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        AgentAdoption.noteRemoved(root)   // what the person removed, an agent's call does not add again
         for s in sessions where s.workspace.resolvingSymlinksInPath().standardizedFileURL.path == rootPath { evidence.forget(worktree: s.worktree.path) }
         if let ws = workspaces.first(where: { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }) { mainBuilds.close(ws) }
         workspaces.removeAll { $0.root.resolvingSymlinksInPath().standardizedFileURL.path == rootPath }
@@ -568,7 +581,7 @@ final class SessionsController {
         workbench?.showPalette(items: items + [checkOut], placeholder: "Search \(rest.count) worktree\(rest.count == 1 ? "" : "s") of \(workspace.lastPathComponent)")
     }
 
-    private func workspace(at root: URL) -> Workspace? { workspaces.first { $0.root.path == root.path } }
+    func workspace(at root: URL) -> Workspace? { workspaces.first { $0.root.path == root.path } }
 
     /// The folders of a drag (files are not repositories).
     static func folders(in info: NSDraggingInfo) -> [URL] {

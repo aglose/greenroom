@@ -129,8 +129,8 @@ if [[ -n "$CHECK" ]]; then
   # The workbench's path: the screen streamed to the app as H.264 and decoded, input over the control channel.
   "$C/MacOS/Greenroom" --smoke-stream "$C/Resources/engine-testapp.apk" | tail -3
   # The agent interface, as an agent uses it.
-  CONNECT_DIR=; PLAIN_STATE=; SCRIPTS_DIR=
-  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE" "$SCRIPTS_DIR"' EXIT   # the temporary folders go on failure too
+  CONNECT_DIR=; PLAIN_STATE=; SCRIPTS_DIR=; WAITING_DIR=
+  trap 'rm -rf "$CONNECT_DIR" "$PLAIN_STATE" "$SCRIPTS_DIR" "$WAITING_DIR"' EXIT   # the temporary folders go on failure too
   # Per-device app data, variables (in memory) and scripts with gr, against real simulators, in a state folder of its own.
   SCRIPTS_DIR=$(mktemp -d /tmp/grscripts.XXXXXX)
   scripts_out=$("$C/MacOS/Greenroom" --background --scripts-check "$SCRIPTS_DIR" "$C/Resources/engine-testapp.apk" | grep '^\[greenroom\] scripts:' || true)
@@ -145,6 +145,9 @@ if [[ -n "$CHECK" ]]; then
   "$C/MacOS/Greenroom" --connect-check "$CONNECT_DIR" | tail -3
   # The stage's "Can't reach" notice: which addresses it names and why, from made-up network rows.
   "$C/MacOS/Greenroom" --unreachable-check | tail -1
+  # The stage with no device on it: it waits for an agent, and File > Run an APK… is the only drop target.
+  WAITING_DIR=$(mktemp -d /tmp/grwaiting.XXXXXX)
+  GREENROOM_STATE="$WAITING_DIR/state" "$C/MacOS/Greenroom" --background --agent-check --waiting-check "$WAITING_DIR" | tail -1
   # The agent tied to its worktree's session: two worktrees, a state folder of its own.
   "$ROOT/scripts/mcp-check.py" "$C/MacOS/Greenroom" "$C/Resources/engine-testapp.apk" --sessions
   # The Claude Code plugin: its manifests, and its launcher script serving MCP through this app.

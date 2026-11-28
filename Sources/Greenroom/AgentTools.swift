@@ -28,6 +28,8 @@ final class AgentTools {
         var cwd: URL?
         var parent: Int32?
         var session: Session?
+        /// With no session: why the folder's repository was not added by this call (AgentAdoption), for the answer.
+        var why: String?
     }
 
     /// The person at the Mac paused the agent: actions are refused until it is lifted.
@@ -115,7 +117,7 @@ final class AgentTools {
     static let core: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
             + "with its own app data. Answers with the screen's nodes.", schema([
-            "apk": ["type": "string", "description": "path of the .apk (omit in a worktree of a repository added to Greenroom)"],
+            "apk": ["type": "string", "description": "path of the .apk (omit in a worktree of an Android app's repository: the first call from one adds it to Greenroom)"],
             "device": ["type": "string", "enum": devices],
             "appearance": ["type": "string", "enum": ["light", "dark"]],
             "locale": str, "font_scale": ["type": "number"],
@@ -477,7 +479,7 @@ final class AgentTools {
             }
         } else {
             guard let session else {
-                throw Failure(message: "this folder is not a worktree of a repository added to Greenroom: pass apk")
+                throw Failure(message: "this folder is not a worktree of a repository added to Greenroom" + (connection.why.map { " (\($0))" } ?? "") + ": pass apk")
             }
             let label = session.branch ?? session.shortHead
             let found: (alive: Simulator?, apk: URL?) = DispatchQueue.main.sync {

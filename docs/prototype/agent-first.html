@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Greenroom agent-first prototype</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+/* Prototype navigation: outside the mock window, in the page's own colours. */
+.proto { max-width: 1320px; margin: 0 auto; }
+.nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.nav button { border: 1px solid var(--border, rgba(128,128,128,.35)); background: none; border-radius: 999px; padding: 5px 12px; color: var(--muted-foreground, GrayText); }
+.nav button[aria-selected=true] { color: var(--foreground, CanvasText); border-color: var(--foreground, CanvasText); font-weight: 600; }
+.cap { margin: 0 0 12px; color: var(--muted-foreground, GrayText); min-height: 2.8em; max-width: 86ch; }
+.cap b { color: var(--foreground, CanvasText); font-weight: 600; }
+
+/* The mock window: Greenroom's own colours (Design.swift). */
+.fit { position: relative; overflow: hidden; }
+.win {
+  --stage: #121316; --ink: #f2f3f5; --mute: #a4a8b0; --well: rgba(255,255,255,.07); --well-on: rgba(255,255,255,.17);
+  --stroke: rgba(255,255,255,.09); --accent: #3dd68c; --on-accent: #06281a; --agent: #8f83f0; --agent-deep: #5b4bd6;
+  --warn: #ffc04d; --bad: #ff6b61; --panel: #191b1f;
+  transform-origin: 0 0; height: 664px; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--stage); color: var(--ink); border-radius: 12px; border: 1px solid #2a2c31; font-size: 12.5px;
+}
+.win button { border: 0; background: none; text-align: left; padding: 0; }
+.win :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bar { height: 40px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--stroke); background: #17181c; }
+.lights { display: flex; gap: 7px; margin-right: 6px; }
+.lights i { width: 11px; height: 11px; border-radius: 50%; background: #3a3c42; }
+.bar .name { font-weight: 600; }
+.bar .grow { flex: 1; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 8px; background: var(--well); color: var(--mute); white-space: nowrap; }
+.win button.chip { padding: 0 9px; background: var(--well); }
+.win button.chip:hover { background: var(--well-on); color: var(--ink); }
+.chip b { color: var(--ink); font-weight: 600; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--mute); flex: none; }
+.dot.ok { background: var(--accent); } .dot.warn { background: var(--warn); } .dot.go { background: var(--agent); } .dot.bad { background: var(--bad); }
+kbd { font: 11px ui-monospace, "SF Mono", Menlo, monospace; color: var(--mute); border: 1px solid var(--stroke); border-radius: 4px; padding: 0 4px; }
+.body { flex: 1; min-height: 0; position: relative; }
+
+/* Onboarding and the waiting stage */
+.onb { height: 100%; overflow: auto; display: flex; justify-content: center; background-image: radial-gradient(rgba(255,255,255,.055) 1px, transparent 1px); background-size: 24px 24px; }
+.sheet { width: 600px; max-width: calc(100% - 32px); margin: auto; padding: 22px 0; }
+.trail { display: flex; gap: 6px; list-style: none; padding: 0; margin: 0 0 16px; color: var(--mute); font-size: 11.5px; }
+.trail li { display: flex; align-items: center; gap: 6px; }
+.trail li + li::before { content: ""; width: 18px; height: 1px; background: var(--stroke); }
+.trail li.on { color: var(--accent); font-weight: 600; }
+.trail li.done { color: var(--ink); }
+h1 { font-size: 22px; line-height: 1.2; margin: 0 0 6px; font-weight: 600; letter-spacing: -.01em; }
+.lede { color: var(--mute); margin: 0 0 16px; font-size: 13.5px; max-width: 56ch; }
+.list { border: 1px solid var(--stroke); border-radius: 12px; background: rgba(255,255,255,.03); overflow: hidden; }
+.h { display: grid; grid-template-columns: 30px 1fr auto; gap: 10px; align-items: center; padding: 9px 12px; }
+.h + .h, .h + .how, .how + .h { border-top: 1px solid var(--stroke); }
+.h.off { opacity: .45; }
+.hb { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-size: 10.5px; font-weight: 700; color: #fff; flex: none; }
+.hb.cc { background: #c96a43; } .hb.cx { background: #3b7fd4; } .hb.cu { background: #6a6f7a; } .hb.t3 { background: #8a5ad0; } .hb.ag { background: #2f9b8f; } .hb.co { background: #4e5563; }
+.hb.mini { width: 18px; height: 18px; border-radius: 5px; font-size: 8.5px; }
+.h .t { font-weight: 600; } .h .s { color: var(--mute); font-size: 12px; }
+.h .st { color: var(--mute); display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.h .st.ok { color: var(--accent); }
+.win button.link { color: var(--mute); text-decoration: underline; text-underline-offset: 2px; }
+.win button.link:hover { color: var(--ink); }
+.how { padding: 8px 12px 10px 52px; background: rgba(0,0,0,.22); font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; color: #c9ccd2; white-space: pre-wrap; }
+.acts { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+.win button.btn { height: 32px; padding: 0 14px; border-radius: 10px; background: var(--well); font-weight: 600; }
+.win button.btn:hover { background: var(--well-on); }
+.win button.btn.pri { background: var(--accent); color: var(--on-accent); }
+.win button.btn.pri:hover { filter: brightness(1.08); }
+.win button.btn.sm { height: 26px; padding: 0 10px; border-radius: 8px; font-size: 12px; }
+.win button.btn.bad { background: rgba(255,107,97,.16); color: #ffb1ab; }
+.aside { margin: 18px 0 0; padding-top: 12px; border-top: 1px solid var(--stroke); color: var(--mute); font-size: 12px; }
+.seg { display: inline-flex; background: var(--well); border-radius: 9px; padding: 2px; margin-bottom: 10px; }
+.win .seg button { padding: 4px 12px; border-radius: 7px; color: var(--mute); }
+.win .seg button[aria-pressed=true] { background: var(--well-on); color: var(--ink); font-weight: 600; }
+.prompt { position: relative; border: 1px solid var(--stroke); border-radius: 12px; background: rgba(0,0,0,.25); padding: 12px 84px 12px 14px; font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace; color: #dfe1e5; }
+.prompt .btn { position: absolute; top: 9px; right: 9px; }
+.listen { margin-top: 12px; border-radius: 12px; border: 1px dashed rgba(61,214,140,.35); padding: 12px 14px; display: grid; gap: 6px; }
+.listen .row { display: flex; align-items: center; gap: 9px; }
+.pulse { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex: none; animation: pulse 1.6s ease-out infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(61,214,140,.55); } 100% { box-shadow: 0 0 0 10px rgba(61,214,140,0); } }
+.listen .ln { color: var(--mute); padding-left: 18px; font-size: 12px; }
+.listen .ln b { color: var(--ink); font-weight: 600; }
+.demo { margin-top: 10px; font-size: 11.5px; color: var(--mute); }
+.win .demo button { color: var(--agent); text-decoration: underline; text-underline-offset: 2px; }
+
+/* The window: sessions, stage, session panel */
+.cols { height: 100%; display: grid; grid-template-columns: 236px minmax(0, 1fr) 304px; }
+.side { border-right: 1px solid var(--stroke); background: #15161a; overflow: auto; padding: 8px; }
+.grp { display: flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; letter-spacing: .06em; color: var(--mute); margin: 10px 6px 5px; }
+.grp:first-child { margin-top: 4px; }
+.grp .n { margin-left: auto; font-weight: 500; letter-spacing: 0; }
+.win button.card { display: grid; grid-template-columns: 18px 1fr; column-gap: 8px; row-gap: 2px; width: 100%; padding: 8px; border-radius: 10px; border: 1px solid transparent; margin-bottom: 3px; }
+.win button.card:hover { background: var(--well); }
+.win button.card.sel { background: var(--well); border-color: var(--stroke); }
+.card .ct { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .cs, .card .cv, .card .pips { grid-column: 2; }
+.card .cs { color: var(--mute); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .cv { font-size: 11.5px; color: var(--mute); }
+.cv.ok { color: var(--accent); } .cv.bad { color: var(--bad); } .cv.warn { color: var(--warn); } .cv.go { color: var(--agent); }
+.pips { display: flex; gap: 3px; margin: 3px 0 2px; }
+.pips i { height: 3px; flex: 1; border-radius: 2px; background: rgba(255,255,255,.12); }
+.pips i.done { background: var(--accent); } .pips i.go { background: var(--agent); animation: blink 1.2s ease-in-out infinite; }
+.pips i.fail { background: var(--bad); } .pips i.wait { background: var(--warn); }
+@keyframes blink { 50% { opacity: .35; } }
+.stagecol { display: flex; flex-direction: column; min-width: 0; background-image: radial-gradient(rgba(255,255,255,.055) 1px, transparent 1px); background-size: 24px 24px; }
+.strip { display: flex; padding: 9px 12px 0; gap: 4px; }
+.stp { flex: 1; min-width: 0; padding: 6px 8px 7px; border-radius: 9px; background: rgba(25,27,31,.92); border: 1px solid var(--stroke); }
+.stp .k { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 11.5px; }
+.stp .d { color: var(--mute); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.stp.none { opacity: .5; }
+.stp.go { border-color: rgba(143,131,240,.55); } .stp.fail { border-color: rgba(255,107,97,.5); } .stp.wait { border-color: rgba(255,192,77,.5); }
+.mark { width: 12px; height: 12px; border-radius: 50%; display: grid; place-items: center; font-size: 8.5px; font-weight: 800; flex: none; border: 1.5px solid rgba(255,255,255,.22); color: transparent; }
+.mark.done { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.mark.fail { background: var(--bad); border-color: var(--bad); color: #300; }
+.mark.go { border-color: var(--agent); border-top-color: transparent; animation: spin .9s linear infinite; }
+.mark.wait { background: var(--warn); border-color: var(--warn); color: #3a2800; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.stage { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; position: relative; }
+.phone { width: 236px; height: 468px; border-radius: 30px; background: #000; padding: 7px; position: relative; box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 1px #2c2e33; transition: box-shadow .2s; }
+.phone.agent { box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 2px var(--agent); }
+.phone.you { box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 2px var(--accent); }
+.scr { width: 100%; height: 100%; border-radius: 24px; overflow: hidden; position: relative; background: #f6f5f8; color: #1c1b1f; font-size: 11.5px; display: flex; flex-direction: column; }
+.scr.dk { background: #141218; color: #e6e0e9; }
+.sb { height: 22px; flex: none; display: flex; justify-content: space-between; padding: 5px 14px 0; font-size: 9.5px; font-weight: 600; opacity: .8; }
+.tb { padding: 8px 14px 10px; font-size: 17px; font-weight: 500; }
+.nodes { flex: 1; padding: 0 10px; display: flex; flex-direction: column; gap: 6px; }
+.nd { border-radius: 12px; background: rgba(103,80,164,.09); padding: 9px 11px; }
+.dk .nd { background: rgba(208,188,255,.1); }
+.nd small { display: block; opacity: .65; font-size: 10px; }
+.nd.row { display: flex; justify-content: space-between; align-items: center; }
+.nd.field { background: none; border: 1px solid rgba(0,0,0,.3); }
+.nd.cta { background: #6750a4; color: #fff; text-align: center; font-weight: 600; border-radius: 99px; }
+.nd.banner { background: #fde9c8; color: #5a3d00; }
+.sw { width: 26px; height: 15px; border-radius: 9px; background: #d0bcff; position: relative; flex: none; }
+.sw::after { content: ""; position: absolute; right: 2px; top: 2px; width: 11px; height: 11px; border-radius: 50%; background: #381e72; }
+.nav3 { height: 44px; flex: none; display: flex; justify-content: space-around; align-items: center; font-size: 9.5px; background: rgba(103,80,164,.08); }
+.nav3 b { font-weight: 600; color: #6750a4; } .dk .nav3 b { color: #d0bcff; }
+.pinning .nd { cursor: crosshair; outline: 1px dashed rgba(91,75,214,.6); }
+.pinning .nd:hover, .nd.pinned { outline: 2px solid var(--agent-deep); }
+.ptr { position: absolute; left: 0; top: 0; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; background: rgba(91,75,214,.9); border: 2px solid #fff; pointer-events: none; animation: roam 6s cubic-bezier(.2,.9,.25,1) infinite; z-index: 2; }
+.ptr::after { content: ""; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid var(--agent-deep); animation: ring 2s ease-out infinite; }
+@keyframes roam { 0%, 20% { transform: translate(120px, 150px); } 33%, 53% { transform: translate(196px, 204px); } 66%, 86% { transform: translate(70px, 262px); } 100% { transform: translate(120px, 150px); } }
+@keyframes ring { 0%, 55% { transform: scale(1); opacity: 0; } 60% { opacity: .9; } 100% { transform: scale(2.6); opacity: 0; } }
+.cap2 { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 10px; border-radius: 9px; background: rgba(25,27,31,.92); border: 1px solid var(--stroke); color: var(--mute); font-size: 12px; }
+.cap2 b { color: var(--ink); font-weight: 600; }
+.note { position: absolute; top: 10px; right: 10px; width: 250px; border-radius: 12px; background: rgba(40,42,48,.97); border: 1px solid var(--stroke); padding: 9px 11px; box-shadow: 0 10px 30px rgba(0,0,0,.5); display: grid; grid-template-columns: 18px 1fr; gap: 2px 8px; z-index: 3; }
+.note .t { font-weight: 600; } .note .s { grid-column: 2; color: var(--mute); font-size: 11.5px; }
+.win button.note { text-align: left; }
+.toast { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); padding: 7px 14px; border-radius: 12px; background: rgba(40,42,48,.97); border: 1px solid var(--stroke); white-space: nowrap; z-index: 3; }
+.panel { border-left: 1px solid var(--stroke); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.ph { padding: 11px 12px 9px; border-bottom: 1px solid var(--stroke); }
+.ph .t { font-weight: 600; font-size: 13.5px; line-height: 1.25; }
+.ph .s { color: var(--mute); font-size: 11.5px; display: flex; align-items: center; gap: 6px; margin-top: 5px; white-space: nowrap; }
+.verdict { margin: 10px 12px 0; padding: 9px 10px; border-radius: 10px; background: rgba(61,214,140,.1); border: 1px solid rgba(61,214,140,.3); }
+.verdict.bad { background: rgba(255,107,97,.09); border-color: rgba(255,107,97,.35); }
+.verdict.warn { background: rgba(255,192,77,.09); border-color: rgba(255,192,77,.35); }
+.verdict.go { background: rgba(143,131,240,.09); border-color: rgba(143,131,240,.35); }
+.verdict .t { font-weight: 600; } .verdict .s { color: var(--mute); font-size: 11.5px; margin-top: 2px; }
+.verdict .acts { margin-top: 8px; gap: 6px; }
+.scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 10px; }
+.sec { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; color: var(--mute); margin: 13px 0 6px; display: flex; justify-content: space-between; }
+.sec span { font-weight: 400; letter-spacing: 0; }
+.crit { display: grid; grid-template-columns: 14px 1fr auto; gap: 7px; align-items: start; padding: 4px 0; }
+.crit .mark { margin-top: 2px; }
+.crit .e { color: var(--mute); font: 10.5px ui-monospace, "SF Mono", Menlo, monospace; white-space: nowrap; padding-top: 2px; }
+.crit .why { grid-column: 2 / 4; color: var(--bad); font-size: 11.5px; }
+.act { display: grid; grid-template-columns: 38px 58px 1fr; gap: 6px; padding: 3px 0; font-size: 11.5px; align-items: baseline; }
+.act .tm { color: var(--mute); font: 10.5px ui-monospace, "SF Mono", Menlo, monospace; }
+.act .tl { color: var(--agent); font: 11px ui-monospace, "SF Mono", Menlo, monospace; }
+.act.you .tl { color: var(--accent); } .act.you .tx { color: var(--ink); }
+.act .tx { color: #c9ccd2; min-width: 0; }
+.act .q { display: block; color: var(--mute); font-size: 10.5px; }
+.comp { border-top: 1px solid var(--stroke); padding: 9px 12px 11px; }
+.comp textarea { width: 100%; height: 44px; resize: none; border-radius: 9px; border: 1px solid var(--stroke); background: rgba(0,0,0,.25); color: var(--ink); font: inherit; padding: 6px 8px; }
+.comp textarea::placeholder { color: #7d828b; }
+.comp .acts { margin-top: 6px; gap: 6px; }
+.pinchip { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 6px; padding: 2px 8px; border-radius: 7px; background: rgba(91,75,214,.28); font-size: 11.5px; }
+.empty { color: var(--mute); padding: 14px 8px; font-size: 12px; }
+.menubar { height: 24px; display: flex; align-items: center; gap: 2px; padding: 0 10px; background: #0d0e10; border-bottom: 1px solid var(--stroke); position: relative; font-size: 12px; z-index: 4; }
+.menubar > span { padding: 2px 8px; border-radius: 5px; } .menubar > span:first-child { font-weight: 700; } .menubar > span.on { background: var(--well-on); }
+.menu { position: absolute; top: 24px; left: 86px; width: 236px; padding: 5px; border-radius: 9px; background: rgba(40,42,48,.98); border: 1px solid var(--stroke); box-shadow: 0 14px 34px rgba(0,0,0,.55); }
+.mi { display: flex; justify-content: space-between; align-items: center; padding: 4px 9px; border-radius: 6px; } .mi.on { background: #2f6fdd; } .mi kbd { border: 0; color: inherit; opacity: .75; }
+.drop { margin-top: 12px; padding: 30px 24px; border-radius: 20px; border: 2px dashed rgba(61,214,140,.35); background: rgba(255,255,255,.03); text-align: center; }
+.recs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.win button.rec { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 10px; background: var(--well); border: 1px solid var(--stroke); }
+.rec small { display: block; color: var(--mute); font-size: 11px; }
+@media (prefers-reduced-motion: reduce) { .win *, .win *::after { animation: none !important; transition: none !important; } .ptr { transform: translate(120px, 150px); } }
+</style>
+</head>
+<body>
+<div class="proto">
+  <div class="nav" role="tablist" aria-label="Prototype screens" id="nav"></div>
+  <p class="cap" id="cap"></p>
+  <div class="fit" id="fit">
+    <div class="win" id="win">
+      <div class="bar" id="bar"></div>
+      <div class="body" id="body"></div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const SCREENS = [
+  { id: "connect", label: "1 · Connect agents", cap: "<b>First run, step 1.</b> No drop target. Greenroom lists the agent harnesses it found on this Mac and connects each with that harness's own command, shown before it runs. Try <b>Connect 3 agents</b>, and the disclosure on a row." },
+  { id: "task", label: "2 · First task", cap: "<b>First run, step 2.</b> The person pastes a prompt into their agent and Greenroom listens. The first call from a repository adds it and opens the session: nothing is added by hand. Click <b>an agent calls in</b> to play it." },
+  { id: "window", label: "3 · The window", cap: "<b>The window.</b> Sessions are grouped by what they need, with the first to finish on top. The strip over the device is the loop; the panel on the right is one session's spec, checks and activity. Try <b>Approve</b> then <b>Squash and merge</b>, <b>Pin to screen</b> then a comment, <b>Take over</b>, the needs-you session, and wait for Dark mode to finish." },
+  { id: "empty", label: "4 · Nothing running", cap: "<b>Agents connected, no session yet.</b> The stage waits for an agent and offers the prompt. Running an APK yourself is still there, small." },
+  { id: "apk", label: "5 · Run an APK", cap: "<b>The APK screen, from the Mac menu bar.</b> File > Run an APK… (⌘O) takes the stage with what the first screen used to hold: the drop outline, a file picker, recent APKs and the sample app. No other screen offers a drop target." },
+];
+const HARNESS = { cc: "Claude Code", cx: "Codex", cu: "Cursor", t3: "T3 Code", ag: "Antigravity", co: "Copilot CLI" };
+const STAGES = ["Spec", "Code", "Build", "Run", "Verify", "Review"];
+const GROUPS = [["ready", "READY FOR REVIEW"], ["needs", "NEEDS YOU"], ["working", "WORKING"], ["quiet", "QUIET"]];
+
+const S = {
+  screen: document.documentElement.dataset.start || "connect",
+  connected: {}, connecting: false, open: null, promptKind: "project", called: 0,
+  sel: "rename", pinning: false, pin: null, you: {}, note: null, toast: null,
+};
+
+const sessions = [
+  { id: "rename", group: "ready", h: "cc", pr: 214, title: "Rename a trip from the list", where: "homesafe · feat/trip-rename", ago: "2 min ago",
+    st: ["done", "done", "done", "done", "done", "go"], det: ["5 criteria", "4 files", "local · 42 s", "Pixel 9", "5 of 5", "waiting for you"],
+    verdict: { kind: "ok", t: "5 of 5 checks passed · 2 screens changed", s: "“Rename works from a long-press. Empty names are refused.”" },
+    crit: [["Long-press on a trip opens Rename", "done", "0:18"], ["The new name shows in the list", "done", "0:31"], ["The old name is gone", "done", "0:31"], ["An empty name cannot be saved", "done", "0:47"], ["The name survives a restart", "done", "1:12"]],
+    acts: [["12:01", "spec", "5 criteria"], ["12:01", "build", "local: built 3f9a1c in 42 s"], ["12:02", "changes", "+ Rename trip (new) · ~ Trips: 2 texts changed"], ["12:02", "launch", "the session's simulator, data kept"], ["12:02", "tap", "long-press “Italian vacation”"], ["12:02", "type", "typed 14 characters"], ["12:02", "check", "PASS · criteria 2 and 3"], ["12:03", "set", "restart"], ["12:03", "check", "PASS · criterion 5"], ["12:03", "review", "asked for your review"]],
+    scr: "trips" },
+  { id: "rounding", group: "ready", h: "cu", title: "Checkout total rounds wrong", where: "homesafe · fix/total-rounding", ago: "just now",
+    st: ["done", "done", "done", "done", "fail", "go"], det: ["4 criteria", "2 files", "local · 38 s", "Pixel 9", "3 of 4", "waiting for you"],
+    verdict: { kind: "bad", t: "3 of 4 checks passed · 1 failed", s: "“One check still fails: the total is a cent short with three items. I stopped here rather than guess at the rounding rule.”" },
+    crit: [["Subtotal is the sum of the items", "done", "0:12"], ["The tax line shows 7%", "done", "0:12"], ["Total equals subtotal plus tax, to the cent", "fail", "0:20", "FAIL: not on screen “€24.90” (it shows €24.89)"], ["Prices keep the € sign", "done", "0:24"]],
+    acts: [["12:04", "spec", "4 criteria"], ["12:04", "build", "local: built 77be02 in 38 s"], ["12:05", "launch", "the session's simulator"], ["12:05", "tap", "“Checkout”"], ["12:05", "check", "PASS · criteria 1 and 2"], ["12:05", "check", "FAIL · criterion 3"], ["12:05", "review", "asked for your review"]],
+    scr: "checkout" },
+  { id: "inbox", group: "needs", h: "cx", title: "Crash on an empty inbox", where: "homesafe · fix/empty-inbox", ago: "4 min",
+    st: ["done", "done", "done", "wait", "none", "none"], det: ["3 criteria", "1 file", "local · 51 s", "sign-in needed", "", ""],
+    verdict: { kind: "warn", t: "The app opened on its sign-in screen", s: "Codex cannot type passwords. Run your sign-in script for it, or sign in on the device yourself.", needs: true },
+    crit: [["Inbox opens with no messages", "none"], ["“Nothing here yet” is shown", "none"], ["No crash in the log", "none"]],
+    acts: [["11:58", "spec", "3 criteria"], ["11:58", "build", "local: built c04d91 in 51 s"], ["11:59", "launch", "the session's simulator"], ["11:59", "scripts", "“Sign in (staging)” is not allowed for agents"]],
+    scr: "signin" },
+  { id: "dark", group: "working", h: "cc", via: "t3", pr: 217, title: "Dark mode for Settings", where: "homesafe · feat/settings-dark", ago: "",
+    st: ["done", "done", "done", "done", "go", "none"], det: ["4 criteria", "6 files", "local · 44 s", "Pixel 9", "2 of 4", ""],
+    verdict: { kind: "go", t: "Verifying: 2 of 4 checks so far", s: "Claude Code is driving this device." },
+    crit: [["Settings follows the system appearance", "done", "0:09"], ["Switches are readable in dark", "done", "0:15"], ["The Privacy screen is dark too", "none"], ["Light mode is unchanged", "none"]],
+    acts: [["12:05", "spec", "4 criteria"], ["12:05", "build", "local: built 51aa7e in 44 s"], ["12:06", "launch", "the session's simulator, data kept"], ["12:06", "set", "appearance"], ["12:06", "check", "PASS · criteria 1 and 2"]],
+    scr: "settings" },
+  { id: "offline", group: "working", h: "cx", title: "Offline banner on Home", where: "homesafe · feat/offline-banner", ago: "",
+    st: ["done", "done", "go", "wait", "none", "none"], det: ["2 criteria", "3 files, pushed", "CI run 4812 · 3 min", "the build before it", "", ""],
+    verdict: { kind: "go", t: "CI is building 9c1e44a", s: "The device shows the build before it. It reloads when the artifact lands, and Codex is told." },
+    crit: [["A banner shows with no network", "none"], ["It goes when the network is back", "none"]],
+    acts: [["12:02", "spec", "2 criteria"], ["12:03", "build", "ci: run 4812 is going, waiting"]],
+    scr: "home" },
+  { id: "main", group: "quiet", h: null, title: "main", where: "homesafe · base branch", ago: "",
+    st: ["none", "none", "done", "done", "none", "none"], det: ["", "", "CI · 3 h ago", "Pixel 9", "", ""],
+    verdict: null, crit: [], acts: [], scr: "home" },
+];
+const byId = id => sessions.find(s => s.id === id);
+
+const SCR = {
+  trips: `<div class="scr"><div class="sb"><span>12:03</span><span>5G ▪</span></div><div class="tb">Trips</div><div class="nodes">
+    <div class="nd" data-node="Trip row “Roman vacation”">Roman vacation<small>12 to 19 May · 4 places</small></div>
+    <div class="nd" data-node="Trip row “Weekend in Porto”">Weekend in Porto<small>3 to 5 June · 2 places</small></div>
+    <div class="nd" data-node="Trip row “Tokyo 2027”">Tokyo 2027<small>Not planned yet</small></div></div>
+    <div class="nav3"><span>Home</span><b>Trips</b><span>Inbox</span><span>Settings</span></div></div>`,
+  checkout: `<div class="scr"><div class="sb"><span>12:05</span><span>5G ▪</span></div><div class="tb">Checkout</div><div class="nodes">
+    <div class="nd row" data-node="Item “City pass”"><span>City pass</span><span>€12.90</span></div>
+    <div class="nd row" data-node="Item “Metro card”"><span>Metro card</span><span>€6.87</span></div>
+    <div class="nd row" data-node="Item “Guide”"><span>Guide</span><span>€3.50</span></div>
+    <div class="nd row" data-node="Tax line"><span>Tax 7%</span><span>€1.63</span></div>
+    <div class="nd row" data-node="Total" style="font-weight:700"><span>Total</span><span>€24.89</span></div>
+    <div class="nd cta" data-node="Button “Pay”">Pay</div></div>
+    <div class="nav3"><b>Home</b><span>Trips</span><span>Inbox</span><span>Settings</span></div></div>`,
+  signin: `<div class="scr"><div class="sb"><span>11:59</span><span>5G ▪</span></div><div class="tb">Sign in</div><div class="nodes">
+    <div class="nd field" data-node="Field “Email”">Email</div><div class="nd field" data-node="Field “Password”">Password</div>
+    <div class="nd cta" data-node="Button “Sign in”">Sign in</div></div></div>`,
+  settings: `<div class="scr dk"><div class="sb"><span>12:06</span><span>5G ▪</span></div><div class="tb">Settings</div><div class="nodes">
+    <div class="nd row" data-node="Switch “Notifications”"><span>Notifications</span><i class="sw"></i></div>
+    <div class="nd row" data-node="Switch “Use system theme”"><span>Use system theme</span><i class="sw"></i></div>
+    <div class="nd" data-node="Row “Privacy”">Privacy<small>Location, analytics</small></div>
+    <div class="nd" data-node="Row “About”">About<small>Version 4.2</small></div></div>
+    <div class="nav3"><span>Home</span><span>Trips</span><span>Inbox</span><b>Settings</b></div></div>`,
+  home: `<div class="scr"><div class="sb"><span>12:03</span><span>5G ▪</span></div><div class="tb">Home</div><div class="nodes">
+    <div class="nd" data-node="Card “Next trip”">Next trip<small>Roman vacation, in 9 days</small></div>
+    <div class="nd" data-node="Card “Inbox”">Inbox<small>2 new messages</small></div></div>
+    <div class="nav3"><b>Home</b><span>Trips</span><span>Inbox</span><span>Settings</span></div></div>`,
+};
+
+/* ---------- top bar ---------- */
+function bar() {
+  const onb = S.screen === "connect" || S.screen === "task";
+  const n = g => S.screen === "empty" || S.screen === "apk" ? 0 : sessions.filter(s => s.group === g).length;
+  const agents = S.screen === "connect" ? Object.keys(S.connected).length : 3;
+  $("#bar").innerHTML = `<span class="lights"><i></i><i></i><i></i></span><span class="name">Greenroom</span><span class="grow"></span>` +
+    (onb ? "" : `<button class="chip" data-do="next" title="Go to the next session that needs you"><span class="dot ok"></span><b>${n("ready")}</b> ready <span class="dot warn"></span><b>${n("needs")}</b> needs you <span class="dot go"></span><b>${n("working")}</b> working <kbd>⌘'</kbd></button><span class="grow"></span><span class="chip">Jobs <b>${S.screen === "window" ? 2 : 0}</b></span>`) +
+    `<span class="chip"><span class="dot ${agents ? "ok" : ""}"></span>${agents ? `<b>${agents}</b> agents connected` : "No agent connected"}</span>` + (onb ? "" : `<span class="chip"><kbd>⌘K</kbd></span>`);
+}
+
+/* ---------- 1 connect ---------- */
+const FOUND = [
+  ["cc", "Tools, the verify skill and session status, as a plugin", "claude plugin marketplace add aglose/greenroom\nclaude plugin install greenroom@greenroom --scope user"],
+  ["cx", "Tools, the skill and session status", "codex mcp add greenroom -- greenroom mcp\n+ ~/.agents/skills/greenroom/SKILL.md\n+ 4 entries in ~/.codex/hooks.json (Codex asks you to trust them once)"],
+  ["cu", "Tools, the skill and session status", "+ \"greenroom\" in ~/.cursor/mcp.json\n+ ~/.cursor/skills/greenroom/SKILL.md\n+ 3 entries in ~/.cursor/hooks.json"],
+];
+function connect() {
+  const all = FOUND.every(f => S.connected[f[0]]);
+  const rows = FOUND.map(([k, sub, how]) => `<div class="h"><span class="hb ${k}">${k.toUpperCase()}</span><div><div class="t">${HARNESS[k]}</div><div class="s">${sub} · <button class="link" data-do="how" data-k="${k}">${S.open === k ? "hide" : "what this runs"}</button></div></div>
+      <div class="st ${S.connected[k] ? "ok" : ""}">${S.connected[k] ? "✓ Connected" : S.connecting === k ? "Connecting…" : "Found"}</div></div>${S.open === k ? `<div class="how">${esc(how)}</div>` : ""}`).join("");
+  return `<div class="onb"><div class="sheet"><ol class="trail"><li class="on">Connect</li><li>First task</li><li>Ready</li></ol>
+    <h1>Connect your agents</h1>
+    <p class="lede">Greenroom runs the Android app your agent is working on, so you can watch it, check it and steer it. Agents bring the work here. There is nothing to drag in.</p>
+    <div class="list">${rows}
+      <div class="h"><span class="hb t3">T3</span><div><div class="t">T3 Code</div><div class="s">Runs Claude Code and Codex, so it is connected through them</div></div><div class="st ${S.connected.cc ? "ok" : ""}">${S.connected.cc ? "✓ Through Claude Code" : "Found"}</div></div>
+      <div class="h off"><span class="hb ag">AG</span><div><div class="t">Antigravity</div><div class="s">Not installed</div></div><div class="st"></div></div>
+      <div class="h off"><span class="hb co">CO</span><div><div class="t">Copilot CLI</div><div class="s">Not installed</div></div><div class="st"></div></div>
+    </div>
+    <div class="acts">${all ? `<button class="btn pri" data-do="go" data-to="task">Continue</button>` : `<button class="btn pri" data-do="connect">${S.connecting ? "Connecting…" : "Connect 3 agents"}</button>`}
+      <button class="link" data-do="how" data-k="other">Another agent…</button></div>
+    ${S.open === "other" ? `<div class="how" style="padding-left:12px;margin-top:10px;border-radius:10px">Any MCP client, as a stdio server:   greenroom mcp\nAny agent with a shell:              greenroom --help</div>` : ""}
+    <p class="aside">Only want to run an APK? <button class="link" data-do="go" data-to="apk">Run one yourself…</button> <kbd>⌘O</kbd></p>
+  </div></div>`;
+}
+
+/* ---------- 2 first task ---------- */
+const PROMPT = {
+  project: "Build this app and open it in Greenroom. Then verify the change on this branch: say what you will check, check each thing, and ask me to review.",
+  sample: "Use Greenroom to launch its sample app. Rename the trip “Italian vacation” to “Roman vacation”, check that it worked, and ask me to review.",
+};
+const CALLS = [`<b>Claude Code</b> called from ~/code/homesafe · feat/settings-dark`, `Added <b>homesafe</b> to Greenroom: 5 worktrees, base origin/main`, `spec: “Dark mode for Settings”, 4 criteria`, `build: local, 44 s`, `launch: on a Pixel 9, driving now`];
+function task() {
+  const lines = CALLS.slice(0, S.called).map(l => `<div class="ln">${l}</div>`).join("");
+  return `<div class="onb"><div class="sheet"><ol class="trail"><li class="done">✓ Connect</li><li class="on">First task</li><li>Ready</li></ol>
+    <h1>Give your agent something to do</h1>
+    <p class="lede">Paste this into any agent you connected. Greenroom opens the session the moment the agent calls.</p>
+    <div class="seg"><button data-do="kind" data-k="project" aria-pressed="${S.promptKind === "project"}">In my project</button><button data-do="kind" data-k="sample" aria-pressed="${S.promptKind === "sample"}">With the sample app</button></div>
+    <div class="prompt">${PROMPT[S.promptKind]}<button class="btn sm" data-do="copy">${S.copied ? "Copied" : "Copy"}</button></div>
+    <div class="listen"><div class="row"><span class="pulse"></span><b>${S.called ? "An agent is here" : "Listening for an agent…"}</b></div>${lines}</div>
+    <div class="acts">${S.called >= CALLS.length ? `<button class="btn pri" data-do="opensession">Open the session</button>` : ""}
+      <button class="link" data-do="go" data-to="window">Skip</button></div>
+    ${S.called ? "" : `<p class="demo">Prototype only: <button data-do="callin">an agent calls in</button></p>`}
+    <p class="aside">No project and no agent at hand? <button class="link" data-do="go" data-to="apk">Run an APK yourself…</button> <kbd>⌘O</kbd></p>
+  </div></div>`;
+}
+
+/* ---------- 3 the window ---------- */
+const markCh = { done: "✓", fail: "×", wait: "!", go: "", none: "" };
+function card(s) {
+  const v = s.group === "ready" ? (s.verdict.kind === "bad" ? ["bad", `${s.det[4]} · 1 failed · ${s.ago}`] : ["ok", `${s.det[4]} passed · ${s.ago}`])
+    : s.group === "needs" ? ["warn", `Needs a sign-in · ${s.ago}`]
+    : s.group === "working" ? ["go", (() => { const i = s.st.indexOf("go"); return i < 0 ? "Working" : `${STAGES[i]}: ${s.det[i]}`; })()]
+    : ["", s.note || s.det[2]];
+  return `<button class="card ${S.sel === s.id ? "sel" : ""}" data-do="sel" data-id="${s.id}">${s.h ? `<span class="hb mini ${s.h}">${s.h.toUpperCase()}</span>` : `<span class="hb mini co">⌂</span>`}
+    <span class="ct">${esc(s.title)}</span><span class="cs">${s.where}</span><span class="pips">${s.st.map(x => `<i class="${x}"></i>`).join("")}</span><span class="cv ${v[0]}">${v[1]}</span></button>`;
+}
+function side() {
+  return GROUPS.map(([g, label]) => { const list = sessions.filter(s => s.group === g); return list.length ? `<div class="grp">${label}<span class="n">${list.length}</span></div>` + list.map(card).join("") : ""; }).join("");
+}
+function stage(s) {
+  const you = S.you[s.id], driving = s.group === "working" && s.st[4] === "go" && !you;
+  const who = s.h ? HARNESS[s.h] : null;
+  const cap = you ? `<b>You are driving.</b> ${who} waits. <button class="link" data-do="take">Hand back</button>`
+    : driving ? `<span class="dot go"></span><b>${who}</b> is driving · <button class="link" data-do="take">Take over</button>`
+    : s.id === "offline" ? `<span class="dot warn"></span>Showing the build before 9c1e44a`
+    : s.group === "quiet" ? `Pixel 9 · the base build` : `Pixel 9 · yours to use`;
+  return `<div class="strip">${STAGES.map((k, i) => `<div class="stp ${s.st[i]}"><div class="k"><span class="mark ${s.st[i]}">${markCh[s.st[i]]}</span>${k}</div><div class="d">${s.det[i] || "&nbsp;"}</div></div>`).join("")}</div>
+    <div class="stage ${S.pinning ? "pinning" : ""}"><div class="phone ${you ? "you" : driving ? "agent" : ""}">${SCR[s.scr]}${driving ? `<span class="ptr"></span>` : ""}</div><div class="cap2">${cap}</div>
+    ${S.note ? `<button class="note" data-do="sel" data-id="${S.note.id}"><span class="hb mini ${S.note.h}">${S.note.h.toUpperCase()}</span><span class="t">Ready for review</span><span class="s">${esc(S.note.text)}</span></button>` : ""}
+    ${S.toast ? `<div class="toast">${S.toast}</div>` : ""}</div>`;
+}
+function panel(s) {
+  const v = s.verdict;
+  const acts = !v ? "" : s.group === "ready" ? `<div class="acts"><button class="btn sm ${v.kind === "bad" ? "" : "pri"}" data-do="approve">Approve</button><button class="btn sm ${v.kind === "bad" ? "pri" : ""}" data-do="changes">Request changes</button></div>`
+    : v.merge === "offer" ? `<div class="acts"><button class="btn sm pri" data-do="merge">Squash and merge #${s.pr}</button><button class="btn sm" data-do="noop">Open on GitHub</button></div>`
+    : v.merge === "nopr" ? `<div class="acts"><button class="btn sm" data-do="askpr">Ask ${HARNESS[s.h]} to open one</button></div>`
+    : v.needs ? `<div class="acts"><button class="btn sm pri" data-do="allow">Run “Sign in (staging)”</button><button class="btn sm" data-do="take">Sign in myself</button></div>` : "";
+  const done = s.crit.filter(c => c[1] === "done").length;
+  return `<div class="ph"><div class="t">${esc(s.title)}</div><div class="s">${s.h ? `<span class="hb mini ${s.h}">${s.h.toUpperCase()}</span>${HARNESS[s.h]}${s.via ? " in T3 Code" : ""} · ` : ""}${s.where.split(" · ")[1]}${s.h ? `<span style="flex:1"></span><button class="link" data-do="noop">Open in ${s.via ? "T3 Code" : HARNESS[s.h]}</button>` : ""}</div></div>
+    ${v ? `<div class="verdict ${v.kind === "ok" ? "" : v.kind}"><div class="t">${v.t}</div><div class="s">${v.s}</div>${acts}</div>` : ""}
+    <div class="scroll">
+      ${s.crit.length ? `<div class="sec">SPEC<span>${done} of ${s.crit.length} · from the agent</span></div>` + s.crit.map(c => `<div class="crit"><span class="mark ${c[1]}">${markCh[c[1]]}</span><span>${esc(c[0])}</span><span class="e">${c[2] ? "▸ " + c[2] : ""}</span>${c[3] ? `<span class="why">${esc(c[3])}</span>` : ""}</div>`).join("") : `<div class="empty">The base branch. Sessions are compared with this build.</div>`}
+      ${s.acts.length ? `<div class="sec">ACTIVITY<span>recorded</span></div>` + s.acts.map(a => `<div class="act ${a[1] === "you" ? "you" : ""}"><span class="tm">${a[0]}</span><span class="tl">${a[1]}</span><span class="tx">${esc(a[2])}${a[3] ? `<span class="q">${a[3]}</span>` : ""}</span></div>`).join("") : ""}
+    </div>
+    ${s.h ? `<div class="comp">${S.pin ? `<span class="pinchip">Pinned: ${esc(S.pin)} <button data-do="unpin" aria-label="Remove pin">×</button></span>` : ""}
+      <textarea id="say" placeholder="Tell ${HARNESS[s.h]}…" aria-label="Comment for the agent">${esc(S.draft || "")}</textarea>
+      <div class="acts"><button class="btn sm ${S.pinning ? "pri" : ""}" data-do="pin">${S.pinning ? "Click a part of the screen" : "Pin to screen"}</button><span class="grow" style="flex:1"></span><button class="btn sm pri" data-do="send">Send</button></div></div>` : ""}`;
+}
+function windowScreen() {
+  const s = byId(S.sel);
+  return `<div class="cols"><div class="side">${side()}</div><div class="stagecol">${stage(s)}</div><div class="panel">${panel(s)}</div></div>`;
+}
+
+/* ---------- 4 nothing running ---------- */
+function empty() {
+  return `<div class="cols"><div class="side"><div class="grp">SESSIONS</div><div class="empty">None yet. A session appears here when an agent calls Greenroom from a project.</div></div>
+    <div class="onb" style="grid-column: 2 / 4"><div class="sheet" style="width:520px">
+      <h1>Waiting for an agent</h1><p class="lede">Ask any connected agent to build your app and open it in Greenroom. It shows up here, running, and you can watch every step.</p>
+      <div class="prompt">${PROMPT.project}<button class="btn sm" data-do="copy">${S.copied ? "Copied" : "Copy"}</button></div>
+      <div class="listen"><div class="row"><span class="pulse"></span><b>Listening</b><span style="flex:1"></span><span class="hb mini cc">CC</span><span class="hb mini cx">CX</span><span class="hb mini cu">CU</span></div></div>
+      <p class="aside"><button class="link" data-do="go" data-to="apk">Run an APK yourself…</button> <kbd>⌘O</kbd> &nbsp;·&nbsp; <button class="link" data-do="noop">Add a repository…</button> &nbsp;·&nbsp; <button class="link" data-do="go" data-to="connect">Connect another agent…</button></p>
+    </div></div></div>`;
+}
+
+/* ---------- 5 run an APK (File > Run an APK…) ---------- */
+function apk() {
+  const menu = ["Greenroom", "File", "Edit", "Device", "Sessions", "View", "Window", "Help"].map(m => `<span class="${m === "File" ? "on" : ""}">${m}</span>`).join("");
+  const rec = [["HS", "#2b9a72", "homesafe-debug", "Downloads · 2 d ago"], ["TA", "#3f6fc2", "trips-release", "Desktop · 1 w ago"]].map(r => `<button class="rec" data-do="noop"><span class="hb" style="background:${r[1]}">${r[0]}</span><span><b>${r[2]}</b><small>${r[3]}</small></span></button>`).join("");
+  return `<div class="menubar">${menu}<div class="menu"><div class="mi on"><span>Run an APK…</span><kbd>⌘O</kbd></div><div class="mi"><span>Compare With APK…</span><kbd>⇧⌘O</kbd></div><div class="mi"><span>Add Repository…</span><kbd>⌥⌘O</kbd></div><div class="mi"><span>Clone from GitHub…</span><kbd></kbd></div></div></div>
+    <div class="cols" style="height:calc(100% - 24px)"><div class="side"><div class="grp">SESSIONS</div><div class="empty">None yet. A session appears here when an agent calls Greenroom from a project.</div></div>
+    <div class="onb" style="grid-column: 2 / 4"><div class="sheet" style="width:520px">
+      <button class="link" data-do="go" data-to="empty">‹ Back to waiting for an agent</button>
+      <div class="drop"><h1>Run an APK</h1><p class="lede" style="margin:0 auto 14px">Drop an APK here, or choose one. It runs in under a second and stays on this Mac.</p>
+        <button class="btn pri" data-do="noop">Choose an APK…</button></div>
+      <div class="sec" style="margin-top:16px">RECENT APKS<button class="link" data-do="noop" style="font-weight:500;letter-spacing:0">Try the sample app</button></div>
+      <div class="recs">${rec}</div>
+    </div></div></div>`;
+}
+
+/* ---------- render and actions ---------- */
+function render() {
+  const sc = SCREENS.find(x => x.id === S.screen);
+  $("#nav").innerHTML = SCREENS.map(x => `<button role="tab" aria-selected="${x.id === S.screen}" data-do="go" data-to="${x.id}">${x.label}</button>`).join("");
+  $("#cap").innerHTML = sc.cap;
+  const say = $("#say"); if (say) S.draft = say.value;
+  bar();
+  $("#body").innerHTML = { connect, task, window: windowScreen, empty, apk }[S.screen]();
+  fit();
+}
+function fit() {
+  const box = $("#fit"), win = $("#win"), w = box.clientWidth, natural = Math.max(980, w), k = w / natural;
+  win.style.width = natural + "px"; win.style.transform = k < 1 ? `scale(${k})` : "none"; box.style.height = Math.ceil(664 * k) + "px";
+}
+const now = () => new Date().toTimeString().slice(0, 5);
+function toast(t) { S.toast = t; render(); clearTimeout(toast.t); toast.t = setTimeout(() => { S.toast = null; render(); }, 3200); }
+function move(s, group) { s.group = group; }
+
+const DO = {
+  go(d) { S.screen = d.to; S.open = null; S.copied = false; render(); if (d.to === "window") startDark(); },
+  how(d) { S.open = S.open === d.k ? null : d.k; render(); },
+  connect() {
+    if (S.connecting) return;
+    FOUND.forEach(([k], i) => { setTimeout(() => { S.connecting = k; render(); }, i * 700); setTimeout(() => { S.connected[k] = true; S.connecting = i === FOUND.length - 1 ? false : S.connecting; render(); }, i * 700 + 600); });
+  },
+  kind(d) { S.promptKind = d.k; S.copied = false; render(); },
+  copy() { S.copied = true; render(); },
+  callin() { const step = () => { S.called++; render(); if (S.called < CALLS.length && S.screen === "task") setTimeout(step, 750); }; step(); },
+  opensession() { S.sel = "dark"; DO.go({ to: "window" }); },
+  sel(d) { S.sel = d.id; S.pinning = false; S.pin = null; S.draft = ""; if (S.note && S.note.id === d.id) S.note = null; render(); },
+  next() { const order = sessions.filter(s => s.group === "ready").concat(sessions.filter(s => s.group === "needs")); if (!order.length) return; const i = order.findIndex(s => s.id === S.sel); DO.sel({ id: order[(i + 1) % order.length].id }); },
+  approve() { const s = byId(S.sel); move(s, "quiet"); s.st[5] = "done"; s.det[5] = "approved"; s.note = "Approved · just now"; s.verdict = s.pr ? { kind: "ok", t: `Approved · pull request #${s.pr} can merge`, s: "Its checks passed and it has no conflicts with main. Merging is yours: an agent cannot.", merge: "offer" } : { kind: "ok", t: "Approved · no pull request yet", s: `${HARNESS[s.h]} was told. There is nothing to merge until the branch has a pull request.`, merge: "nopr" }; s.acts.push([now(), "you", "Approved"]); toast(`${HARNESS[s.h]} was told: approved`); },
+  merge() { const s = byId(S.sel); s.note = `Merged #${s.pr} · just now`; s.verdict = { kind: "ok", t: `Merged #${s.pr} into main`, s: "Squashed, by you, with gh. The session can be archived." }; s.acts.push([now(), "you", `Merged pull request #${s.pr} (squash)`]); toast(`Merged #${s.pr} into main`); },
+  askpr() { const s = byId(S.sel); s.acts.push([now(), "you", "Open a pull request for this branch", "Queued: delivered when its turn ends"]); s.verdict = { kind: "ok", t: "Approved · no pull request yet", s: `${HARNESS[s.h]} was asked to open one.` }; render(); },
+  changes() { const t = $("#say"); if (t) { t.focus(); t.placeholder = "What should change?"; } },
+  allow() { const s = byId(S.sel); move(s, "working"); s.st[3] = "done"; s.det[3] = "Pixel 9, signed in"; s.st[4] = "go"; s.det[4] = "0 of 3"; s.scr = "home"; s.verdict = { kind: "go", t: "Verifying: 0 of 3 checks so far", s: "Signed in by your script. Codex never saw the password." }; s.acts.push([now(), "you", "Allowed “Sign in (staging)” for agents"], [now(), "run_script", "exit 0 · signed in"]); render(); },
+  take() { const s = byId(S.sel); S.you[s.id] = !S.you[s.id]; if (s.h) s.acts.push([now(), "you", S.you[s.id] ? "Took over the device" : "Handed the device back"]); render(); },
+  pin() { S.pinning = !S.pinning; render(); },
+  unpin() { S.pin = null; render(); },
+  send() {
+    const s = byId(S.sel), t = ($("#say").value || "").trim(); if (!t && !S.pin) return;
+    const waiting = s.group === "ready";
+    const row = [now(), "you", (S.pin ? `[${S.pin}] ` : "") + (t || "See the pinned part"), waiting ? "Delivered: its review call was waiting" : "Queued: delivered when its turn ends"];
+    s.acts.push(row); S.draft = ""; $("#say").value = ""; S.pin = null; S.pinning = false;
+    if (waiting) { move(s, "working"); s.st[5] = "none"; s.det[5] = ""; s.st[1] = "go"; s.det[1] = "changes requested"; s.verdict = { kind: "go", t: "Changes requested", s: `${HARNESS[s.h]} has your comment and is working on it.` }; }
+    else setTimeout(() => { row[3] = "Delivered at the end of its turn"; render(); }, 2600);
+    render();
+  },
+  noop() {},
+};
+document.addEventListener("click", e => {
+  const node = e.target.closest(".pinning [data-node]");
+  if (node && S.screen === "window") { S.pin = node.dataset.node; S.pinning = false; render(); const t = $("#say"); if (t) t.focus(); return; }
+  const b = e.target.closest("[data-do]"); if (b) DO[b.dataset.do](b.dataset);
+});
+document.addEventListener("keydown", e => { if (e.metaKey && e.key === "'" && (S.screen === "window")) { e.preventDefault(); DO.next(); } });
+window.addEventListener("resize", fit);
+
+/* The Dark mode session keeps working while the window is open, then asks for review: the first to finish is announced. */
+let darkTimer = null;
+function startDark() {
+  const s = byId("dark"); if (darkTimer || s.group !== "working") return;
+  const script = [
+    () => { s.acts.push([now(), "tap", "“Privacy”"]); },
+    () => { s.acts.push([now(), "check", "PASS · criterion 3"]); s.crit[2][1] = "done"; s.crit[2][2] = "0:27"; s.det[4] = "3 of 4"; s.verdict.t = "Verifying: 3 of 4 checks so far"; },
+    () => { s.acts.push([now(), "set", "appearance"]); },
+    () => { s.acts.push([now(), "check", "PASS · criterion 4"]); s.crit[3][1] = "done"; s.crit[3][2] = "0:41"; s.det[4] = "4 of 4"; },
+    () => { s.acts.push([now(), "review", "asked for your review"]); s.st[4] = "done"; s.st[5] = "go"; s.det[5] = "waiting for you"; s.ago = "just now"; move(s, "ready");
+      s.verdict = { kind: "ok", t: "4 of 4 checks passed · 2 screens changed", s: "“Settings and Privacy follow the system appearance. Light mode is pixel-identical to main.”" };
+      if (S.sel !== "dark") S.note = { id: "dark", h: "cc", text: "Dark mode for Settings · 4 of 4 passed" }; },
+  ];
+  let i = 0;
+  darkTimer = setInterval(() => { if (S.screen !== "window") return; script[i++](); render(); if (i >= script.length) clearInterval(darkTimer); }, 3500);
+}
+render();
+if (S.screen === "window") startDark();
+</script>
+</body>
+</html>

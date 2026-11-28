@@ -42,6 +42,15 @@ def sessions_mode():
     git("init", "-q", "-b", "main", cwd=repo2); git("add", ".", cwd=repo2); git("commit", "-q", "-m", "first", cwd=repo2)
     os.makedirs(repo2 + "/app/build/outputs/apk/debug")
     subprocess.run(["cp", apk, repo2 + "/app/build/outputs/apk/debug/app-debug.apk"], check=True)
+    # Two repositories nobody added: one with an app in it, one with none. An agent's call adds the first only.
+    repo3, repo4 = root + "/repo3", root + "/repo4"
+    for r in (repo3, repo4):
+        os.makedirs(r)
+        open(r + "/README.md", "w").write("hello\n")
+        open(r + "/.gitignore", "w").write("build/\n")
+        git("init", "-q", "-b", "main", cwd=r); git("add", ".", cwd=r); git("commit", "-q", "-m", "first", cwd=r)
+    os.makedirs(repo3 + "/app/build/outputs/apk/debug")
+    subprocess.run(["cp", apk, repo3 + "/app/build/outputs/apk/debug/app-debug.apk"], check=True)
     def variant(name):
         """The test APK with one more file in it: another build (another key) that runs the same."""
         dst = f"{root}/{name}.apk"
@@ -62,7 +71,7 @@ cp "{built_apk}" "$GREENROOM_OUT"
 """)
     os.chmod(recipe, 0o755)
     env = dict(os.environ, GREENROOM_STATE=state_dir, GREENROOM_ADD_REPOSITORY=repo + "\n" + repo2, GREENROOM_CHECK_FEEDS="1",
-               GREENROOM_CHECK_RECIPE=recipe, GREENROOM_CHECK_AUTO="off", GREENROOM_CHECK_AGENT_IDLE="3", GREENROOM_CHECK_RECORD_OFF=repo2,
+               GREENROOM_CHECK_RECIPE=recipe, GREENROOM_CHECK_AUTO="off", GREENROOM_CHECK_ADOPT="1", GREENROOM_CHECK_AGENT_IDLE="3", GREENROOM_CHECK_RECORD_OFF=repo2,
                GREENROOM_CHECK_CRAWL_START="apksim://slot", GREENROOM_CHECK_CRAWL_DEPTH="1", GREENROOM_CHECK_CRAWL_SECONDS="40",
                GREENROOM_CHECK_BASE_OPTION="--setting global:apksim_slot_seed=base")
     app_log = open(root + "/app.log", "w")
@@ -203,6 +212,7 @@ cp "{built_apk}" "$GREENROOM_OUT"
         if "--tools" not in sys.argv:
             session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up)
         more_tools(a, away, trees, state_dir, apk, expect)
+        adoption(repo3, repo4, state_dir, Shim, expect)
     finally:
         for s in shims:
             try:
@@ -219,6 +229,36 @@ cp "{built_apk}" "$GREENROOM_OUT"
         subprocess.run(["rm", "-rf", root])
     print(f"mcp-check --sessions: {len(failures)} failed" if failures else "mcp-check --sessions: all passed")
     sys.exit(1 if failures else 0)
+
+def adoption(repo3, repo4, state_dir, Shim, expect):
+    """A repository adds itself (docs/AGENT-FIRST-SPEC.md): the first call from a worktree with an Android app in it adds
+    its repository, so the agent brings the work. Not while agents are paused, and not a repository with no app in it."""
+    stranger, plain = Shim(repo3), Shim(repo4)
+    open(state_dir + "/agent-paused-check", "w").write("1")
+    try:
+        t, err = stranger.call("session")
+        expect("paused: a call from a repository nobody added does not add it, and says why",
+               err and "agents are paused, so repo3 was not added" in t, t)
+    finally:
+        os.remove(state_dir + "/agent-paused-check")
+    t, err = stranger.call("session")
+    expect("a call from a repository with an app in it adds the repository: the agent brings the work", not err and "main" in t, t)
+    t, _ = stranger.call("sessions")
+    expect("... and its session is listed", "repo3" in t, t)
+    t, _ = stranger.call("workspace")
+    expect("... its base branch is not fetched and built by itself", "keep_main = off" in t, t)
+    t, err = stranger.call("launch")
+    expect("... and launch without apk starts the worktree's build", not err and "launched app-debug.apk" in t, t)
+    stranger.call("close")
+    t, err = plain.call("session")
+    expect("a repository with no Android app in it is not added, and the answer says why",
+           err and "no Android app was found in repo4" in t, t)
+    t, err = plain.call("launch")
+    expect("... launch says the same, and still takes an apk",
+           err and "no Android app was found in repo4" in t and t.endswith(": pass apk"), t)
+    t, _ = plain.call("sessions")
+    expect("... and it is not among the repositories", "repo4" not in t, t)
+
 
 def more_tools(a, away, trees, state_dir, apk, expect):
     """The tools for the rest of Greenroom: the panes (network, perf, accessibility, background, clipboard, inspect, the
