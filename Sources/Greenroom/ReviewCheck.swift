@@ -354,7 +354,7 @@ enum ReviewCheck {
             func tick() async { watch.tick(); _ = await wait("GitHub's answer") { !watch.busy }; await settle(0.2) }
             // A commit nobody pushed is not asked about.
             await tick()
-            expect(listings() == 0 && watch.entry(for: tripPath) == nil, "a session whose commit is not pushed is not asked about")
+            expect(listings() == 0 && watch.entry(for: tripPath)?.runs.isEmpty != false, "GitHub is not asked about a session whose commit is not pushed")
             // A new commit, pushed, with a run going.
             guard git(["commit", "-q", "--allow-empty", "-m", "nights"], in: trip.worktree), upstream(trip) else { expect(false, "could not commit and push in the worktree"); finish() }
             sessions.refresh(supersede: true)

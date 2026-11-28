@@ -135,6 +135,7 @@ final class CIWatch {
         if e.over { return false }
         guard let asked = e.asked else { return true }
         if e.active { return now.timeIntervalSince(asked) >= Self.whileActive }
+        // No run yet: a minute apart, for half an hour after the push (a repository with no CI is then left alone).
         if now.timeIntervalSince(e.first) > Self.giveUp { return false }
         return now.timeIntervalSince(asked) >= Self.whileNone
     }
@@ -167,31 +168,35 @@ final class CIWatch {
     /// For a check: whether an answer from GitHub is still awaited.
     var busy: Bool { !asking.isEmpty }
 
-    /// Asks git whether the head is what the upstream has, then GitHub for that commit's runs. Nil: not pushed, or
-    /// GitHub could not be asked (it is asked again later).
-    private static func look(_ s: Session, workflow: String) async -> [Run]? {
+    /// What a look found: the commit is not what the upstream has, GitHub could not be asked, or the commit's runs.
+    enum Found: Equatable { case unpushed, unanswered, runs([Run]) }
+
+    /// Asks git whether the head is what the upstream has, then GitHub for that commit's runs.
+    private static func look(_ s: Session, workflow: String) async -> Found {
         let upstream = (await Git.run(["rev-parse", "--verify", "--quiet", "@{upstream}"], in: s.worktree))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard upstream == s.head else { return nil }
+        guard upstream == s.head else { return .unpushed }
         var args = ["run", "list", "--commit", s.head, "--limit", "30", "--json", "databaseId,status,conclusion,workflowName,headSha,url,createdAt"]
         if let slug = await GitHubRemote.repoSlug(for: s.worktree) { args += ["-R", slug] }
         let r = await GH.run(args, in: s.worktree, timeout: 30)
-        guard r.status == 0 else { return nil }
-        return counted(parse(r.out, sha: s.head), workflow: workflow)
+        guard r.status == 0 else { return .unanswered }
+        return .runs(counted(parse(r.out, sha: s.head), workflow: workflow))
     }
 
-    /// What GitHub said about a session's commit.
-    func apply(_ s: Session, _ found: [Run]?) {
+    /// What was found out about a session's commit.
+    func apply(_ s: Session, _ found: Found) {
         let path = s.worktree.path
         let now = Self.now()
-        guard let found else {
-            // Not pushed (any more), or no answer: what was known of another commit is dropped.
-            if let e = entries[path], e.sha != s.head { entries[path] = nil; onChange?() }
-            return
-        }
-        var e = entries[path].flatMap { $0.sha == s.head ? $0 : nil } ?? Entry(sha: s.head, first: now)
         let before = entries[path]
+        var e = before.flatMap { $0.sha == s.head ? $0 : nil } ?? Entry(sha: s.head, first: now)
         e.asked = now
-        e.runs = found
+        switch found {
+        case .unpushed:
+            // Looked at again in a minute; the half hour a run is waited for counts from the push, not the commit.
+            e.first = now
+            e.runs = []
+        case .unanswered: break
+        case .runs(let runs): e.runs = runs
+        }
         entries[path] = e
         settle(s)
         if entries[path] != before { onChange?() }
