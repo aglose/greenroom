@@ -781,15 +781,6 @@ final class SessionsController {
         Engine.shared.simulators.first { $0.isAlive && Self.slot(of: $0) == session.slot }
     }
 
-    /// The device the person looks at for a session, to pin a comment to: its own simulator, else one its agent
-    /// started on a separate data slot, else an APK its agent opened (the newest).
-    func reviewSimulator(for session: Session) -> Simulator? {
-        if let own = simulator(for: session) { return own }
-        let path = session.worktree.path
-        let alive = Engine.shared.simulators.filter { $0.isAlive }
-        return alive.last { $0.agentSession == path } ?? alive.last { $0.openedFrom == path }
-    }
-
     static func slot(of sim: Simulator) -> String? { DevHooks.value("--data-slots", in: sim.options) }
 
     // MARK: Switching
@@ -803,11 +794,6 @@ final class SessionsController {
         if let sim = simulator(for: session) {
             wb.select(sim)
             noteUsed(session.worktree.path)
-            return true
-        }
-        // With no build of its own yet, what its agent opened is what there is to look at: no build is started for it.
-        if newestAPK(for: session) == nil, let shown = reviewSimulator(for: session) {
-            wb.select(shown)
             return true
         }
         guard let apk = newestAPK(for: session) else {
