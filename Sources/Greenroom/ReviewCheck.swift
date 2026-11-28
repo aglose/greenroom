@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// `GREENROOM_STATE=EMPTY_DIR Greenroom --background --agent-check --review-check DIR`: the review side of the window
 /// (docs/AGENT-FIRST-SPEC.md, A6). The rules by themselves (which criteria a check names, what a pull request's
@@ -90,6 +91,26 @@ enum ReviewCheck {
             expect(lane("tap", ["sim": "s3", "text": "Add"]) == "sim:s3" && lane("screen", ["sim": "s4"]) == "sim:s4", "calls on a simulator run in that simulator's lane, one at a time")
             expect(lane("session") == "agent:7|/x/wt" && lane(nil) == "agent:7|/x/wt" && lane("session", cwd: "/x/other", parent: 9) == "agent:9|/x/other", "an agent's other calls run in its own lane, beside other agents'")
             expect(lane("launch") == "launch:/x/wt" && lane("launch", ["apk": "/y/app.apk"]) == "launch:/y/app.apk", "a launch waits in a lane of its own target")
+
+            // The loop strip, drawn by itself (it shows over a session's device, and this check starts none): wide and narrow.
+            let stripModel = LoopStripModel()
+            stripModel.steps = [LoopStep(name: "Spec", state: .done, detail: "3 criteria"), LoopStep(name: "Code", state: .done, detail: "2 commits · edited"),
+                                LoopStep(name: "Build", state: .going, detail: "CI · 1 of 3 runs done · 3 min"), LoopStep(name: "Run", state: .done, detail: ""),
+                                LoopStep(name: "Verify", state: .failed, detail: "3 of 4"), LoopStep(name: "Review", state: .none, detail: "")]
+            stripModel.title = "feat/trip-rename"
+            stripModel.action = "Review"
+            stripModel.driver = "Claude Code is driving"
+            stripModel.take = "Take Over"
+            for (name, width) in [("strip.png", 980), ("strip-narrow.png", 620)] {
+                let host = NSHostingView(rootView: LoopStripView(model: stripModel).frame(width: CGFloat(width), height: 38))
+                host.frame = NSRect(x: 0, y: 0, width: width, height: 38)
+                host.layoutSubtreeIfNeeded()
+                if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent(name))
+                }
+            }
+            expect(fm.fileExists(atPath: dir.appendingPathComponent("strip.png").path), "the loop strip is drawn (strip.png, strip-narrow.png)")
 
             // MARK: First run is left
 

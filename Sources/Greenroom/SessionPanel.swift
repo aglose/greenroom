@@ -355,35 +355,14 @@ struct LoopStripView: View {
     @ObservedObject var model: LoopStripModel
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(model.steps.enumerated()), id: \.offset) { i, step in
-                if i > 0 { Rectangle().fill(Color.white.opacity(0.12)).frame(width: 14, height: 1) }
-                HStack(spacing: 5) {
-                    Circle().fill(step.tint).frame(width: 7, height: 7)
-                    Text(step.name).font(.system(size: 11.5, weight: step.state == .going ? .semibold : .medium))
-                        .foregroundStyle(step.state == .none ? SettingsTheme.mute.opacity(0.7) : SettingsTheme.ink)
-                    if !step.detail.isEmpty {
-                        Text(step.detail).font(.system(size: 10.5)).foregroundStyle(step.state == .failed ? SettingsTheme.record : SettingsTheme.mute).lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 6)
-                .layoutPriority(step.detail.isEmpty ? 1 : 0)
-            }
-            Spacer(minLength: 8)
-            if !model.driver.isEmpty {
-                Text(model.driver).font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(model.take == "Hand Back" ? SettingsTheme.warning : SettingsTheme.ink).lineLimit(1).padding(.trailing, 8)
-            }
-            if !model.take.isEmpty {
-                Button(model.take) { model.onTake?() }
-                    .buttonStyle(PanelButton())
-                    .help(model.take == "Hand Back" ? "Let this session's agent act on the device again"
-                                                    : "Take this session's device: its agent waits, the other sessions' agents go on")
-                    .padding(.trailing, 6)
-            }
-            Button(model.action) { model.onOpen?() }
-                .buttonStyle(PanelButton(kind: model.action == "Review" ? .primary : .plain))
-                .help("What this session set out to do, what was checked, and your answer")
+        // What does not fit goes in this order: the details of steps that are done, who is driving, the other
+        // details, the lines between the steps.
+        ViewThatFits(in: .horizontal) {
+            row(details: 2, driver: true, lines: true)
+            row(details: 1, driver: true, lines: true)
+            row(details: 1, driver: false, lines: true)
+            row(details: 0, driver: false, lines: true)
+            row(details: 0, driver: false, lines: false)
         }
         .padding(.leading, 10)
         .padding(.trailing, 5)
@@ -394,6 +373,46 @@ struct LoopStripView: View {
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Loop for \(model.title)")
+    }
+}
+
+extension LoopStripView {
+    /// `details`: 2 every step's line, 1 only of steps under way, failed or waiting (what there is to act on), 0 none.
+    fileprivate func row(details: Int, driver: Bool, lines: Bool) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(model.steps.enumerated()), id: \.offset) { i, step in
+                if i > 0, lines { Rectangle().fill(Color.white.opacity(0.12)).frame(width: 14, height: 1) }
+                HStack(spacing: 5) {
+                    Circle().fill(step.tint).frame(width: 7, height: 7)
+                    Text(step.name).font(.system(size: 11.5, weight: step.state == .going ? .semibold : .medium))
+                        .foregroundStyle(step.state == .none ? SettingsTheme.mute.opacity(0.7) : SettingsTheme.ink)
+                        .lineLimit(1).fixedSize()
+                    if details == 2 || (details == 1 && step.state != .done), !step.detail.isEmpty {
+                        Text(step.detail).font(.system(size: 10.5)).foregroundStyle(step.state == .failed ? SettingsTheme.record : SettingsTheme.mute)
+                            .lineLimit(1).fixedSize()
+                    }
+                }
+                .padding(.horizontal, lines ? 6 : 4)
+                .help(step.detail.isEmpty ? step.name : "\(step.name): \(step.detail)")
+            }
+            Spacer(minLength: 8)
+            if driver, !model.driver.isEmpty {
+                Text(model.driver).font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(model.take == "Hand Back" ? SettingsTheme.warning : SettingsTheme.ink).lineLimit(1).fixedSize().padding(.trailing, 8)
+            }
+            if !model.take.isEmpty {
+                Button(model.take) { model.onTake?() }
+                    .buttonStyle(PanelButton())
+                    .fixedSize()
+                    .help(model.take == "Hand Back" ? "Let this session's agent act on the device again"
+                                                    : "Take this session's device: its agent waits, the other sessions' agents go on")
+                    .padding(.trailing, 6)
+            }
+            Button(model.action) { model.onOpen?() }
+                .buttonStyle(PanelButton(kind: model.action == "Review" ? .primary : .plain))
+                .fixedSize()
+                .help("What this session set out to do, what was checked, and your answer")
+        }
     }
 }
 
