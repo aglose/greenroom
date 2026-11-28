@@ -413,6 +413,18 @@ enum AgentShim {
         return nil
     }
 
+    /// How long the app is given to answer a message: five minutes, or longer for a call that says it waits
+    /// longer (`review` waits up to half an hour), with a minute to spare.
+    static func timeout(for message: [String: Any]?) -> TimeInterval {
+        guard let params = message?["params"] as? [String: Any], let args = params["arguments"] as? [String: Any],
+              let wait = args["timeout_s"] as? Int else { return 300 }
+        return max(300, TimeInterval(min(max(wait, 0), 1800) + 60))
+    }
+
+    /// Whether the app at this endpoint is the one that is still running: then a call it did not answer in time is
+    /// not sent again (it may have done it).
+    static func stillRunning(_ e: Endpoint) -> Bool { endpoint()?.pid == e.pid }
+
     static func post(_ body: Data, to e: Endpoint, cwdOverride: String? = nil, timeout: TimeInterval = 300) -> (status: Int, data: Data)? {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(e.port)/mcp")!)
         request.httpMethod = "POST"
@@ -516,18 +528,24 @@ enum AgentShim {
             let id = message?["id"]
             let wantsAnswer = message?["method"] != nil && id != nil && !(id is NSNull)
             var answer: Data?
+            let timeout = timeout(for: message)
+            var unanswered = false
             for attempt in 0..<2 {
                 guard let e = connect() else { break }
-                if let r = post(body, to: e) {
+                if let r = post(body, to: e, timeout: timeout) {
                     if r.status == 200 { answer = r.data }
                     if r.status == 200 || r.status == 202 { break }
+                } else if stillRunning(e) {
+                    unanswered = true   // it is running and did not answer in time: sending it again could do it twice
+                    break
                 }
                 if attempt == 0 { Thread.sleep(forTimeInterval: 0.5) }   // the app may have just quit: look again
             }
             if message == nil, answer == nil {
                 answer = Data(#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}"#.utf8)
             } else if wantsAnswer, answer == nil {
-                let failure: [String: Any] = ["jsonrpc": "2.0", "id": id!, "error": ["code": -32603, "message": "Greenroom is not running and could not be started"]]
+                let why = unanswered ? "Greenroom is running but did not answer within \(Int(timeout)) s" : "Greenroom is not running and could not be started"
+                let failure: [String: Any] = ["jsonrpc": "2.0", "id": id!, "error": ["code": -32603, "message": why]]
                 answer = try? JSONSerialization.data(withJSONObject: failure)
             }
             if let answer, wantsAnswer || message == nil {

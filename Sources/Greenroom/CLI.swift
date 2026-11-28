@@ -265,10 +265,16 @@ enum CLI {
         nextID += 1
         let message: [String: Any] = ["jsonrpc": "2.0", "id": nextID, "method": method, "params": params]
         guard let body = try? JSONSerialization.data(withJSONObject: message) else { usage("the arguments could not be written as JSON") }
+        let timeout = AgentShim.timeout(for: message)
         for attempt in 0..<2 {
             guard let e = AgentShim.connect() else { break }
-            if let r = AgentShim.post(body, to: e, cwdOverride: cwd), r.status == 200,
+            let r = AgentShim.post(body, to: e, cwdOverride: cwd, timeout: timeout)
+            if let r, r.status == 200,
                let json = (try? JSONSerialization.jsonObject(with: r.data)) as? [String: Any] { return json }
+            if r == nil, AgentShim.stillRunning(e) {
+                err("greenroom: \(Variant.name) is running but did not answer within \(Int(timeout)) s.")
+                exit(3)
+            }
             if attempt == 0 { Thread.sleep(forTimeInterval: 0.5) }   // the app may have just quit: look again
         }
         err("greenroom: \(Variant.name) is not running and could not be started.")
