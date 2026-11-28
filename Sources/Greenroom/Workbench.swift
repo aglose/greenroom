@@ -147,6 +147,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     let walkChip = WalkProgressChip()
     /// The job queue, in the top bar whichever session is shown (JobsUI.swift).
     let jobsChip = JobsChip()
+    /// How many sessions are ready, need the person or are at work, in the top bar (AttentionUI.swift).
+    let attentionChip = AttentionChip()
     // Changes (ChangesSheet.swift): a build against a base, a full-stage sheet as well.
     let changesSheet = ChangesSheet(frame: .zero)
     private(set) var showingPalette = false
@@ -161,6 +163,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     private enum Row {
         case header(String)
+        /// A group of the sidebar by attention ("Ready for review"), and how many rows it holds.
+        case attentionHeader(Attention, Int)
+        /// A repository, under the groups: its name and its + menu (the sidebar by attention has no header for it).
+        case repository(String, URL, hidden: Int)
         /// A repository's header, with its + menu; `hidden` is how many of its worktrees the menu holds.
         case sessionsHeader(String, URL, hidden: Int)
         /// "Add a session" under a repository that shows none.
@@ -482,7 +488,18 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             if showingConnect {   // the agent's app is here: the screens have done their work
                 showingConnect = false
                 ConnectModel.firstRunDone = true
-                toast.show("You are set: what agents bring shows in the sidebar, and File > Connect Agents… connects more")
+                // First run's last step, in a line: the device is the thing to look at now.
+                if Notifier.asked {
+                    toast.show("You are set: sessions show in the sidebar by what they need, and ⌘' goes to the next that needs you")
+                } else {
+                    toast.show("You are set: sessions show in the sidebar by what they need, and ⌘' goes to the next that needs you", action: "Notify Me") { [weak self] in
+                        Notifier.set(true) { granted in
+                            if !granted { Notifier.set(false) }
+                            self?.toast.show(granted ? "You are told when a session is ready or needs you. Settings > Agents changes it."
+                                                     : "macOS did not allow notifications. System Settings > Notifications turns them on.", problem: !granted)
+                        }
+                    }
+                }
             }
         }
         simulatorsSeen = sims.count
@@ -524,13 +541,34 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         var rows: [Row] = []
         let groups = sessions.groups()
         if !groups.isEmpty && ClaudeUI.offersTitles { rows.append(.claudeTitles) }   // rows read as branches, and nothing is suggested, until it is on
-        for group in groups {
-            guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
-            rows.append(.sessionsHeader(group.header, ws, hidden: group.hidden))
-            let main = sessions.mainRow(for: ws)
-            if let main { rows.append(.main(main)) }
-            if group.sessions.isEmpty && main == nil { rows.append(.addSession(ws, hidden: group.hidden)) }
-            rows += group.sessions.map { .session($0) }
+        sessions.noteAttention()   // which group each session is in, since when, and the news of it
+        attentionChip.show(sessions.lastCounts)
+        if sessions.groupByRepository {
+            for group in groups {
+                guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
+                rows.append(.sessionsHeader(group.header, ws, hidden: group.hidden))
+                let main = sessions.mainRow(for: ws)
+                if let main { rows.append(.main(main)) }
+                if group.sessions.isEmpty && main == nil { rows.append(.addSession(ws, hidden: group.hidden)) }
+                rows += group.sessions.map { .session($0) }
+            }
+        } else {
+            // By what they need (Attention.swift): the groups, then the repositories, each with its + menu.
+            for (group, list) in sessions.attentionGroups() {
+                rows.append(.attentionHeader(group, list.count))
+                for row in list {
+                    switch row {
+                    case .session(let s, _): rows.append(.session(s))
+                    case .main(let m, _): rows.append(.main(m))
+                    }
+                }
+            }
+            if !groups.isEmpty {
+                if groups.contains(where: { $0.workspace != nil }) { rows.append(.header("Repositories")) }
+                for group in groups {
+                    if let ws = group.workspace { rows.append(.repository(group.header, ws, hidden: group.hidden)) } else { rows.append(.header(group.header)) }
+                }
+            }
         }
         let suggested = sessions.suggestions()
         let offers = ClaudeSessions.shared.offers
@@ -587,6 +625,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private static func identity(_ row: Row) -> String {
         switch row {
         case .header(let t): return "h:" + t
+        case .attentionHeader(let g, _): return "ah:\(g.rawValue)"
+        case .repository(let t, let ws, _): return "repo:" + t + ws.path
         case .sessionsHeader(let t, let ws, _): return "sh:" + t + ws.path
         case .addSession(let ws, _): return "add:" + ws.path
         case .suggestion(let s): return "sg:" + s.worktree.path
@@ -603,12 +643,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// Everything a row shows.
     private func key(of row: Row) -> String {
         switch row {
-        case .sessionsHeader(_, let ws, let hidden):
+        case .sessionsHeader(_, let ws, let hidden), .repository(_, let ws, let hidden):
             let appTag = sessions.apps(for: ws).count > 1 ? (sessions.selectedApp(for: ws)?.id ?? "") : ""
             let scanning = sessions.scanningWorkspaces.contains(ws.path) ? "1" : "0"
             return Self.identity(row) + "|\(hidden)|\(sessions.apps(for: ws).count)|\(appTag)|\(scanning)"
+        case .attentionHeader(_, let count): return Self.identity(row) + "|\(count)"
         case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
-        case .session(let s): return Self.identity(row) + "|" + sessions.rowKey(for: s)
+        case .session(let s):
+            if sessions.groupByRepository { return Self.identity(row) + "|R|" + sessions.rowKey(for: s) }
+            return Self.identity(row) + "|A|" + sessions.attentionKey(for: s, sessions.attention(of: s))
         case .suggestion(let s): return Self.identity(row) + "|" + sessions.suggestionKey(for: s)
         case .main(let m): return Self.identity(row) + "|" + sessions.mainRowKey(m)
         case .pull(let p): return Self.identity(row) + "|\(p.state)|\(p.build?.key ?? "")|\(p.simulator?.state == .running)|\(p.simulator != nil)|\(p.pull.title)|\(p.repo)"
@@ -766,9 +809,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         walkChip.onOpen = { [weak self] in self?.showMap() }
         jobsChip.workbench = self
+        attentionChip.onPress = { [weak self] in
+            guard let self else { return }
+            self.showLibrary()
+            self.sessions.goToNextNeedingAttention()
+        }
         let deviceCluster = group([deviceButton, divider()] + deviceButtons)
         let captureCluster = group([shot, divider(), recordButton, saveRecordButton])
-        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, jobsChip, walkChip, exitMatrixButton, mirrorButton, group(layoutButtons), captureCluster, commands])
+        let bar = NSStackView(views: [library, appChip, deviceCluster, spacer, attentionChip, jobsChip, walkChip, exitMatrixButton, mirrorButton, group(layoutButtons), captureCluster, commands])
         bar.spacing = 8
         bar.setHuggingPriority(.init(1), for: .horizontal)
         bar.setHuggingPriority(.init(1), for: .vertical)
@@ -1565,6 +1613,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 }
             }
         }
+        add("attention.next", "Go to the next session that needs you", "Sessions", "bell.badge", "⌘'", keywords: "ready review waiting attention next") { [weak self] in self?.nextNeedingYou(nil) }
+        add("attention.group", sessions.groupByRepository ? "Group sessions by what they need" : "Group sessions by repository", "Sessions", "square.stack.3d.up",
+            keywords: "sidebar group attention ready working quiet repository") { [weak self] in self?.toggleGroupByRepository(nil) }
         add("script.new", "New script…", "Scripts", "plus.rectangle.on.folder", keywords: "script sign in login automate") { [weak self] in self?.newScript(nil) }
         add("variables", "Variables (sign-ins for scripts)…", "Scripts", "key", keywords: "env environment secret password credentials keychain") { [weak self] in self?.showVariables(nil) }
         if live != nil {
@@ -1949,6 +2000,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Mark as Reviewed", action: #selector(markReviewedClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Open the Agent's App", action: #selector(openAgentClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove from Sidebar", action: #selector(removeSessionClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
@@ -1997,13 +2049,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
         if case .header = rows[row] { return true }
+        if case .attentionHeader = rows[row] { return true }
         if case .sessionsHeader = rows[row] { return true }
         return false
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .simulator, .session, .main, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession: return true
+        case .simulator, .session, .main, .claudeOffer, .claudeTitles, .pull, .suggestion, .addSession, .repository: return true
         default: return false
         }
     }
@@ -2022,10 +2075,14 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         if case .header = rows[row] { return 22 }
+        if case .attentionHeader = rows[row] { return 24 }
+        if case .repository = rows[row] { return 30 }
         if case .sessionsHeader = rows[row] { return 24 }
         if case .suggestion = rows[row] { return 38 }
         if case .addSession = rows[row] { return 34 }
-        if case .session(let s) = rows[row] { return sessions.rowHeight(for: s, width: tableView.rect(ofColumn: 0).width) }
+        if case .session(let s) = rows[row] {
+            return sessions.groupByRepository ? sessions.rowHeight(for: s, width: tableView.rect(ofColumn: 0).width) : sessions.attentionHeight(for: s)
+        }
         if case .main = rows[row] { return 44 }
         if case .pull = rows[row] { return 54 }
         if case .claudeOffer = rows[row] { return 38 }
@@ -2043,19 +2100,41 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             let inset = NSStackView(views: [label])
             inset.edgeInsets = NSEdgeInsets(top: 0, left: Self.headerInset, bottom: 0, right: 6)
             return inset
-        case .sessionsHeader(let title, let ws, _):
+        case .attentionHeader(let group, let count):
+            return SessionsController.attentionHeader(group, count: count, inset: Self.headerInset)
+        case .sessionsHeader(let title, let ws, let hidden), .repository(let title, let ws, let hidden):
+            var asRow = false
+            if case .repository = rows[row] { asRow = true }
             let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
-            label.textColor = .secondaryLabelColor
+            label.font = asRow ? .systemFont(ofSize: 12, weight: .medium) : .systemFont(ofSize: 11, weight: .semibold)
+            label.textColor = asRow ? Design.ink.withAlphaComponent(0.85) : .secondaryLabelColor
             label.lineBreakMode = .byTruncatingTail
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let add = ClosureButton(symbol: "plus", tip: "Add a session from \(ws.lastPathComponent)") {}
+            let add = ClosureButton(symbol: "plus", tip: "Add a session from \(ws.lastPathComponent), and the repository's settings") {}
             add.handler = { [weak self, weak add] in
                 guard let self, let add else { return }
                 self.sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 0, y: add.bounds.height + 2), in: add)
             }
             add.contentTintColor = .secondaryLabelColor
             var views: [NSView] = [label]
+            if asRow {
+                let icon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
+                icon.contentTintColor = .tertiaryLabelColor
+                icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+                icon.setContentHuggingPriority(.required, for: .horizontal)
+                views.insert(icon, at: 0)
+                if hidden > 0 {
+                    let more = NSTextField(labelWithString: "\(hidden) more")
+                    more.font = .systemFont(ofSize: 10)
+                    more.textColor = .tertiaryLabelColor
+                    more.toolTip = "\(hidden) worktree\(hidden == 1 ? "" : "s") not in the sidebar: the + menu has \(hidden == 1 ? "it" : "them")"
+                    more.setContentHuggingPriority(.required, for: .horizontal)
+                    views.append(more)
+                }
+                let spacer = NSView()
+                spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+                views.append(spacer)
+            }
             if sessions.scanningWorkspaces.contains(ws.path) {
                 let spin = NSProgressIndicator()
                 spin.style = .spinning
@@ -2096,7 +2175,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         case .suggestion(let s):
             return sessions.suggestionCell(for: s)
         case .session(let session):
-            return sessions.cell(for: session)
+            return sessions.groupByRepository ? sessions.cell(for: session) : sessions.attentionCell(for: session, sessions.attention(of: session))
         case .main(let m):
             return sessions.mainCell(m)
         case .claudeOffer(let offer):
@@ -2164,6 +2243,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if case .addSession(let ws, _) = rows[row], let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) {
             sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 8, y: view.bounds.height), in: view)
         }
+        if case .repository(_, let ws, _) = rows[row], let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) {
+            sessions.addMenu(for: ws).popUp(positioning: nil, at: NSPoint(x: 8, y: view.bounds.height), in: view)
+        }
         if case .claudeOffer(let offer) = rows[row] { sessions.addRepositories([offer.repository]) }
         if case .claudeTitles = rows[row] { ClaudeSessions.shared.enabled = true; reload() }   // the titles arrive with the read
         if case .pull(let pull) = rows[row] { sessions.openPull(pull) }
@@ -2190,7 +2272,12 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if case .main = rows[row] { isMain = true }
         if case .sessionsHeader = rows[row] { isWorkspaceOnly = true }
         if case .addSession = rows[row] { isWorkspaceOnly = true }
+        if case .repository = rows[row] { isWorkspaceOnly = true }
         for item in menu.items where [#selector(openAgentClicked), #selector(removeSessionClicked)].contains(item.action) { item.isHidden = isMain || isWorkspaceOnly }
+        // "Mark as Reviewed": only on a session that is ready for review.
+        for item in menu.items where item.action == #selector(markReviewedClicked) {
+            if case .session(let s) = rows[row], sessions.attention(of: s).group == .ready { item.isHidden = false } else { item.isHidden = true }
+        }
         for item in menu.items where item.action == #selector(closeClicked) { item.isHidden = isWorkspaceOnly }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
@@ -2222,6 +2309,38 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         return s
     }
 
+    @objc private func markReviewedClicked() {
+        if let s = clickedSession { sessions.markReviewed(s) }
+    }
+
+    /// Window > Next Session That Needs You (⌘'): the next one that is ready for review or needs the person.
+    @objc func nextNeedingYou(_ sender: Any?) { sessions.goToNextNeedingAttention() }
+
+    /// Window > Group Sessions by Repository: the sidebar as it was, a repository's worktrees under its name.
+    @objc func toggleGroupByRepository(_ sender: Any?) { sessions.groupByRepository.toggle() }
+
+    /// The top bar's counts, as the chip shows them (for a check).
+    var attentionText: String? { attentionChip.text }
+    /// The sidebar's rows in a few words each (for a check): a group's header as "# Title n", a session by its title.
+    var sidebarOutline: [String] {
+        // The sessions' part of the sidebar: what is suggested, to review, running loose or recent comes after it.
+        let own = rows.prefix { row in
+            if case .header(let t) = row { return !["Suggested", "Review", "Running", "Recent"].contains(t) }
+            return true
+        }
+        return own.compactMap { row in
+            switch row {
+            case .attentionHeader(let g, let n): return "# \(g.title) \(n)"
+            case .sessionsHeader(let t, _, _): return "## \(t)"
+            case .repository(let t, _, _): return "repo \(t)"
+            case .header(let t): return "# \(t)"
+            case .session(let s): return s.title
+            case .main(let m): return "main \(m.name)"
+            default: return nil
+            }
+        }
+    }
+
     @objc private func removeSessionClicked() {
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
@@ -2234,6 +2353,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         guard row >= 0, row < rows.count else { return }
         if case .main(let m) = rows[row] { sessions.removeWorkspace(at: m.workspace); return }
         if case .sessionsHeader(_, let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
+        if case .repository(_, let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
         if case .addSession(let ws, _) = rows[row] { sessions.removeWorkspace(at: ws); return }
         guard case .session(let session) = rows[row] else { return }
         sessions.removeWorkspace(containing: session)
@@ -2768,7 +2888,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// What the person sees on the stage, in a few words (the `app` tool says it).
     var stageSummary: String {
         if showingAPK { return "the APK screen" }
-        if showingConnect { return "the Connect screen (step \(connectStage.flow.step) of 2: \(connectStage.flow.step == 1 ? "connecting agents" : "waiting for an agent's first call"))" }
+        if showingConnect {
+            let what = ["connecting agents", "waiting for an agent's first call", "what the sidebar says"][max(0, min(2, connectStage.flow.step - 1))]
+            return "the Connect screen (step \(connectStage.flow.step) of \(ConnectFlow.steps): \(what))"
+        }
         return Engine.shared.simulators.isEmpty ? "waiting for an agent" : "the devices"
     }
 

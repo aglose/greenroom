@@ -66,6 +66,15 @@ final class SessionsController {
     /// The walk and capture queue (Evidence.swift): every new build of a session is walked in the background.
     let evidence = Evidence()
 
+    /// The session the person last went to, by its worktree's path (a row clicked, ⌘n, ⌘'): it may have no simulator.
+    var focus: String?
+    /// The group each shown session is in and since when (Attention.swift), to order the rows and to tell news.
+    var entered: [String: (group: Attention, since: Date)] = [:]
+    var attentionSeen = false
+    var notingAttention = false
+    var lastCounts: [Attention: Int] = [:]
+    var attentionTimer: Timer?
+
     /// Told on the main thread when the rows changed.
     var onChange: (() -> Void)?
     /// Told after each reload a new build made, with the session and the simulator that replaced the old one.
@@ -82,6 +91,10 @@ final class SessionsController {
     func install(workbench: Workbench) {
         self.workbench = workbench
         workspaces = store.loadWorkspaces()
+        WorkStore.shared.use(root: store.root)
+        WorkStore.shared.onChange = { [weak self] in self?.noteAttention(); self?.onChange?() }   // a group is entered when its cause happens, not when the rows are next drawn
+        Notifier.start()
+        startAttentionClock()
         if workspaces.contains(where: { !$0.skin.isEmpty }) { LaunchSettings.loadSkins() }   // each skin's device, for launches
         DevHooks.shared.owns = { [weak self] sim in self?.session(forSimulator: sim) != nil }   // reloaded here, once
         evidence.controller = self
@@ -124,6 +137,7 @@ final class SessionsController {
         let changed = next.map { $0.agentSessions.map(\.shown) } != sessions.map { $0.agentSessions.map(\.shown) }
             || next.map { $0.agent?.shown } != sessions.map { $0.agent?.shown }
         sessions = next
+        noteAttention()
         if autoArchive() || changed { onChange?() }
     }
 
@@ -174,6 +188,9 @@ final class SessionsController {
     func use(store: SessionStore) {
         self.store = store
         evidence.store = store
+        WorkStore.shared.use(root: store.root)
+        entered = [:]
+        attentionSeen = false
         workspaces = store.loadWorkspaces()
         builds = [:]
         refresh(supersede: true)
@@ -698,7 +715,7 @@ final class SessionsController {
             var live = scanned.live
             let complete = scanned.complete
             let all = scanned.all
-            if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path) } }
+            if complete { for old in before where !live.contains(old.worktree.path) { self.evidence.forget(worktree: old.worktree.path); WorkStore.shared.forget(old.worktree.path) } }
             self.sessions = self.attachPulls(ClaudeSessions.shared.attach(all))
             self.refreshPulls(for: spaces)
             self.watch(all)
@@ -763,6 +780,7 @@ final class SessionsController {
     @discardableResult
     func activate(_ session: Session) -> Bool {
         guard let wb = workbench else { return false }
+        focus = session.worktree.path
         show(session)
         if let sim = simulator(for: session) {
             wb.select(sim)
@@ -861,10 +879,10 @@ final class SessionsController {
         return sessions.first { $0.worktree.resolvingSymlinksInPath().path == want }
     }
 
-    /// ⌃n: the n-th row (0-based) of every repository's sessions, in the order shown.
+    /// ⌘n: the n-th session row (0-based), in the order shown.
     @discardableResult
     func switchTo(_ index: Int) -> Bool {
-        let rows = groups().flatMap(\.sessions)
+        let rows = orderedSessions()
         guard rows.indices.contains(index) else { return false }
         return activate(rows[index])
     }
@@ -879,6 +897,7 @@ final class SessionsController {
     /// Called by the workbench whenever a simulator is selected, however it came to be.
     func selected(_ sim: Simulator?) {
         guard let sim, let s = session(forSimulator: sim) else { return }
+        focus = s.worktree.path
         noteUsed(s.worktree.path)
     }
 
@@ -1200,8 +1219,9 @@ final class SessionsController {
     /// build of that worktree walked now, if it was not already.
     private func turnEnded(in folder: URL) {
         guard let path = ClaudeSessions.owner(of: folder, among: sessions.map(\.worktree)),
-              let s = sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == path }), auto(of: s) == .onTurnEnd,
-              let build = builds[s.worktree.path] ?? s.build else { return }
+              let s = sessions.first(where: { $0.worktree.resolvingSymlinksInPath().path == path }) else { return }
+        WorkStore.shared.turnEnded(s.worktree.path)   // what makes a session ready for review (Attention)
+        guard auto(of: s) == .onTurnEnd, let build = builds[s.worktree.path] ?? s.build else { return }
         evidence.buildArrived(worktree: s.worktree.path, build: build, auto: .onTurnEnd, withData: walksWithData(s))
     }
 
@@ -1300,7 +1320,7 @@ final class SessionsController {
 
     func paletteItems() -> [PaletteItem] {
         var out: [PaletteItem] = []
-        let rows = groups().flatMap(\.sessions)
+        let rows = orderedSessions()
         let shown = Set(rows.map(\.worktree.path))
         for (i, s) in (rows + sessions.filter { !shown.contains($0.worktree.path) }).enumerated() {
             let kind = s.simulator != nil ? "running" : (s.outputs == nil ? "no build" : "start")
@@ -1492,8 +1512,8 @@ final class SessionsController {
         return h
     }
 
-    private func shortcutIndex(for s: Session) -> Int? {
-        guard let idx = groups().flatMap(\.sessions).firstIndex(where: { $0.worktree.path == s.worktree.path }), idx < 9 else { return nil }
+    func shortcutIndex(for s: Session) -> Int? {
+        guard let idx = orderedSessions().firstIndex(where: { $0.worktree.path == s.worktree.path }), idx < 9 else { return nil }
         return idx + 1
     }
 
@@ -1515,7 +1535,7 @@ final class SessionsController {
         ].joined(separator: "\u{1f}")
     }
 
-    private static func makePill(_ text: String, textColor: NSColor, fill: NSColor, border: NSColor? = nil, font: NSFont = .systemFont(ofSize: 10, weight: .semibold)) -> NSView {
+    static func makePill(_ text: String, textColor: NSColor, fill: NSColor, border: NSColor? = nil, font: NSFont = .systemFont(ofSize: 10, weight: .semibold)) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.font = font
         label.textColor = textColor
@@ -2171,7 +2191,7 @@ final class SessionsController {
 
     private static let ageFormatter: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated; return f }()
 
-    private static func age(_ date: Date) -> String {
+    static func age(_ date: Date) -> String {
         "built " + ageFormatter.localizedString(for: date, relativeTo: Date())
     }
 }

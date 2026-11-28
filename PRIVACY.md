@@ -91,6 +91,13 @@ Claude Code when it is connected without the plugin (the plugin carries its own)
 file is changed, the hooks you already have are kept, and disconnecting takes Greenroom's out again. The file and
 the line each hook runs are shown on the Connect screen. Codex asks you to trust a new hook before it runs.
 
+The sidebar files each session by what it needs from you. For that Greenroom keeps, in its state folder on this
+Mac (`work/`, a small file a session), the first line of each `check` an agent ran ("PASS | MainActivity"), when it
+ran and on which build, and when the agent's turn last ended. If you say yes (first run's last step, or Settings >
+Agents), Greenroom posts a notification on this Mac when a session becomes ready for review or comes to need you
+while Greenroom is not in front: its text is the session's title, the count of its checks and the repository's
+name. It is macOS's own notification, off until you turn it on, and nothing about it leaves this Mac.
+
 A `greenroom://` link (which macOS hands to Greenroom from a browser, a chat or a terminal) only shows a place
 in the window. It cannot add a repository, run an APK or change a setting.
 

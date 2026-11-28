@@ -112,6 +112,7 @@ final class Builds {
         if let why = workspace.refusal(forRecipe: name) { error(why); return nil }   // the remote recipe needs the person's yes
         let job = BuildJob(session: session, workspace: workspace, recipeName: name, recipe: recipe, store: store, environment: environment)
         jobs[job.session] = job
+        WorkStore.shared.ask(job.session, nil)   // a build is under way: a yes the agent waited for was given, or is no longer wanted
         job.append("queued: \(name) for \(session.title)")
         let ticket = QueueJob(kind: .build, title: "Build \(session.title)", owner: job.session, lane: "build:" + job.workspace.path, detail: "\(name) recipe")
         ticket.pauseTip = "Stop the build and keep it in the queue. Resuming builds again; Gradle reuses what it had finished."

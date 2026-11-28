@@ -1,10 +1,11 @@
 # Greenroom, agent-first: the spec
 
-A spec (2026-11-27). The owner's decisions are at the end. **A1, A2 and A3 are built**: A1 in `AgentAdoption.swift`,
+A spec (2026-11-27). The owner's decisions are at the end. **A1 to A5 are built**: A1 in `AgentAdoption.swift`,
 `WaitingStage.swift` and the APK screen in `EmptyStage.swift`; A2 in `Harnesses.swift`, `ClaudeConnect.swift` and
-`ConnectScreen.swift`; A3 in `CLI.swift`, `Links.swift`, `Skills.swift` and `plugin/bin/greenroom` (checked by
-`--connect-check`, `--waiting-check`, `mcp-check.py` and `plugin-check.py`). What a step left for later
-steps is said where it applies. The rest is not built. It changes what Greenroom is for, what a new user sees first, and how the
+`ConnectScreen.swift`; A3 in `CLI.swift`, `Links.swift`, `Skills.swift` and `plugin/bin/greenroom`; A4 in
+`Hooks.swift` and `HookSessions.swift`; A5 in `Attention.swift`, `AttentionUI.swift` and `Work.swift` (checked by
+`--connect-check`, `--waiting-check`, `--attention-check`, `mcp-check.py` and `plugin-check.py`). What a step left
+for later steps is said where it applies. The rest is not built. It changes what Greenroom is for, what a new user sees first, and how the
 window is arranged. The engine, the simulators, the tools in [AGENTS-INTERFACE.md](AGENTS-INTERFACE.md) and the
 sessions model in [SESSIONS-PLAN.md](SESSIONS-PLAN.md) stay; most of this is a new front on what they already do.
 The clickable prototype is [prototype/agent-first.html](prototype/agent-first.html).
@@ -168,8 +169,10 @@ left at any time.
    whether to notify.
 
 A2 built steps 1 and 2 as screens on the stage (first run when no repository was ever added; File > Connect
-Agents… at any time; the list of step 1 is also Settings > Agents). Step 3 describes what A5 builds, so until then
-the screens end when the agent's app opens, with one line saying where things are.
+Agents… at any time; the list of step 1 is also Settings > Agents). A5 built step 3: the four groups in a line
+each, the key, and a switch for notifications (off until it is turned on; macOS asks once). When the agent's app
+opens before the person reaches step 3, the screens close as before so the device is seen, and a line in the
+window says the same in short, with "Notify Me" to click.
 
 **The Debug copy is not for testing apps.** The release copy is the default everywhere; Greenroom Debug is for
 developing Greenroom itself. So the Debug copy is never registered for every project: this repository's `.mcp.json`
@@ -234,6 +237,35 @@ Each card carries the harness's mark, the task's title, repository and branch, a
 ⌘1-9 still pick a row; a new key (proposed ⌘') goes to the next session in Ready or Needs you. The top bar
 carries the counts and the Dock icon a badge. A notification is sent when a session enters Ready or Needs you
 while Greenroom is not in front, if the person said yes in step 3.
+
+**As A5 built it** (`Attention.swift`; the rule is one function, `AttentionState.judge`):
+
+- **Ready for review** without `review` (decision 5): the harness's hook said the turn ended, the newest build is
+  of the sources as they are, and at least one `check` ran on that build since the person last dealt with the
+  session. `check` notes itself as it answers (`Work.swift`, kept in the state folder under `work/`), so this is
+  what Greenroom saw, not what an agent said. A session whose agent starts a new turn goes back to Working. Until
+  A6 brings Approve, a card in Ready has "Mark as reviewed" (on hover, and in its menu), which takes it out of
+  Ready until its agent does more.
+- **Needs you**: a harness waiting on a permission or a question (its hook, or what Claude Code's and T3 Code's
+  files say); the app on a sign-in screen one of the person's scripts signs in from; an agent's `build` with the
+  remote recipe refused for want of the person's yes; and agents paused while one is at work here.
+- **Working**: a turn running, a build queued or running, or a tool call in the last minute.
+- **Quiet**: the rest, and each repository's base branch row.
+- Order: Ready and Needs you the longest waiting first, Working in the order it began, Quiet as last used. ⌘1-9
+  pick rows in that order.
+- A card: the harness's two letters in the group's colour (CC, CX, CU, T3; a T3 Code thread is marked by the
+  harness it runs), the title, repository and branch (or the commit, when the title is the branch), six marks for
+  the loop, and one line: the checks' count, who waits, the step under way and for how long, or the build's age.
+- The repositories are listed under the groups, each with its + menu (worktrees not shown, recipes, skin, Keep
+  main built, Remove), since the groups have no header for them.
+- **Window > Group Sessions by Repository** (also Settings > Agents and ⌘K) gives the old sidebar back.
+- The top bar's chip reads "1 ready · 1 needs you · 2 working" and a click goes to the next session waiting for
+  the person; **Window > Next Session That Needs You** is ⌘'. The Dock badge counts Ready and Needs you.
+- A notification is posted when a session enters Ready or Needs you while Greenroom is not in front, if the
+  person turned them on. A click on it opens the session. One a session: a newer one replaces the one before.
+- The `sessions` tool says each shown session's group when it is not Quiet.
+
+The six marks use what is known today: Spec stays empty until A6's `spec`; Review is "waiting for you" in Ready.
 
 **The loop strip** sits over the stage for the selected session: Spec, Code, Build, Run, Verify, Review, each
 done, going, failed or not yet, with one line of detail (`local · 42 s`, `CI run 4812 · 3 min`, `4 of 5`). A

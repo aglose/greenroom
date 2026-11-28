@@ -255,7 +255,26 @@ final class ConnectFlow: ObservableObject {
     @Published var kind = 0
     @Published var client: String?
     @Published var lines: [String] = []
+    /// Step 3's answer: whether to notify when a session is ready or needs the person.
+    @Published var notify = Notifier.enabled
+    /// What macOS said when asked (nil: nothing to say).
+    @Published var notifyNote: String?
     var onDone: (() -> Void)?
+
+    /// How many steps first run has: connect, a first task, and what the sidebar says from then on.
+    static let steps = 3
+
+    /// The person's answer about notifications. Saying yes asks macOS, which may say no.
+    func setNotify(_ on: Bool) {
+        notify = on
+        notifyNote = nil
+        Notifier.set(on) { [weak self] granted in
+            guard on, !granted else { return }
+            self?.notify = false
+            self?.notifyNote = "macOS did not allow it. System Settings > Notifications > \(Variant.name) turns it on."
+            Notifier.set(false)
+        }
+    }
     var onRunAPK: (() -> Void)?
 
     /// What the person pastes into their agent for the sample app, which needs no project and no build.
@@ -630,7 +649,9 @@ struct ConnectFlowView: View {
             HStack(spacing: 8) {
                 trail("1", "Connect", on: flow.step == 1, done: flow.step > 1)
                 Rectangle().fill(SettingsTheme.stroke).frame(width: 22, height: 1)
-                trail("2", "First task", on: flow.step == 2, done: false)
+                trail("2", "First task", on: flow.step == 2, done: flow.step > 2)
+                Rectangle().fill(SettingsTheme.stroke).frame(width: 22, height: 1)
+                trail("3", "You are set", on: flow.step == 3, done: false)
                 Spacer()
                 Button { flow.onDone?() } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)) }
                     .buttonStyle(.plain)
@@ -640,7 +661,7 @@ struct ConnectFlowView: View {
                     .accessibilityLabel("Close")
                     .help("Close (Esc)")
             }
-            if flow.step == 1 { connect } else { task }
+            if flow.step == 1 { connect } else if flow.step == 2 { task } else { ready }
         }
         .padding(26)
         .frame(width: 620, alignment: .leading)
@@ -739,10 +760,61 @@ struct ConnectFlowView: View {
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(SettingsTheme.cardFill))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(SettingsTheme.stroke, lineWidth: 1))
             HStack(spacing: 12) {
-                primary("Done") { flow.onDone?() }
+                primary("Continue") { flow.step = 3 }
                 LinkButton(title: "Back") { flow.step = 1 }
                 Spacer()
             }
+        }
+    }
+
+    // Step 3.
+    private var ready: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            heading("You are set",
+                    "What agents bring shows in the sidebar, filed by what it needs from you. The first to finish is on top.")
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(Attention.allCases, id: \.rawValue) { group in
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Circle().fill(Color(nsColor: group.color)).frame(width: 8, height: 8)
+                        Text(group.title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(SettingsTheme.ink).frame(width: 118, alignment: .leading)
+                        Text(Self.meaning(group)).font(.system(size: 12)).foregroundStyle(SettingsTheme.mute).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(SettingsTheme.cardFill))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(SettingsTheme.stroke, lineWidth: 1))
+            HStack(spacing: 8) {
+                Text("⌘'").font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(SettingsTheme.ink)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(0.09)))
+                Text("goes to the next session that is ready for review or needs you. ⌘1 to ⌘9 pick a row.")
+                    .font(.system(size: 12)).foregroundStyle(SettingsTheme.mute)
+            }
+            Toggle(isOn: Binding(get: { flow.notify }, set: { flow.setNotify($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Notify me when a session is ready or needs me").font(.system(size: 12.5, weight: .medium)).foregroundStyle(SettingsTheme.ink)
+                    Text(flow.notifyNote ?? "A notification on this Mac, while \(Variant.name) is not in front. Settings > Agents changes it.")
+                        .font(.system(size: 11.5)).foregroundStyle(SettingsTheme.mute).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            HStack(spacing: 12) {
+                primary("Done") { flow.onDone?() }
+                LinkButton(title: "Back") { flow.step = 2 }
+                Spacer()
+            }
+        }
+    }
+
+    /// What each group of the sidebar means, in a line.
+    static func meaning(_ group: Attention) -> String {
+        switch group {
+        case .ready: return "The agent's turn ended on a current build with checks on it."
+        case .needs: return "The agent waits on a permission, the app on a sign-in, or a remote build on your yes."
+        case .working: return "A turn is running, a build is going, or calls are arriving."
+        case .quiet: return "Nothing for a while, and each repository's base branch."
         }
     }
 

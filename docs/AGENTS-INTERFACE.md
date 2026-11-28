@@ -240,7 +240,7 @@ The answers are built to be cheap to read:
 | --- | --- |
 | `app` | the version, the engine's, the state folder, what the person sees on the stage (the devices, waiting for an agent, the Connect screen, the APK screen), and every app setting with its value. `setting` and `value` change `sessions_warm`, `auto_archive`, `jobs_at_once`, `evidence_cap_gb`, `build_timeout_minutes`, `reopen_last`, `app_icon`, `update_checks`. `crash_reports`, `usage_reports`, `claude_sessions`, `t3_sessions` and `agents_paused` are answered and never set |
 | `workspace` | a repository's settings (default: the connection's; `repo` names another by folder name or path, so an agent outside every worktree can use it). Settable: `base_ref`, `module`, `variant`, `default_recipe`, `auto`, `walk_with_data`, `quick_walk`, `keep_main`, `unsigned_baseline`, `skip_local_apk_scan`, `disable_local_builds`, `ci_workflow`, `ci_artifact`, `ci_apk`. The skin and options are `launch_settings` |
-| `sessions` | every repository with its sessions (branch, title, build and whether it is stale, simulator, pull request, the walk of its newest build), its main build and the pull requests Greenroom holds |
+| `sessions` | every repository with its sessions (branch, title, build and whether it is stale, simulator, pull request, the walk of its newest build, and where the sidebar files it when that is not Quiet: `ready for review: 5 of 5 checks passed`, `needs you: Codex is waiting for you`, `working: …`), its main build and the pull requests Greenroom holds |
 | `session_action` | by `session` (a branch, title or worktree path; default the connection's): `open`, `close`, `build` (queued, not waited for), `cancel_build`, `walk`, `stop_walk`, `show`, `hide`; and `add_repository` with `path` |
 | `jobs` | the job queue, then the recent jobs; a running job says how far it is in what it works on ("23.1 of 48.0 MB · 3.2 MB/s", "214 of about 530 tasks", "9 of 23 screens") when it can; `cancel`, `pause`, `resume`, `prioritize` one by its `job` id, `pause_all`, `resume_all` |
 | `pull_requests` | `list`, `add` (a number or address, fetches its CI build), `fetch`, `open`, `close`, `remove` |
@@ -297,6 +297,21 @@ Older shims send neither header and everything works as before.
 The headers are hints from a local program that already holds the token. They select a row and grant nothing: no
 tool can reach a file or an app it could not before, and the folder is never read, only compared with the added
 worktrees.
+
+**Where the person sees a session.** The sidebar files sessions by what they need from the person, not by
+repository: Ready for review, Needs you, Working, Quiet. What an agent does decides it:
+
+- A turn that runs (its harness's hook), a build, or a call in the last minute: Working.
+- A `check` counts for the session whose simulator it looked at (else the caller's), on the build that session
+  then had. When the turn ends with the build still current and at least one check on it, the session is **Ready
+  for review**: the person is told (the top bar's count, the Dock badge, a notification if they turned those on)
+  and its card says "5 of 5 checks passed" or "3 of 4 passed · 1 failed". A turn that ends with no check goes
+  Quiet, so an agent that wants its work looked at checks what it changed before it stops.
+- A harness waiting on a permission, the app on a sign-in screen the person has a script for, and `build` with the
+  remote recipe refused for want of the person's yes: Needs you.
+
+`sessions` says where each is filed. Hooks are what make this work for a harness (see "Session status"): without
+them a session is Working while calls arrive and Quiet after.
 
 ## Verifying a change
 

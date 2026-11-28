@@ -140,6 +140,8 @@ struct SettingsView: View {
     @State private var t3Sessions = T3Sessions.shared.enabled
     @State private var reopenLast = LastOpened.enabled
     @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.autoArchiveKey) as? Bool ?? true
+    @State private var notifySessions = Notifier.enabled
+    @State private var groupByRepository = CheckedDefault.bool(SessionsController.groupByRepositoryKey)
     @State private var sessionsWarm = max(1, min(6, UserDefaults.standard.object(forKey: "sessionsWarm") as? Int ?? 3))
 
     // Sidebar badges
@@ -386,6 +388,25 @@ struct SettingsView: View {
                 HarnessList(model: ConnectModel.shared, ticks: false)
             }
             .onAppear { ConnectModel.shared.refresh() }
+
+            SettingsCard {
+                settingsToggleRow(
+                    title: "Notify me when a session is ready or needs me",
+                    subtitle: "A notification on this Mac when an agent's session becomes ready for review or waits on you, while Greenroom is not in front. ⌘' goes to the next one.",
+                    isOn: $notifySessions
+                )
+                .onChange(of: notifySessions) { _, on in
+                    guard on != Notifier.enabled else { return }
+                    Notifier.set(on) { granted in if on, !granted { notifySessions = false; Notifier.set(false) } }
+                }
+
+                settingsToggleRow(
+                    title: "Group sessions by repository",
+                    subtitle: "The sidebar lists each repository's worktrees under its name, instead of by what they need from you (ready for review, needs you, working, quiet).",
+                    isOn: $groupByRepository
+                )
+                .onChange(of: groupByRepository) { _, on in (NSApp.delegate as? AppDelegate)?.workbench?.sessions.groupByRepository = on }
+            }
 
             SettingsCard {
                 settingsToggleRow(

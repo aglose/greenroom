@@ -382,6 +382,21 @@ def command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait):
     expect("the tool finishing shows it working again", becomes("agent session: Codex (working)") == "agent session: Codex (working)", said())
     codex("Stop")
     expect("the turn's end shows it idle", becomes("agent session: Codex (idle)") == "agent session: Codex (idle)", said())
+    # Where the sidebar files the session: the two checks above looked at its simulator, on a build that is current.
+    def filed():
+        line = next((l for l in a.call("sessions")[0].split("\n") if l.strip().split(" | ")[0] == "feat-a"), "")
+        return next((p for p in line.split(" | ") if p.split(":")[0] in ("ready for review", "needs you", "working")), "quiet")
+    def files(want):
+        return wait(lambda: filed() if filed() == want else None, 10) or filed()
+    expect("a session whose turn ended on a current build with checks on it is ready for review, a failed check said",
+           files("ready for review: 1 of 2 passed · 1 failed") == "ready for review: 1 of 2 passed · 1 failed", filed() + "\n" + a.call("sessions")[0])
+    codex("UserPromptSubmit")
+    expect("... a new turn takes it back to working", files("working: Codex is working") == "working: Codex is working", filed())
+    codex("PermissionRequest")
+    expect("... a permission asked for is the person's to answer", files("needs you: Codex is waiting for you") == "needs you: Codex is waiting for you", filed())
+    codex("PostToolUse")
+    codex("Stop")
+    expect("... and its turn's end makes it ready again", files("ready for review: 1 of 2 passed · 1 failed") == "ready for review: 1 of 2 passed · 1 failed", filed())
     # Cursor reads a hook's answer, and writes the account's address on stdin: answered, and the address never kept.
     def cursor(event, **more):
         body = json.dumps({"conversation_id": "conv-7", "workspace_roots": [trees["a"]], "hook_event_name": event, "cursor_version": "9.9",

@@ -262,6 +262,7 @@ final class AgentTools {
                 content = extra
             }
             let first = (content.first?["text"] as? String)?.split(separator: "\n").first.map(String.init) ?? "picture"
+            if name == "check" { noteCheck(first, connection) }
             if recorded, name == "launch", let s = currentSim { beginRecording(s) }
             if recorded { noteRecording(name, args, failed: false) }
             report(name, first, failed: false, connection)
@@ -317,6 +318,17 @@ final class AgentTools {
         let screen = answer(s, head: head, before: before)
         let output = tail.isEmpty ? "(no output)" : (o.output.count > tail.count ? "[…]\n" : "") + tail.joined(separator: "\n")
         return screen + "\n--- output\n" + output
+    }
+
+    /// A `check` answered: it counts for the session whose simulator it looked at, else the caller's (WorkStore). It
+    /// is what lets a session be ready for review when its agent's turn ends.
+    private func noteCheck(_ line: String, _ connection: Connection) {
+        let sim = currentSim ?? (try? self.sim([:]))
+        DispatchQueue.main.async {
+            guard let sessions = self.workbench?.sessions else { return }
+            guard let s = sim.flatMap({ sessions.session(forSimulator: $0) }) ?? connection.session else { return }
+            WorkStore.shared.noteCheck(s.worktree.path, passed: line.hasPrefix("PASS"), summary: line, build: sessions.currentBuild(of: s)?.key)
+        }
     }
 
     private func report(_ tool: String, _ summary: String, failed: Bool, _ connection: Connection) {

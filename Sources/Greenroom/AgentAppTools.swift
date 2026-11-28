@@ -312,6 +312,9 @@ extension AgentTools {
                     if let sim = c.simulator(for: s) { parts.append("simulator \(id(sim))") }
                     if let n = s.prNumber { parts.append("PR #\(n)\(s.prState.map { " \($0)" } ?? "")") }
                     if let w = walkText(c.evidence.entry(of: s.worktree.path)) { parts.append(w) }
+                    // Where the sidebar files it (Attention), when that is not Quiet.
+                    let attention = c.attention(of: s)
+                    if c.isShown(s), attention.group != .quiet { parts.append(attention.group.title.lowercased() + (attention.line.isEmpty ? "" : ": " + attention.line)) }
                     if !c.isShown(s) { parts.append("hidden") }
                     lines.append(parts.joined(separator: " | ") + (s.worktree.path == ws.root.path ? "" : " | \(Self.tilde(s.worktree.path))"))
                 }

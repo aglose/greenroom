@@ -157,6 +157,7 @@ extension AgentTools {
         // The remote recipe uploads source code: only the person's yes, given in Greenroom, lets it run. An agent cannot give it.
         if let refusal = ws.refusal(forRecipe: name) {
             if name == "remote" {
+                mainSync { WorkStore.shared.ask(s.worktree.path, "remote") }   // the session now needs the person (Attention)
                 throw Failure(message: "The remote recipe uploads this repository's source code to the person's own boat.dev account, and they have not allowed it. Ask them to allow it in Greenroom (the row's Build with > remote); an agent cannot give that yes. Meanwhile use another recipe.")
             }
             throw Failure(message: refusal)

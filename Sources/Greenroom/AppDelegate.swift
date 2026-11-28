@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildsCheckIfAsked()
         mainCheckIfAsked()
         waitingCheckIfAsked()
+        attentionCheckIfAsked()
         claudeCheckIfAsked()
         recorderCheckIfAsked()
         recipesCheckIfAsked()
@@ -529,6 +530,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WaitingCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
     }
 
+    /// `Greenroom --attention-check DIR`: see AttentionCheck.
+    private func attentionCheckIfAsked() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--attention-check"), i + 1 < args.count else { return }
+        // It looks at the window's sidebar: only with a state folder of its own, as the waiting check.
+        guard Engine.agentCheck, ProcessInfo.processInfo.environment["GREENROOM_STATE"]?.hasPrefix("/") == true else {
+            print("attention check: run it with --agent-check and GREENROOM_STATE set to an empty folder, never on your own state")
+            exit(2)
+        }
+        AttentionCheck.run(workbench: workbench, dir: URL(fileURLWithPath: args[i + 1])) { [weak self] in self?.captureWindow(to: $0) }
+    }
+
     /// `Greenroom --main-check DIR APK`: see MainCheck.
     private func mainCheckIfAsked() {
         let args = CommandLine.arguments
@@ -742,6 +755,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.addItem(to(workbench: #selector(Workbench.toggleInspector(_:)), "Inspector", "i", [.command, .option]))
         win.addItem(to(workbench: #selector(Workbench.toggleLog(_:)), "Log", "L", [.command, .shift]))
         win.addItem(to(workbench: #selector(Workbench.showJobs(_:)), "Jobs", "j", [.command, .option]))
+        win.addItem(.separator())
+        win.addItem(to(workbench: #selector(Workbench.nextNeedingYou(_:)), "Next Session That Needs You", "'"))
+        win.addItem(to(workbench: #selector(Workbench.toggleGroupByRepository(_:)), "Group Sessions by Repository", ""))
 
         let help = NSMenu(title: "Help")
         help.addItem(item("Report Feedback…", #selector(showFeedback(_:)), ""))
@@ -766,6 +782,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if item.representedObject as? String == "toggleScreenRecording:" {
             item.title = Recorder.isRecording(workbench.selected) ? "Stop Recording Screen" : "Record Screen"
         }
+        if item.representedObject as? String == "toggleGroupByRepository:" { item.state = workbench.sessions.groupByRepository ? .on : .off }
         return true
     }
 
