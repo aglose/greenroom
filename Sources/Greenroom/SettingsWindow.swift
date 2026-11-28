@@ -142,6 +142,7 @@ struct SettingsView: View {
     @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.autoArchiveKey) as? Bool ?? true
     @State private var notifySessions = Notifier.enabled
     @State private var groupByRepository = CheckedDefault.bool(SessionsController.groupByRepositoryKey)
+    @State private var watchCI = CIWatch.enabled
     @State private var sessionsWarm = max(1, min(6, UserDefaults.standard.object(forKey: "sessionsWarm") as? Int ?? 3))
 
     // Sidebar badges
@@ -406,6 +407,16 @@ struct SettingsView: View {
                     isOn: $groupByRepository
                 )
                 .onChange(of: groupByRepository) { _, on in (NSApp.delegate as? AppDelegate)?.workbench?.sessions.groupByRepository = on }
+
+                settingsToggleRow(
+                    title: "Watch CI for pushed sessions",
+                    subtitle: "For a session whose commit is pushed, asks GitHub (gh, your sign-in) for that commit's runs, shows them in its loop, fetches the APK of a repository that builds on CI, and tells the agent how it ended. It never starts a workflow.",
+                    isOn: $watchCI
+                )
+                .onChange(of: watchCI) { _, on in
+                    CIWatch.enabled = on
+                    (NSApp.delegate as? AppDelegate)?.workbench?.sessions.ciWatch.tick()
+                }
             }
 
             SettingsCard {

@@ -91,7 +91,12 @@ final class LoopStripModel: ObservableObject {
     @Published var steps: [LoopStep] = []
     @Published var title = ""
     @Published var action = ""
+    /// Who has the device: "Codex is driving", "You have the device", or "" when nobody is at it.
+    @Published var driver = ""
+    /// "Take Over" or "Hand Back" ("" when there is nothing to take: no agent is known for the session).
+    @Published var take = ""
     var onOpen: (() -> Void)?
+    var onTake: (() -> Void)?
 }
 
 /// The review side of the window: the session panel in the right slot, the loop strip over the stage, a comment
@@ -132,6 +137,7 @@ final class ReviewController {
             NSWorkspace.shared.open(url)
         }
         strip.onOpen = { [weak self] in self?.workbench.showSession() }
+        strip.onTake = { [weak self] in self?.toggleTakeOver() }
         if Engine.agentCheck { watchForCheck() }
     }
 
@@ -178,11 +184,45 @@ final class ReviewController {
             if strip.title != title { strip.title = title }
             let action = sessions.attention(of: s).group == .ready ? "Review" : "Session"
             if strip.action != action { strip.action = action }
+            let d = driving(s)
+            if strip.driver != d.line { strip.driver = d.line }
+            if strip.take != d.button { strip.take = d.button }
         }
         if stripView.isHidden == on {
             stripView.isHidden = !on
             onStrip?(on)
         }
+    }
+
+    // MARK: Taking the device over
+
+    /// Whether the person has the session's device.
+    func isTaken(_ s: Session) -> Bool { workbench.agentTools?.takenSince(s.worktree.path) != nil }
+
+    /// Who is at a session's device, and what the button beside it does.
+    func driving(_ s: Session) -> (line: String, button: String) {
+        if isTaken(s) { return ("You have the device", "Hand Back") }
+        let f = sessions.facts(for: s)
+        let who = SessionsController.mark(for: s.displayAgent)?.name
+        if f.calls { return ("\(who ?? "An agent") is driving", "Take Over") }
+        if f.working != nil || s.displayAgent != nil { return ("", "Take Over") }
+        return ("", "")
+    }
+
+    /// Take Over: this session's agent waits (its actions are refused, reading still answers) while every other
+    /// session's goes on. Hand Back lets it act again, and tells it so with its next call's answer.
+    func toggleTakeOver() {
+        guard let s = session, let tools = workbench.agentTools else { return }
+        let path = s.worktree.path
+        if tools.takenSince(path) != nil {
+            tools.handBack(path)
+            workbench.say("Handed \(s.branch ?? s.shortHead)'s device back to its agent")
+        } else {
+            tools.takeOver(path)
+            workbench.say("You have \(s.branch ?? s.shortHead)'s device: its agent waits until you hand it back")
+        }
+        workbench.agentChanged()
+        sessions.onChange?()
     }
 
     static func ago(_ date: Date) -> String {
@@ -508,7 +548,8 @@ final class ReviewController {
     // MARK: The person, for scripts/mcp-check.py
 
     /// Only with `--agent-check`: the check cannot click, so it writes what the person would do to
-    /// `review-person-check.json` in the state folder: {"worktree", "comment"?, "pin": [x, y]?, "answer": "approved"|"changes"?}.
+    /// `review-person-check.json` in the state folder: {"worktree", "comment"?, "pin": [x, y]?, "answer": "approved"|"changes"?,
+    /// "take": true|false?}.
     /// It is done through the same functions the panel's buttons call, and the file is replaced by `.done`.
     private func watchForCheck() {
         let file = Engine.shared.state.appendingPathComponent("review-person-check.json")
@@ -536,6 +577,7 @@ final class ReviewController {
                     }
                     self.send()
                 }
+                if let take = o["take"] as? Bool, take != self.isTaken(s) { self.toggleTakeOver() }
                 switch o["answer"] as? String {
                 case "approved"?: self.approve()
                 case "changes"?: self.requestChanges()

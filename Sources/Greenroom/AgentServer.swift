@@ -15,8 +15,34 @@ final class AgentServer {
     private var listener: NWListener?
     private let token: String
     private let queue = DispatchQueue(label: "greenroom-agent-connections")
-    /// Tool calls run one at a time, off the main thread (they wait for answers delivered there).
-    private let work = DispatchQueue(label: "greenroom-agent-tools")
+    /// Tool calls run off the main thread (they wait for answers delivered there), one at a time in each lane: a
+    /// lane for each simulator, one for each launch's target, and one for each agent's other calls. So an agent
+    /// that waits on one device does not hold up another agent's device, and two calls never act on one simulator
+    /// at once.
+    private var lanes: [String: DispatchQueue] = [:]
+    private let lanesLock = NSLock()
+    /// Finds lanes: resolving a call's simulator asks the main thread, which must not be done on the connection queue.
+    private let router = DispatchQueue(label: "greenroom-agent-router")
+
+    private func lane(_ key: String) -> DispatchQueue {
+        lanesLock.lock(); defer { lanesLock.unlock() }
+        if let q = lanes[key] { return q }
+        let q = DispatchQueue(label: "greenroom-agent-tools." + key)
+        lanes[key] = q
+        return q
+    }
+
+    /// The lane a message runs in.
+    static func laneKey(_ message: [String: Any], hint: (cwd: URL?, parent: Int32?), tools: AgentTools) -> String {
+        let mine = "agent:\(hint.parent.map(String.init) ?? "-")|\(hint.cwd?.path ?? "-")"
+        guard message["method"] as? String == "tools/call", let params = message["params"] as? [String: Any], let name = params["name"] as? String else { return mine }
+        let args = params["arguments"] as? [String: Any] ?? [:]
+        if let sim = args["sim"] as? String, !sim.isEmpty { return "sim:" + sim }
+        if AgentTools.driving.contains(name) || name == "close", let s = try? tools.sim(args) { return "sim:" + tools.id(s) }
+        // A launch waits for its app to start: beside other agents' launches, but one at a time for one target.
+        if name == "launch" { return "launch:" + ((args["apk"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? hint.cwd?.path ?? "-") }
+        return mine
+    }
     /// build and changes wait for minutes: they must not hold up the other tools' answers.
     private let slow = DispatchQueue(label: "greenroom-agent-slow-tools", attributes: .concurrent)
     private(set) var port: UInt16 = 0
@@ -123,9 +149,13 @@ final class AgentServer {
                 // agent has not been given goes back with it, and the harness carries on with the turn.
                 var say: String?
                 if params["answers"] as? Bool == true, HookSessions.kind(event.event) == .turnEnd,
-                   let s = self.tools.workbench?.sessions.session(containing: event.cwd),
-                   let given = WorkStore.shared.deliver(s.worktree.path, via: "turn end") {
-                    say = "The person at the Mac answered in Greenroom.\n" + WorkStore.words(given, paths: true).text
+                   let s = self.tools.workbench?.sessions.session(containing: event.cwd) {
+                    var parts: [String] = []
+                    if let notice = self.tools.takeNotice(s.worktree.path) { parts.append("From Greenroom: " + notice) }
+                    if let given = WorkStore.shared.deliver(s.worktree.path, via: "turn end") {
+                        parts.append("The person at the Mac answered in Greenroom.\n" + WorkStore.words(given, paths: true).text)
+                    }
+                    if !parts.isEmpty { say = parts.joined(separator: "\n") }
                 }
                 HookSessions.shared.heard(event, continues: say != nil)
                 self.tools.workbench?.agentChanged()
@@ -137,11 +167,16 @@ final class AgentServer {
         let hint = AgentServer.hint(headers)
         let isSlow = message["method"] as? String == "tools/call"
             && AgentTools.slow.contains(((message["params"] as? [String: Any])?["name"] as? String) ?? "")
-        (isSlow ? slow : work).async { [weak self] in
+        let run = { [weak self] in
             guard let self else { return }
             let who = message["method"] as? String == "tools/call" ? self.connect(hint) : self.note(hint)
             if let answer = self.dispatch(message, connection: who) { self.respond(connection, 200, json: answer) }
             else { self.respond(connection, 202, "") }   // a notification: nothing to answer
+        }
+        if isSlow { slow.async(execute: run); return }
+        router.async { [weak self] in
+            guard let self else { return }
+            self.lane(AgentServer.laneKey(message, hint: hint, tools: self.tools)).async(execute: run)
         }
     }
 

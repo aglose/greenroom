@@ -109,10 +109,16 @@ a harness without them.
 - **Paused.** The person can pause the agent in Greenroom. While paused every action is refused (`build`,
   `changes`, `launch`, `tap`, `type`, `set`...); only reading works, and `spec`, `review` and `feedback` (`session`, `simulators`, `screen`, `check`,
   `wait_for`, `compare`, `screenshot`, `logs`, `network`, `perf`, `sessions`, and the other tools when they only list or answer a status). Do not retry an action: tell the person that Greenroom's Agent button (✦) has the switch, and wait.
+- **Taken over.** The person can take one session's device (`The person at the Mac took over this session's
+  device`): your actions on it wait, reading still works, and so do `spec`, `review` and `feedback`. Do not retry in
+  a loop: the answer of your next call after they hand it back says so (`--- from Greenroom`).
 - **`remote` builds need the person's consent.** The `remote` recipe uploads source code to the person's own
   account, so it runs only after they allowed it for that repository in Greenroom. You cannot give that yes: if
   `build` says so, ask them to allow it in the app, or use another recipe.
 - **`ci`** fetches what CI already built for the commit and never starts a workflow. With no run, it says so.
+  After you push, Greenroom watches that commit's runs by itself: you need not hold a `build` call open. `session`
+  has a `ci:` line, and a block that begins `--- from Greenroom` tells you when CI built it (the session's simulator
+  then runs that build), passed, or failed, with the run's address.
 - **`changes` never builds the base.** For a base nothing has built it says what would build it; pass `base` as
   `session:BRANCH`, `pr:NUMBER`, a branch, tag or commit, or the full path of an `.apk`.
 - **Not a session.** `this folder is not a worktree of a repository added to Greenroom` comes with the reason in

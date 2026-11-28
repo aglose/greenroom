@@ -806,6 +806,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if !showingAgent { show(.agent) }
     }
 
+    /// Take Over, or Hand Back: the chosen session's device, from its agent to the person and back.
+    @objc func toggleTakeOver(_ sender: Any? = nil) { review.toggleTakeOver() }
+
     /// Whether the session panel is what the agent pane shows (for a check).
     var sessionPanelShown: Bool { showingAgent && !review.panelView.isHidden }
 
@@ -1759,6 +1762,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         add("pane.log", showingLog ? "Hide log" : "Show log", "Panes", "text.alignleft", "⇧⌘L", keywords: "logcat") { [weak self] in self?.toggleLog(nil) }
         add("pane.inspect", inspecting ? "Stop inspecting" : "Inspect the screen", "Panes", "cursorarrow.rays", "⌥⌘I", keywords: "nodes accessibility tree") { [weak self] in self?.toggleInspector(nil) }
         add("pane.agent", "Agent activity", "Panes", "sparkles", "⌥⌘A", keywords: "claude mcp") { [weak self] in self?.showAgent(nil) }
+        if let s = review.session {
+            add("session.take", review.isTaken(s) ? "Hand the device back to its agent" : "Take over this session's device", "Sessions", "hand.raised",
+                keywords: "pause agent drive take over hand back") { [weak self] in self?.toggleTakeOver(nil) }
+        }
         add("pane.session", "Review this session", "Panes", "checkmark.seal", "⇧⌘'", keywords: "spec criteria approve request changes comment pin merge review") { [weak self] in self?.showSession(nil) }
         add("snapshots.run", "Run screenshot tests…", "Panes", "photo.stack", keywords: "golden snapshot visual regression compare") { [weak self] in self?.showSnapshots(run: true) }
         add("snapshots.show", "Show screenshot test results", "Panes", "photo.stack", keywords: "golden snapshot visual regression review") { [weak self] in self?.showSnapshots() }

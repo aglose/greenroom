@@ -141,6 +141,7 @@ extension AgentTools {
             AppSetting(key: "usage_reports", about: "send usage counts (the owner's choice)", get: { Reports.shared.usage ? "on" : "off" }, set: nil),
             AppSetting(key: "claude_sessions", about: "read Claude Code's session titles (the owner's choice)", get: { ClaudeSessions.shared.enabled ? "on" : "off" }, set: nil),
             AppSetting(key: "t3_sessions", about: "read T3 Code's sessions (the owner's choice)", get: { T3Sessions.shared.enabled ? "on" : "off" }, set: nil),
+            AppSetting(key: "watch_ci", about: "watch CI for sessions whose commit is pushed, and fetch what it built (the owner's choice)", get: { CIWatch.enabled ? "on" : "off" }, set: nil),
             AppSetting(key: "agents_paused", about: "agents' actions are refused (the owner's switch in the Agent popover)", get: { self.paused || AgentCheckHooks.pausedByCheck ? "on" : "off" }, set: nil),
         ]
     }

@@ -238,7 +238,7 @@ The answers are built to be cheap to read:
 
 | Tool | |
 | --- | --- |
-| `app` | the version, the engine's, the state folder, what the person sees on the stage (the devices, waiting for an agent, the Connect screen, the APK screen), and every app setting with its value. `setting` and `value` change `sessions_warm`, `auto_archive`, `jobs_at_once`, `evidence_cap_gb`, `build_timeout_minutes`, `reopen_last`, `app_icon`, `update_checks`. `crash_reports`, `usage_reports`, `claude_sessions`, `t3_sessions` and `agents_paused` are answered and never set |
+| `app` | the version, the engine's, the state folder, what the person sees on the stage (the devices, waiting for an agent, the Connect screen, the APK screen), and every app setting with its value. `setting` and `value` change `sessions_warm`, `auto_archive`, `jobs_at_once`, `evidence_cap_gb`, `build_timeout_minutes`, `reopen_last`, `app_icon`, `update_checks`. `crash_reports`, `usage_reports`, `claude_sessions`, `t3_sessions`, `watch_ci` and `agents_paused` are answered and never set |
 | `workspace` | a repository's settings (default: the connection's; `repo` names another by folder name or path, so an agent outside every worktree can use it). Settable: `base_ref`, `module`, `variant`, `default_recipe`, `auto`, `walk_with_data`, `quick_walk`, `keep_main`, `unsigned_baseline`, `skip_local_apk_scan`, `disable_local_builds`, `ci_workflow`, `ci_artifact`, `ci_apk`. The skin and options are `launch_settings` |
 | `sessions` | every repository with its sessions (branch, title, build and whether it is stale, simulator, pull request, the walk of its newest build, and where the sidebar files it when that is not Quiet: `ready for review: 5 of 5 checks passed`, `needs you: Codex is waiting for you`, `working: …`), its main build and the pull requests Greenroom holds |
 | `session_action` | by `session` (a branch, title or worktree path; default the connection's): `open`, `close`, `build` (queued, not waited for), `cancel_build`, `walk`, `stop_walk`, `show`, `hide`; and `add_repository` with `path` |
@@ -391,6 +391,25 @@ From a worktree of a repository added to Greenroom, with the agent started in th
 - All three work only for a connection tied to a session; from any other folder they answer `this folder is not a
   worktree of a repository added to Greenroom`, and why it was not added.
 
+**CI is watched for a pushed commit.** For a session on a branch whose head is what its upstream has, Greenroom
+asks GitHub for that commit's runs by itself (`gh run list --commit`, the person's sign-in; every half minute
+while a run goes). While one goes the session is Working and its loop strip reads `CI run 4812 · 3 min`; `session`
+has a `ci:` line. When the runs pass, a repository that builds its APKs on CI (its default recipe is `ci`, an
+artifact or a workflow is set for it, or a CI build of it was fetched before) has the APK fetched by the `ci`
+recipe through the ordinary queue, and the session's simulator reloads on it; nothing is fetched for a worktree
+with uncommitted changes or one that already has a build of that commit. The agent is told how it ended, once:
+`CI built a1b2c3d: Greenroom fetched its APK ...`, `CI passed for a1b2c3d.`, or `CI failed for a1b2c3d: run 4812
+(Build) ended in failure. <the run's address>`. It reaches the agent as what the person says does: on its next
+call's answer (a block that begins `--- from Greenroom`) or with its turn's end. So an agent that pushes can go
+on working, or end its turn, instead of holding a `build` call open. The watch only reads: it never starts a
+workflow, and the recipe it runs is told not to. The person can turn it off (Settings > Agents; `app` answers
+`watch_ci`).
+
+**Calls on different simulators run at the same time.** Each simulator has a lane of its own, each `launch` waits
+in its target's, and an agent's other calls run in that agent's: an agent waiting in `wait_for` or `launch` does
+not hold up another agent's device. Two calls on one simulator still take turns, in the order they arrived.
+`build`, `changes`, `review`, `tests`, `snapshots` and `replay` wait beside everything, as before.
+
 ## The agent's session is recorded
 
 While an agent drives a session's simulator, Greenroom records its screen: the first action starts
@@ -454,6 +473,14 @@ reason, never the value. The agent's view is unchanged: names only, output maske
   agents are recorded, sharing maps through git, custom recipes and the PR fetch script (programs Greenroom runs).
   `app` and `workspace` answer them and refuse to set them.
 - Read a variable, or run a script the owner has not allowed as it is now: see "Signing in: scripts".
+- Act on a session's device while the person has it. **Take Over** (the session's loop strip, the Window menu, ⌘K)
+  is the pause for one session: that session's agent's actions are refused with `The person at the Mac took over
+  this session's device ...`, whichever agent calls and whether the call names the simulator or not, while reading
+  (`screen`, `check`, `screenshot`, `logs`...), `spec`, `review` and `feedback` still answer, and every other
+  session's agent goes on. `session` has a `device:` line meanwhile, and the session is filed under Needs you so
+  the person does not forget it. After **Hand Back** an agent that was refused is told with its next call's answer:
+  `--- from Greenroom` / `The person handed the device back: you can act on it again.`
+- Approve its own work or merge: see "Spec, review, and what the person says".
 
 ## Who can reach it
 

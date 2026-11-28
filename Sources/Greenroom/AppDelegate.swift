@@ -770,6 +770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.addItem(.separator())
         win.addItem(to(workbench: #selector(Workbench.nextNeedingYou(_:)), "Next Session That Needs You", "'"))
         win.addItem(to(workbench: #selector(Workbench.showSession(_:)), "Review This Session", "'", [.command, .shift]))
+        win.addItem(to(workbench: #selector(Workbench.toggleTakeOver(_:)), "Take Over This Session's Device", ""))
         win.addItem(to(workbench: #selector(Workbench.toggleGroupByRepository(_:)), "Group Sessions by Repository", ""))
 
         let help = NSMenu(title: "Help")
@@ -796,6 +797,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.title = Recorder.isRecording(workbench.selected) ? "Stop Recording Screen" : "Record Screen"
         }
         if item.representedObject as? String == "toggleGroupByRepository:" { item.state = workbench.sessions.groupByRepository ? .on : .off }
+        if item.representedObject as? String == "toggleTakeOver:" {
+            guard let s = workbench.review.session else { item.title = "Take Over This Session's Device"; return false }
+            item.title = workbench.review.isTaken(s) ? "Hand This Session's Device Back" : "Take Over This Session's Device"
+        }
         return true
     }
 

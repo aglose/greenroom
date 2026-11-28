@@ -73,6 +73,8 @@ struct AttentionFacts: Equatable {
     /// The checks that ran on that build since the person last dealt with it.
     var passed = 0
     var failed = 0
+    /// The person took this session's device over, and has not handed it back.
+    var taken = false
 }
 
 /// Where a session is filed, and the few words its card says about it.
@@ -100,6 +102,7 @@ struct AttentionState: Equatable {
         if f.signIn { return AttentionState(group: .needs, line: "Needs a sign-in", tone: .warn) }
         if f.asked == "remote" { return AttentionState(group: .needs, line: "A remote build needs your yes", tone: .warn) }
         if f.paused { return AttentionState(group: .needs, line: "Agents are paused", tone: .warn) }
+        if f.taken { return AttentionState(group: .needs, line: "You have the device: hand it back", tone: .warn) }
         if let detail = f.building { return AttentionState(group: .working, line: detail, tone: .go) }
         if let who = f.working { return AttentionState(group: .working, line: "\(who) is working", tone: .go) }
         if f.calls { return AttentionState(group: .working, line: "An agent is driving", tone: .go) }
@@ -174,12 +177,15 @@ extension SessionsController {
             f.building = job.state == .queued ? "Waiting to build with \(job.recipeName)" : "Building with \(job.recipeName)"
             f.asked = nil   // a build is under way: what was asked for was given, or is no longer wanted
         }
+        // CI is building the commit it pushed (CIWatch): work under way, though nothing runs on this Mac.
+        if f.building == nil, let e = ciWatch.entry(for: path), e.sha == s.head, e.active { f.building = CIWatch.line(e, now: CIWatch.now()) }
         // Being driven: a call that acts on a simulator, in the last minute, and since the turn's end if one was
         // heard (a harness with hooks says when it stops; one without is driven until its calls stop arriving).
         if let last = workbench?.agentActivity.entries(session: path, all: false).last(where: { AgentTools.driving.contains($0.tool) || $0.tool == "launch" }) {
             f.calls = last.time > (work.turnEnded ?? .distantPast) && now.timeIntervalSince(last.time) < Self.callsWindow
         }
         f.paused = (workbench?.agentTools?.paused ?? false) && (f.working != nil || f.calls)
+        f.taken = workbench?.agentTools?.takenSince(path) != nil
         let settled = work.settled ?? .distantPast
         f.turnEnded = work.turnEnded.map { $0 > settled } ?? false
         f.buildCurrent = buildIsCurrent(s)
@@ -220,6 +226,10 @@ extension SessionsController {
             steps[2] = LoopStep(name: "Build", state: .failed, detail: "\(job.recipeName) failed")
         } else if f.asked == "remote" {
             steps[2] = LoopStep(name: "Build", state: .waiting, detail: "needs your yes")
+        } else if let e = ciWatch.entry(for: s.worktree.path), e.sha == s.head, e.active, let line = CIWatch.line(e, now: CIWatch.now()) {
+            steps[2] = LoopStep(name: "Build", state: .going, detail: line)
+        } else if let e = ciWatch.entry(for: s.worktree.path), e.sha == s.head, e.failed != nil, build?.sha != e.sha, let line = CIWatch.line(e, now: CIWatch.now()) {
+            steps[2] = LoopStep(name: "Build", state: .failed, detail: line)
         } else if build != nil || s.outputs != nil {
             let source = build.map { $0.source.rawValue } ?? "local"
             steps[2] = LoopStep(name: "Build", state: f.buildCurrent ? .done : .waiting, detail: f.buildCurrent ? source : "\(source) · stale")

@@ -197,12 +197,16 @@ extension AgentTools {
     /// and marked as given. Nil: nothing.
     func handOver(_ connection: Connection) -> [[String: Any]]? {
         guard let s = connection.session else { return nil }
-        guard let given = mainSync({ WorkStore.shared.deliver(s.worktree.path, via: "tool answer") }) else { return nil }
-        var blocks = Self.blocks(given)
-        if let first = blocks.first?["text"] as? String {
-            blocks[0] = ["type": "text", "text": "--- from the person at the Mac, in Greenroom\n" + first]
+        var out: [[String: Any]] = []
+        if let notice = takeNotice(s.worktree.path) { out.append(["type": "text", "text": "--- from Greenroom\n" + notice]) }
+        if let given = mainSync({ WorkStore.shared.deliver(s.worktree.path, via: "tool answer") }) {
+            var blocks = Self.blocks(given)
+            if let first = blocks.first?["text"] as? String {
+                blocks[0] = ["type": "text", "text": "--- from the person at the Mac, in Greenroom\n" + first]
+            }
+            out += blocks
         }
-        return blocks
+        return out.isEmpty ? nil : out
     }
 
     /// The lines `session` adds about the spec and the review.
@@ -215,6 +219,10 @@ extension AgentTools {
                 lines.append("spec: \(ScreenNode.quote(spec.title))" + (n == 0 ? ", no criteria" : ", \(p) of \(n) criteria passed" + (f > 0 ? ", \(f) failed" : "")))
             } else {
                 lines.append("spec: none (spec says what this session is for; the person sees it)")
+            }
+            if let ci = self.workbench?.sessions.ciWatch.said(for: s.worktree.path) { lines.append(ci) }
+            if let since = self.takenSince(s.worktree.path) {
+                lines.append("device: the person took it over \(self.age(since)): your actions on it wait until they hand it back")
             }
             if let r = w.review {
                 switch r.answer {

@@ -68,6 +68,13 @@ final class SessionsController {
 
     /// The session the person last went to, by its worktree's path (a row clicked, ⌘n, ⌘'): it may have no simulator.
     var focus: String?
+    /// CI runs of pushed sessions, watched without being asked (CIWatch.swift).
+    private(set) lazy var ciWatch: CIWatch = {
+        let w = CIWatch(sessions: self)
+        w.onChange = { [weak self] in self?.noteAttention(); self?.onChange?() }
+        w.tell = { [weak self] path, text in self?.workbench?.agentTools?.addNotice(path, text) }
+        return w
+    }()
     /// The group each shown session is in and since when (Attention.swift), to order the rows and to tell news.
     var entered: [String: (group: Attention, since: Date)] = [:]
     var attentionSeen = false
@@ -95,6 +102,7 @@ final class SessionsController {
         WorkStore.shared.onChange = { [weak self] in self?.noteAttention(); self?.onChange?() }   // a group is entered when its cause happens, not when the rows are next drawn
         Notifier.start()
         startAttentionClock()
+        ciWatch.start()
         if workspaces.contains(where: { !$0.skin.isEmpty }) { LaunchSettings.loadSkins() }   // each skin's device, for launches
         DevHooks.shared.owns = { [weak self] sim in self?.session(forSimulator: sim) != nil }   // reloaded here, once
         evidence.controller = self
@@ -189,6 +197,7 @@ final class SessionsController {
         self.store = store
         evidence.store = store
         WorkStore.shared.use(root: store.root)
+        ciWatch.reset()
         entered = [:]
         attentionSeen = false
         workspaces = store.loadWorkspaces()

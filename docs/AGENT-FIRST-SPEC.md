@@ -1,10 +1,11 @@
 # Greenroom, agent-first: the spec
 
-A spec (2026-11-27). The owner's decisions are at the end. **A1 to A6 are built**: A1 in `AgentAdoption.swift`,
+A spec (2026-11-27). The owner's decisions are at the end. **A1 to A8 are built**: A1 in `AgentAdoption.swift`,
 `WaitingStage.swift` and the APK screen in `EmptyStage.swift`; A2 in `Harnesses.swift`, `ClaudeConnect.swift` and
 `ConnectScreen.swift`; A3 in `CLI.swift`, `Links.swift`, `Skills.swift` and `plugin/bin/greenroom`; A4 in
 `Hooks.swift` and `HookSessions.swift`; A5 in `Attention.swift`, `AttentionUI.swift` and `Work.swift`; A6 in `AgentReviewTools.swift`, `Review.swift`,
-`SessionPanel.swift` and `Merge.swift` (checked by `--connect-check`, `--waiting-check`, `--attention-check`,
+`SessionPanel.swift` and `Merge.swift`; A7 in `AgentTools.swift` (a device taken over) and `AgentServer.swift`
+(the lanes); A8 in `CIWatch.swift` (checked by `--connect-check`, `--waiting-check`, `--attention-check`,
 `--review-check`, `mcp-check.py` and `plugin-check.py`). What a step left
 for later steps is said where it applies. The rest is not built. It changes what Greenroom is for, what a new user sees first, and how the
 window is arranged. The engine, the simulators, the tools in [AGENTS-INTERFACE.md](AGENTS-INTERFACE.md) and the
@@ -325,6 +326,28 @@ agent's actions for this session only (today's pause is all agents at once) unti
 - **The loop strip** shows over the stage when the chosen simulator is the chosen session's: the six steps with
   their line of detail and a button (Review, or Session) that opens the panel. Its steps do not open their own
   detail yet.
+
+**As A7 built it.** Take Over is in the loop strip, which is over the device, not in a line under it: the strip
+reads "Codex is driving" while calls arrive, with **Take Over** beside it, and "You have the device" with **Hand
+Back** after. It is also in the Window menu and ⌘K. It is the old pause for one session: that session's actions
+are refused (builds included, so nothing reloads the device under the person's hands), reading and `spec`,
+`review`, `feedback` still answer, every other session goes on, and the session is filed under Needs you until the
+device is handed back. An agent that was refused is told when it is. The device's ring and pointer are as before.
+Which session a call belongs to is the session of the simulator it acts on, else the caller's, so another agent
+cannot drive a device the person took. It is kept in memory: after a restart every device is the agents' again.
+Calls no longer queue behind each other across agents: a lane per simulator, per launch target and per agent
+(`AgentServer.laneKey`).
+
+**As A8 built it** (`CIWatch.swift`). A session on a branch whose head is what its upstream has is asked about
+without being asked: `gh run list --commit`, every 30 s while a run goes, every minute for half an hour while
+none shows, never again once the runs are over. A run going makes the session Working ("CI run 4812 · 3 min", also
+the strip's Build step); a failed one marks the Build step failed. When they pass, the `ci` recipe fetches the APK
+with `GREENROOM_CI_DISPATCH=0`, but only for a repository known to build its APKs on CI (default recipe `ci`, an
+artifact or workflow set, or a CI build fetched before), a clean worktree, and a commit the session has no build
+of: most repositories' runs are linters and tests, and a failed fetch for each push would be noise. The agent is
+told how it ended with its next call's answer or its turn's end; a `build` call with the `ci` recipe still waits
+for the run itself, as before. MCP Tasks are not used. The switch is Settings > Agents > Watch CI for pushed
+sessions, on by default.
 
 Changes, Screen Map, Jobs, Log, Network and the Device drawer are where they are.
 

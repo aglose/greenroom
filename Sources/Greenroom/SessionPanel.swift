@@ -358,6 +358,17 @@ struct LoopStripView: View {
                 .layoutPriority(step.detail.isEmpty ? 1 : 0)
             }
             Spacer(minLength: 8)
+            if !model.driver.isEmpty {
+                Text(model.driver).font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(model.take == "Hand Back" ? SettingsTheme.warning : SettingsTheme.ink).lineLimit(1).padding(.trailing, 8)
+            }
+            if !model.take.isEmpty {
+                Button(model.take) { model.onTake?() }
+                    .buttonStyle(PanelButton())
+                    .help(model.take == "Hand Back" ? "Let this session's agent act on the device again"
+                                                    : "Take this session's device: its agent waits, the other sessions' agents go on")
+                    .padding(.trailing, 6)
+            }
             Button(model.action) { model.onOpen?() }
                 .buttonStyle(PanelButton(kind: model.action == "Review" ? .primary : .plain))
                 .help("What this session set out to do, what was checked, and your answer")

@@ -222,7 +222,7 @@ cp "{built_apk}" "$GREENROOM_OUT"
             session_tools(a, b, away, trees, repo2, state_dir, root, recipe, built_apk, base_apk, key_of, apk, slot, wait, expect, Shim, up)
         more_tools(a, away, trees, state_dir, apk, expect)
         command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait)
-        review_loop(exe, env, a, trees, other, state_dir, expect, wait, Shim)
+        review_loop(exe, env, a, b, trees, other, state_dir, expect, wait, Shim)
         adoption(repo3, repo4, state_dir, Shim, expect)
     finally:
         for s in shims:
@@ -474,7 +474,7 @@ def command_line(exe, env, a, trees, other, root, state_dir, apk, expect, wait):
         a.call("close", sim=started.group(1))
 
 
-def review_loop(exe, env, a, trees, other, state_dir, expect, wait, Shim):
+def review_loop(exe, env, a, b, trees, other, state_dir, expect, wait, Shim):
     """The loop's two ends (A6): spec says what a session is for, check ticks its criteria, review waits for the
     person's answer, and what the person says reaches the agent: with the review's answer, on the next tool's answer,
     by feedback, and when a turn ends (the hook's answer, in each harness's own form). The person is played through
@@ -624,6 +624,53 @@ def review_loop(exe, env, a, trees, other, state_dir, expect, wait, Shim):
         os.remove(state_dir + "/agent-paused-check")
     hits = subprocess.run(["grep", "-rl", "Make the counter bold", state_dir], capture_output=True, text=True).stdout.strip().split("\n")
     expect("what the person wrote is kept in the session's work file only", all("/work/" in h for h in hits) and hits != [""], str(hits))
+    # Take Over (A7): one session's device is the person's, its agent waits, the other session's agent goes on.
+    mb = re.search(r"simulator: (s\d+) running", b.call("session")[0])
+    sim_b = mb.group(1) if mb else None
+    if sim_b is None:
+        t, _ = b.call("launch")
+        mb = re.match(r"(s\d+)", t)
+        sim_b = mb.group(1) if mb else "s2"
+    expect("the person takes feat-a's device over", person(take=True) == "ok", "")
+    t, err = a.call("tap", sim=sim, text="Add")
+    expect("its agent's action is refused, and told why", err and "took over this session's device" in t and "Reading still works" in t, t)
+    t, err = a.call("screen", sim=sim)
+    expect("... reading still answers", not err and "FAB clicks" in t, t[:200])
+    t, err = a.call("build", timeout_s=10)
+    expect("... a build of that session waits too", err and "took over" in t, t)
+    t, err = b.call("tap", sim=sim_b, text="Add")
+    expect("the other session's agent goes on", not err and "FAB clicks" in t, t[:200])
+    t, err = b.call("tap", sim=sim, text="Add")
+    expect("... but not on the device that was taken over", err and "took over" in t, t)
+    expect("session says who has the device", session_line("device: ").startswith("device: the person took it over"), a.call("session")[0])
+    expect("... and the session needs the person, to hand it back", wait(lambda: filed() == "needs you: You have the device: hand it back", 10), filed())
+    expect("the person hands it back", person(take=False) == "ok", "")
+    t, err = a.call("tap", sim=sim, text="Add")
+    expect("the agent acts again, and its answer says the device was handed back", not err and "FAB clicks" in t and t.rstrip().endswith("--- from Greenroom\nThe person handed the device back: you can act on it again."), t[-300:])
+    t, err = a.call("screen", sim=sim)
+    expect("... once", not err and "handed the device back" not in t and session_line("device: ") == "", t[-200:])
+    # A lane a simulator: an agent waiting on its device does not hold up another's; two calls on one device still take turns.
+    slow = {}
+    def waits(shim, key, which):
+        started = time.time()
+        shim.call("wait_for", sim=which, text="Never on this screen", timeout_ms=6000)
+        slow[key] = time.time() - started
+    th = threading.Thread(target=waits, args=(b, "b", sim_b))
+    th.start()
+    time.sleep(0.5)
+    started = time.time()
+    t, err = a.call("screen", sim=sim)
+    quick = time.time() - started
+    th.join(30)
+    expect("while one agent waits on its simulator, another's call on its own answers at once", not err and quick < 3 and slow.get("b", 0) > 5, f"{quick:.1f} s beside a wait of {slow.get('b', 0):.1f} s")
+    th = threading.Thread(target=waits, args=(a2, "a", sim))
+    th.start()
+    time.sleep(0.5)
+    started = time.time()
+    t, err = a.call("screen", sim=sim)
+    behind = time.time() - started
+    th.join(30)
+    expect("two calls on one simulator take turns", not err and behind > 3, f"{behind:.1f} s behind a wait of {slow.get('a', 0):.1f} s")
 
 
 def more_tools(a, away, trees, state_dir, apk, expect):

@@ -101,7 +101,10 @@ session, over the connection it already has, and nowhere else: with the answer t
 its next tool call's answer, or, where its harness's hook can carry it, when its turn ends (then the hook Greenroom
 installed prints your words for the harness to continue with). Removing the session removes the file and the
 pictures. Merge runs `gh pr merge` as the GitHub account you signed `gh` in with, only when you press it and say
-yes. If you say yes (first run's last step, or Settings >
+yes. For a session whose commit is pushed, Greenroom asks GitHub for that commit's CI runs through `gh` (`gh run
+list --commit`, your sign-in, every half minute while a run goes and for half an hour at most while none shows),
+and for a repository that builds its APKs on CI it fetches the APK as the `ci` recipe does. It only reads, and
+never starts a workflow. Settings > Agents > "Watch CI for pushed sessions" turns it off. If you say yes (first run's last step, or Settings >
 Agents), Greenroom posts a notification on this Mac when a session becomes ready for review or comes to need you
 while Greenroom is not in front: its text is the session's title, the count of its checks and the repository's
 name. It is macOS's own notification, off until you turn it on, and nothing about it leaves this Mac.

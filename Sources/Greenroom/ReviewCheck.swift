@@ -6,8 +6,10 @@ import AppKit
 /// criteria, a review asked for and answered, comments given once, all read back from disk), then a temporary
 /// repository with two worktrees in the window: the session panel on the chosen session in each state, Approve and
 /// Request Changes through the panel's own functions, Mark as Reviewed taking a request back, and Merge with a
-/// stand-in `gh` on the PATH (what it is asked, what it is told to do, a refusal said in its own words). No engine
-/// is started and no real `gh` is run. The agent's side, a comment pinned to a node and the hooks' answers are
+/// stand-in `gh` on the PATH (what it is asked, what it is told to do, a refusal said in its own words). Then what
+/// A7 and A8 added that needs no simulator: the lane a call runs in and a device taken over, and CI watched for a
+/// pushed commit (asked of the stand-in `gh`, shown in the loop, fetched by a stand-in `ci` recipe told to start no
+/// workflow, told to the agent once). No engine is started and no real `gh` is run. The agent's side, a comment pinned to a node and the hooks' answers are
 /// checked on real simulators by scripts/mcp-check.py --sessions. A picture is written to DIR (review.png).
 /// One `[greenroom] review: ok|FAIL ...` line per step, then `review check: PASS|FAIL`; exits 0 or 1.
 enum ReviewCheck {
@@ -73,6 +75,22 @@ enum ReviewCheck {
             answered.answer = .approved
             expect(WorkStore.words((answered, [])).text == "approved", "an approval is one word")
 
+            // Taking one session's device over, and the lanes calls run in.
+            expect(AttentionState.judge(AttentionFacts(working: "Codex", taken: true)) == AttentionState(group: .needs, line: "You have the device: hand it back", tone: .warn),
+                   "a session whose device the person took over needs them, to hand it back")
+            let tools = AgentTools()
+            tools.takeOver("/x/wt")
+            expect(tools.takenSince("/x/wt") != nil && tools.takenSince("/x/other") == nil, "taking over is one session's, not every agent's")
+            tools.handBack("/x/wt")
+            expect(tools.takenSince("/x/wt") == nil && tools.takeNotice("/x/wt") == nil, "handing back an agent that was never refused tells it nothing")
+            func lane(_ name: String?, _ args: [String: Any] = [:], cwd: String = "/x/wt", parent: Int32 = 7) -> String {
+                let m: [String: Any] = name.map { ["method": "tools/call", "params": ["name": $0, "arguments": args]] } ?? ["method": "tools/list"]
+                return AgentServer.laneKey(m, hint: (URL(fileURLWithPath: cwd), parent), tools: tools)
+            }
+            expect(lane("tap", ["sim": "s3", "text": "Add"]) == "sim:s3" && lane("screen", ["sim": "s4"]) == "sim:s4", "calls on a simulator run in that simulator's lane, one at a time")
+            expect(lane("session") == "agent:7|/x/wt" && lane(nil) == "agent:7|/x/wt" && lane("session", cwd: "/x/other", parent: 9) == "agent:9|/x/other", "an agent's other calls run in its own lane, beside other agents'")
+            expect(lane("launch") == "launch:/x/wt" && lane("launch", ["apk": "/y/app.apk"]) == "launch:/y/app.apk", "a launch waits in a lane of its own target")
+
             // MARK: First run is left
 
             await settle()
@@ -116,6 +134,7 @@ enum ReviewCheck {
             #!/bin/sh
             echo "$*" >> "\(ghLog.path)"
             case "$1 $2" in
+              "run list") if [ -f "\(base.path)/runs-$4.json" ]; then cat "\(base.path)/runs-$4.json"; else echo "[]"; fi ;;
               "pr view") if [ -f "\(prFile.path)" ]; then cat "\(prFile.path)"; else echo "no pull requests found for branch" >&2; exit 1; fi ;;
               "repo view") echo '{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":false,"viewerDefaultMergeMethod":"SQUASH"}' ;;
               "pr merge") if [ -f "\(refuse.path)" ]; then echo "X Pull request is not mergeable: the base branch policy prohibits the merge." >&2; exit 1; fi
@@ -306,6 +325,105 @@ enum ReviewCheck {
             await settle()
             expect(question.contains("1 of 1 check failed on GitHub.") && question.contains("You have not approved this commit in Greenroom."), "what is not right is said before the person says yes: \(question)")
             expect(!AgentTools.tools.contains { $0.name.contains("merge") || $0.name == "approve" }, "no tool of the agent interface merges or approves")
+
+            // MARK: CI, watched for a pushed session (A8)
+
+            let run1 = CIWatch.Run(id: 4812, status: "in_progress", conclusion: "", workflow: "Build", url: nil, created: clock.addingTimeInterval(-200))
+            let done = CIWatch.Run(id: 4811, status: "completed", conclusion: "success", workflow: "Lint", url: nil, created: clock.addingTimeInterval(-200))
+            let bad = CIWatch.Run(id: 9, status: "completed", conclusion: "failure", workflow: "Build", url: nil, created: nil)
+            expect(CIWatch.line(CIWatch.Entry(sha: "a", runs: [run1], first: clock), now: clock) == "CI run 4812 · 3 min"
+                   && CIWatch.line(CIWatch.Entry(sha: "a", runs: [run1, done], first: clock), now: clock) == "CI · 1 of 2 runs done · 3 min"
+                   && CIWatch.line(CIWatch.Entry(sha: "a", runs: [bad, done], first: clock), now: clock) == "CI run 9 failed"
+                   && CIWatch.line(CIWatch.Entry(sha: "a", runs: [done], first: clock), now: clock) == nil, "a commit's runs in a line: going, several, failed, and nothing to say once passed")
+            let listed = CIWatch.parse(#"[{"databaseId":1,"status":"completed","conclusion":"success","workflowName":"Build APK","headSha":"aaa","url":"u","createdAt":"2026-11-27T10:00:00Z"},{"databaseId":2,"status":"queued","conclusion":"","workflowName":"Lint","headSha":"aaa"},{"databaseId":3,"status":"completed","conclusion":"failure","workflowName":"Lint","headSha":"bbb"}]"#, sha: "aaa")
+            expect(listed.map(\.id) == [1, 2] && listed[0].created != nil && CIWatch.counted(listed, workflow: "build-apk.yml").count == 2 && CIWatch.counted(listed, workflow: ".github/workflows/lint.yml").map(\.id) == [2],
+                   "only the commit's own runs count, and the set workflow's when it has some")
+
+            let watch = sessions.ciWatch
+            CIWatch.now = { clock }
+            func upstream(_ s: Session) -> Bool {
+                guard let branch = s.branch else { return false }
+                return git(["update-ref", "refs/remotes/origin/" + branch, "HEAD"], in: s.worktree)
+                    && git(["config", "branch.\(branch).remote", "origin"], in: s.worktree) && git(["config", "branch.\(branch).merge", "refs/heads/" + branch], in: s.worktree)
+            }
+            func runs(_ sha: String, _ status: String, _ conclusion: String, id: Int) {
+                let json = #"[{"databaseId":\#(id),"status":"\#(status)","conclusion":"\#(conclusion)","workflowName":"Build","headSha":"\#(sha)","url":"https://github.com/example/homesafe/actions/runs/\#(id)","createdAt":"2026-11-27T10:00:00Z"}]"#
+                try? json.write(to: base.appendingPathComponent("runs-\(sha).json"), atomically: true, encoding: .utf8)
+            }
+            func listings() -> Int { asked().filter { $0.hasPrefix("run list") }.count }
+            func tick() async { watch.tick(); _ = await wait("GitHub's answer") { !watch.busy }; await settle(0.2) }
+            // A commit nobody pushed is not asked about.
+            await tick()
+            expect(listings() == 0 && watch.entry(for: tripPath) == nil, "a session whose commit is not pushed is not asked about")
+            // A new commit, pushed, with a run going.
+            guard git(["commit", "-q", "--allow-empty", "-m", "nights"], in: trip.worktree), upstream(trip) else { expect(false, "could not commit and push in the worktree"); finish() }
+            sessions.refresh(supersede: true)
+            _ = await wait("the new commit") { row("trip-rename")?.head != trip.head && row("trip-rename")?.ahead == 0 }
+            guard let trip2 = row("trip-rename") else { finish() }
+            runs(trip2.head, "in_progress", "", id: 4812)
+            await tick()
+            expect(watch.entry(for: tripPath)?.active == true && listings() == 1, "a pushed commit's runs are asked of GitHub, unasked: \(watch.entry(for: tripPath)?.runs.map(\.status) ?? [])")
+            let building = sessions.attention(of: trip2)
+            expect(building.group == .working && building.line.hasPrefix("CI run 4812"), "while CI builds it the session is working, and says so: \(building.line)")
+            expect(sessions.loop(for: trip2)[2].state == .going && sessions.loop(for: trip2)[2].detail.hasPrefix("CI run 4812"), "the loop's Build step shows the run: \(sessions.loop(for: trip2)[2].detail)")
+            await tick()
+            expect(listings() == 1, "GitHub is not asked again within half a minute")
+            clock = clock.addingTimeInterval(31)
+            await tick()
+            expect(listings() == 2, "... and is after it")
+            // It passes. A repository not known to build its APK on CI: nothing is fetched, and the agent is told.
+            runs(trip2.head, "completed", "success", id: 4812)
+            clock = clock.addingTimeInterval(31)
+            await tick()
+            expect(watch.entry(for: tripPath)?.passed == true && sessions.buildQueue.job(for: trip2) == nil, "runs that passed in a repository that builds nothing on CI fetch nothing")
+            expect(wb.agentTools?.takeNotice(tripPath) == "CI passed for \(trip2.head.prefix(7)).", "the agent is told it passed")
+            clock = clock.addingTimeInterval(120)
+            await tick()
+            expect(listings() == 3 && wb.agentTools?.takeNotice(tripPath) == nil, "a commit whose runs are over is not asked about again, and nothing is told twice")
+            // A repository that builds on CI (an artifact is named for it): the APK is fetched, by the ci recipe, told to start nothing.
+            let envFile = base.appendingPathComponent("recipe-env.txt"), fake = base.appendingPathComponent("ci.apk")
+            try? Data("not an apk, for a check: \(UUID().uuidString)".utf8).write(to: fake)
+            let recipe = base.appendingPathComponent("ci-recipe.sh")
+            try? "#!/bin/sh\nenv | grep '^GREENROOM_' | sort > \"\(envFile.path)\"\ncp \"\(fake.path)\" \"$GREENROOM_OUT\"\n".write(to: recipe, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: recipe.path)
+            if let i = sessions.workspaces.firstIndex(where: { $0.root.path == repo.path }) {
+                sessions.workspaces[i].recipes["ci"] = Recipe(executable: recipe.path)
+                sessions.workspaces[i].ci.artifact = "app-debug"
+            }
+            guard git(["commit", "-q", "--allow-empty", "-m", "more"], in: trip.worktree), upstream(trip) else { expect(false, "could not commit again"); finish() }
+            sessions.refresh(supersede: true)
+            _ = await wait("the newer commit") { row("trip-rename")?.head != trip2.head && row("trip-rename")?.ahead == 0 }
+            guard let trip3 = row("trip-rename") else { finish() }
+            runs(trip3.head, "completed", "success", id: 4900)
+            await tick()
+            _ = await wait("CI's build", 60) { row("trip-rename").flatMap { sessions.currentBuild(of: $0) }.map { $0.source == .ci && $0.sha == trip3.head } ?? false }
+            let fetched = row("trip-rename").flatMap { sessions.currentBuild(of: $0) }
+            expect(fetched?.source == .ci && fetched?.sha == trip3.head, "when the runs pass, the APK is fetched and becomes the session's build: \(fetched.map { "\($0.source.rawValue) \($0.sha?.prefix(7) ?? "-")" } ?? "none")")
+            let env = (try? String(contentsOf: envFile, encoding: .utf8)) ?? ""
+            expect(env.contains("GREENROOM_CI_DISPATCH=0") && env.contains("GREENROOM_SHA=\(trip3.head)") && !asked().contains { $0.hasPrefix("workflow") },
+                   "the recipe is told to start no workflow, and none was started")
+            await tick()
+            expect(wb.agentTools?.takeNotice(tripPath) == "CI built \(trip3.head.prefix(7)): Greenroom fetched its APK (build \(fetched?.key ?? "-")), and the session's simulator runs it.", "the agent is told its build is there")
+            // A run that fails: said once, with where to read it.
+            guard upstream(total) else { expect(false, "could not push the other worktree"); finish() }
+            guard git(["commit", "-q", "--allow-empty", "-m", "round"], in: total.worktree), upstream(total) else { expect(false, "could not commit in the other worktree"); finish() }
+            sessions.refresh(supersede: true)
+            _ = await wait("total's commit") { row("total-rounding")?.head != total.head && row("total-rounding")?.ahead == 0 }
+            guard let total2 = row("total-rounding") else { finish() }
+            runs(total2.head, "completed", "failure", id: 77)
+            await tick()
+            let failedLine = "CI failed for \(total2.head.prefix(7)): run 77 (Build) ended in failure. https://github.com/example/homesafe/actions/runs/77"
+            expect(wb.agentTools?.takeNotice(totalPath) == failedLine, "a failed run is told to the agent, with where to read it")
+            expect(sessions.loop(for: total2)[2].state == .failed && sessions.loop(for: total2)[2].detail == "CI run 77 failed" && watch.said(for: totalPath)?.hasPrefix("ci: run 77 (Build) failed") == true,
+                   "and the loop's Build step says it failed: \(sessions.loop(for: total2)[2].detail)")
+            await tick()
+            expect(wb.agentTools?.takeNotice(totalPath) == nil, "... once")
+            // The person's switch.
+            CIWatch.enabled = false
+            await tick()
+            expect(watch.entry(for: tripPath) == nil && watch.entry(for: totalPath) == nil, "with the switch off nothing is watched")
+            CIWatch.enabled = true
+            CIWatch.now = { Date() }
 
             Merger.answerForCheck = nil
             LoginEnvironment.override = nil

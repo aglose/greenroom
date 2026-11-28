@@ -11,8 +11,12 @@ final class AgentTools {
     }
     /// The recording of an agent's session on a session's simulator (AgentRecording.swift).
     let recording = AgentRecording()
-    /// The simulator the tool being run acts on (set while it runs; tools run one at a time).
-    var currentSim: Simulator?
+    /// The simulator the tool being run acts on, set while it runs. Calls on different simulators run at the same
+    /// time (AgentServer's lanes), each on a thread of its own, so it is kept with the thread.
+    var currentSim: Simulator? {
+        get { Thread.current.threadDictionary["greenroom.currentSim"] as? Simulator }
+        set { Thread.current.threadDictionary["greenroom.currentSim"] = newValue }
+    }
     /// The folder of the newest `changes` answer of each session (by worktree path), for `screenshot`'s `screen`.
     var lastChanges: [String: ChangeSet] = [:]
     let changesLock = NSLock()
@@ -37,6 +41,55 @@ final class AgentTools {
 
     private var ids: [ObjectIdentifier: String] = [:]
     private var nextID = 1
+    private let idsLock = NSLock()
+
+    // MARK: Taking over one session's device
+
+    /// The sessions (by worktree path) whose device the person took over: their agents' actions wait until it is
+    /// handed back. Kept in memory: a new launch of the app starts with every device the agents'.
+    private var taken: [String: Date] = [:]
+    /// The sessions whose agent was refused meanwhile: it is told when the device is handed back.
+    private var refused = Set<String>()
+    private var notices: [String: [String]] = [:]
+    private let takenLock = NSLock()
+
+    func takenSince(_ worktree: String) -> Date? { takenLock.lock(); defer { takenLock.unlock() }; return taken[worktree] }
+
+    func takeOver(_ worktree: String) {
+        takenLock.lock()
+        if taken[worktree] == nil { taken[worktree] = Date() }
+        takenLock.unlock()
+    }
+
+    func handBack(_ worktree: String) {
+        takenLock.lock()
+        taken[worktree] = nil
+        let tell = refused.remove(worktree) != nil
+        takenLock.unlock()
+        if tell { addNotice(worktree, "The person handed the device back: you can act on it again.") }
+    }
+
+    /// Something Greenroom has to tell the agent of a session, once: the device was handed back, CI ended. It rides
+    /// on the agent's next call's answer, or on its turn's end where the harness's hook carries words.
+    func addNotice(_ worktree: String, _ text: String) {
+        takenLock.lock()
+        var list = notices[worktree] ?? []
+        if !list.contains(text) { list.append(text) }
+        notices[worktree] = Array(list.suffix(8))
+        takenLock.unlock()
+    }
+
+    func takeNotice(_ worktree: String) -> String? {
+        takenLock.lock(); defer { takenLock.unlock() }
+        return notices.removeValue(forKey: worktree)?.joined(separator: "\n")
+    }
+
+    /// The session a call acts on: the one whose simulator it names (or would reach), else the caller's own.
+    private func target(_ name: String, _ args: [String: Any], _ connection: Connection) -> String? {
+        if args["sim"] is String || AgentTools.driving.contains(name) || name == "close",
+           let s = try? sim(args), let owner = sessionOf(s) { return owner.worktree.path }
+        return connection.session?.worktree.path
+    }
 
     /// What the server tells an agent about itself (`initialize`). The Debug copy says what it is first, so an
     /// agent that has both servers does not pick it to test an app. Some clients cut this at 4,096 characters.
@@ -228,11 +281,18 @@ final class AgentTools {
         if paused || AgentCheckHooks.pausedByCheck, !AgentTools.readsOnly(name, args), !AgentTools.talk.contains(name) {
             throw Failure(message: "The person at the Mac has paused the agent in Greenroom. Ask them to resume it.")
         }
+        // The person took one session's device over (Take Over, in its loop strip): that session's agent waits, the others go on.
+        if !AgentTools.readsOnly(name, args), !AgentTools.talk.contains(name), let path = target(name, args, connection), takenSince(path) != nil {
+            takenLock.lock(); refused.insert(path); takenLock.unlock()
+            throw Failure(message: "The person at the Mac took over this session's device in Greenroom, so your actions on it wait. Reading still works "
+                + "(screen, check, screenshot, logs). They hand it back there: the answer of your next call after that says so, and session says who has the device.")
+        }
         // build and changes wait for minutes and run beside the other tools (AgentServer): they touch no simulator and no recording.
         let slow = AgentTools.slow.contains(name)
         // A paused agent is not recorded, reading included: recording follows what the agent does, and it is not allowed to act.
         let recorded = !slow && !(paused || AgentCheckHooks.pausedByCheck)
-        if !slow { currentSim = nil }
+        currentSim = nil
+        defer { currentSim = nil }
         // An agent driving a session's simulator is recorded (AgentRecording): the first action starts it.
         if recorded, AgentTools.driving.contains(name), !(name == "screenshot" && args["screen"] != nil), let s = try? sim(args) {
             currentSim = s
@@ -339,6 +399,7 @@ final class AgentTools {
     // MARK: Finding simulators and nodes
 
     func id(_ sim: Simulator) -> String {
+        idsLock.lock(); defer { idsLock.unlock() }
         let key = ObjectIdentifier(sim)
         if let known = ids[key] { return known }
         let made = "s\(nextID)"
