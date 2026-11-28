@@ -44,21 +44,30 @@ private func heading(_ text: String) -> some View {
 
 struct SessionPanelView: View {
     @ObservedObject var model: SessionPanelModel
+    @FocusState private var writing: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let s = model.state {
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        verdict(s)
-                        if model.merge.number != nil || !model.merge.blocked.isEmpty { pull } else if model.merge.none { noPull }
-                        spec(s)
-                        tell(s)
-                        if !s.calls.isEmpty { activity(s) }
+                ScrollViewReader { scroll in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            verdict(s)
+                            if model.merge.number != nil || !model.merge.blocked.isEmpty { pull } else if model.merge.none { noPull }
+                            spec(s)
+                            tell(s).id("tell")
+                            if !s.calls.isEmpty { activity(s) }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 14)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 14)
+                    // Request Changes with nothing written: the comment box comes to the person, cursor in it.
+                    .onChange(of: model.askingChanges) { asking in
+                        guard asking else { return }
+                        withAnimation(.easeInOut(duration: 0.2)) { scroll.scrollTo("tell", anchor: .bottom) }
+                        writing = true
+                    }
                 }
             } else {
                 Text("Choose a session to see what its agent set out to do, what it checked, and to answer it.")
@@ -272,9 +281,11 @@ struct SessionPanelView: View {
                 .frame(height: 54)
                 .padding(5)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(SettingsTheme.wellFill))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(SettingsTheme.warning, lineWidth: model.askingChanges ? 1.5 : 0))
+                .focused($writing)
                 .overlay(alignment: .topLeading) {
                     if model.draft.isEmpty {
-                        Text("What should it change, or know?").font(.system(size: 12)).foregroundStyle(SettingsTheme.mute.opacity(0.7))
+                        Text(model.askingChanges ? "What should the agent change?" : "What should it change, or know?").font(.system(size: 12)).foregroundStyle(SettingsTheme.mute.opacity(0.7))
                             .padding(.horizontal, 10).padding(.vertical, 6).allowsHitTesting(false)
                     }
                 }
@@ -289,10 +300,26 @@ struct SessionPanelView: View {
                     .help(s.hasSimulator ? "Click a node on the session's device: the agent gets its name, where it is and a picture"
                                          : "The session's simulator is not running")
                 Spacer()
-                Button("Send") { model.onSend?() }
-                    .buttonStyle(PanelButton(kind: .primary))
-                    .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help("The agent hears it with its next call, when its turn ends, or with the answer to its review")
+                if model.askingChanges {
+                    Button("Request Changes") { model.onRequestChanges?() }
+                        .buttonStyle(PanelButton(kind: .primary))
+                        .fixedSize()
+                        .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .help("Sends what you wrote and tells the agent changes are requested")
+                } else {
+                    Button("Send") { model.onSend?() }
+                        .buttonStyle(PanelButton(kind: .primary))
+                        .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .help("The agent hears it with its next call, when its turn ends, or with the answer to its review")
+                }
+            }
+            if model.askingChanges {
+                HStack(spacing: 6) {
+                    Text("Say what to change, then press Request Changes.").font(.system(size: 11)).foregroundStyle(SettingsTheme.warning)
+                    Spacer(minLength: 4)
+                    Button("Not now") { model.askingChanges = false }
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(SettingsTheme.mute)
+                }
             }
             if model.pinning {
                 Text("Click what your comment is about on the device.").font(.system(size: 11)).foregroundStyle(SettingsTheme.warning)

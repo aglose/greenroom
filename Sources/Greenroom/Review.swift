@@ -75,6 +75,9 @@ final class SessionPanelModel: ObservableObject {
     @Published var pin: Work.Comment.Pin?
     @Published var pinning = false
     @Published var merge = MergeLine()
+    /// The person pressed Request Changes with nothing written: the comment box is brought to them, and its
+    /// button asks for the changes.
+    @Published var askingChanges = false
 
     var onApprove: (() -> Void)?
     var onRequestChanges: (() -> Void)?
@@ -174,6 +177,7 @@ final class ReviewController {
         }
         if pinTarget != nil, pinTarget?.worktree != s.worktree.path { endPin() }
         let next = state(for: s)
+        if model.state?.worktree != next.worktree, model.askingChanges { model.askingChanges = false }
         if model.state != next { model.state = next }
         let ready = next.verdict == .asked || next.verdict == .ready
         if ready, lastSeen?.path != next.worktree, workbench.rightPane == nil { lastSeen = (next.worktree, ready); workbench.showSession() }
@@ -335,9 +339,10 @@ final class ReviewController {
         guard let s = session else { return }
         if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { send() }
         guard !WorkStore.shared.work(s.worktree.path).pending.isEmpty else {
-            workbench.say("Say what to change first: write a comment for the agent", problem: true)
+            model.askingChanges = true   // the panel scrolls to the comment box and puts the cursor in it
             return
         }
+        model.askingChanges = false
         WorkStore.shared.answerReview(s.worktree.path, .changes, head: s.head)
         workbench.say("Asked \(s.branch ?? s.shortHead)'s agent for changes")
     }
@@ -497,14 +502,20 @@ final class ReviewController {
         if !force, s.githubPR == nil, pulls[path] != nil, !Engine.agentCheck { return }
         reading.insert(path)
         let head = s.head
+        let asked = changed[path, default: 0]
         Task { @MainActor [weak self] in
             let result = await Merger.read(s)
             guard let self else { return }
             self.reading.remove(path)
+            // A merge ended while GitHub was being asked: this answer is of before it, so it is asked again.
+            guard self.changed[path, default: 0] == asked else { self.refreshPull(s, force: true); return }
             self.pulls[path] = (result, WorkStore.now(), head)
             if self.session?.worktree.path == path { self.reload() }
         }
     }
+
+    /// Counts the merges tried per worktree: an answer GitHub gave to a question from before one is not kept.
+    private var changed: [String: Int] = [:]
 
     func mergeLine(for s: Session) -> MergeLine {
         let path = s.worktree.path
@@ -553,6 +564,7 @@ final class ReviewController {
                 let why = await Merger.merge(info, method: method, in: s.worktree)
                 guard let self else { return }
                 self.merging = nil
+                self.changed[path, default: 0] += 1
                 if let why {
                     self.workbench.say("Not merged: \(why)", problem: true)
                 } else {

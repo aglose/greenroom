@@ -237,12 +237,14 @@ enum ReviewCheck {
 
             // Request Changes needs something said.
             review.requestChanges()
-            expect(store.work(tripPath).reviewWaiting != nil && wb.lastSaid.hasPrefix("Say what to change first"), "Request Changes with nothing written asks for a comment first")
+            expect(store.work(tripPath).reviewWaiting != nil && review.model.askingChanges, "Request Changes with nothing written answers nothing and brings the comment box to the person")
+            await settle()
+            capture(dir.appendingPathComponent("review-asking.png"))
             review.model.draft = "The nights are missing under the dates"
             review.requestChanges()
             await settle()
             var w = store.work(tripPath)
-            expect(w.review?.answer == .changes && w.pending.count == 1 && review.model.draft.isEmpty, "with a comment written it is sent with the answer")
+            expect(w.review?.answer == .changes && w.pending.count == 1 && review.model.draft.isEmpty && !review.model.askingChanges, "with a comment written it is sent with the answer")
             expect(state()?.verdict == .changes && state()?.headline.hasPrefix("Changes requested") == true && state()?.canAnswer == false
                    && state()?.answerNote == "The agent hears it with its next call, or when its turn ends.", "the panel says what was answered, and that the agent has not heard yet")
             expect(sessions.attention(of: trip).group != .ready && state()?.comments.first?.status == "Not given yet" && state()?.comments.first?.pending == true, "the session is no longer waiting for the person")
@@ -341,7 +343,7 @@ enum ReviewCheck {
             _ = await wait("the merge") { wb.lastSaid.hasPrefix("Merged") }
             expect(asked().last { $0.hasPrefix("pr merge") } == "pr merge 12 --squash --match-head-commit \(trip.head)", "it merges that pull request, that way, at the commit the session is at: \(asked().last { $0.hasPrefix("pr merge") } ?? "-")")
             _ = await wait("merged shown") { review.model.merge.merged }
-            expect(wb.lastSaid == "Merged #12 into main" && review.model.merge.merged && !review.model.merge.canMerge && review.model.merge.blocked == "Merged", "and the panel says it is merged")
+            expect(wb.lastSaid == "Merged #12 into main" && review.model.merge.merged && !review.model.merge.canMerge && review.model.merge.blocked == "Merged", "and the panel says it is merged: \(wb.lastSaid) | \(review.model.merge)")
             // A commit nobody approved here, with a failing check on GitHub: the question says both.
             writePR(head: total.head, checks: #"[{"__typename":"StatusContext","state":"FAILURE"}]"#)
             clock = clock.addingTimeInterval(120)

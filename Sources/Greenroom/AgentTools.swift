@@ -599,7 +599,7 @@ final class AgentTools {
         sim.logOffset = 0
         let size = DispatchQueue.main.sync { sim.deviceSize }
         let skinNote = DevHooks.value("--skin", in: DispatchQueue.main.sync { sim.options }).map { " | skin \($0)" } ?? ""
-        var head = "\(id(sim)) launched \(name)\(session.map { " for \($0.branch ?? $0.shortHead)" } ?? "") \(Int(size.width))x\(Int(size.height)) | \(activity(sim))\(skinNote)\(note)\(leftOut)"
+        var head = "\(id(sim)) launched \(name)\(session.flatMap { mark ? " for \($0.branch ?? $0.shortHead)" : nil } ?? "") \(Int(size.width))x\(Int(size.height)) | \(activity(sim))\(skinNote)\(note)\(leftOut)"
         if !settled.hasPrefix("settled") { head += " (still animating)" }
         return ([head] + sim.tree.nodes.filter { !$0.label.isEmpty || $0.click }.map(\.line)).joined(separator: "\n")
     }
