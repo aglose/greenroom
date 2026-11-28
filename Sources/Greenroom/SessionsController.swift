@@ -22,6 +22,11 @@ final class SessionsController {
         didSet { sessions = attachPulls(sessions) }
     }
     private var lastPRFetch: [String: Date] = [:]
+    /// A pull request of `workspace` changed from here (it was merged): GitHub is asked again now, not in three minutes.
+    func pullsChanged(in workspace: URL) {
+        lastPRFetch[workspace.path] = nil
+        refreshPulls(for: workspaces.filter { $0.root.path == workspace.path })
+    }
     private var watchers: [String: WorktreeWatcher] = [:]
     private var buildWatcher: BuildWatcher?
     private var watched: [String] = []
@@ -158,9 +163,11 @@ final class SessionsController {
         let next = attachPulls(ClaudeSessions.shared.attach(sessions))
         let changed = next.map { $0.agentSessions.map(\.shown) } != sessions.map { $0.agentSessions.map(\.shown) }
             || next.map { $0.agent?.shown } != sessions.map { $0.agent?.shown }
+        // A pull request an agent's session names may have merged: the row moves to Completed, or back out of it.
+        let moved = next.map(isCompleted) != sessions.map(isCompleted)
         sessions = next
         noteAttention()
-        if autoArchive() || changed { onChange?() }
+        if changed || moved { onChange?() }
     }
 
     private func attachPulls(_ list: [Session]) -> [Session] {
@@ -471,34 +478,6 @@ final class SessionsController {
         onChange?()
     }
 
-    /// Whether sessions whose pull request merged leave the sidebar by themselves.
-    static let autoArchiveKey = "sessionsAutoArchive"
-    var autoArchiveEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: Self.autoArchiveKey) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: Self.autoArchiveKey); if newValue, autoArchive() { onChange?() } }
-    }
-
-    /// Archives the shown sessions whose pull requests have all closed with one merged, unless something is still
-    /// going on in them (a simulator, a build, an agent's session that runs) or they are a main checkout. Returns
-    /// whether one was archived.
-    @discardableResult
-    func autoArchive() -> Bool {
-        guard autoArchiveEnabled else { return false }
-        var done: [Session] = []
-        for s in sessions where !s.isMain && s.prMerged && !s.agentActive && !(s.agent?.running ?? false) {
-            guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }), workspaces[i].shown.contains(s.worktree.path),
-                  simulator(for: s) == nil, !(buildQueue.job(for: s)?.isActive ?? false) else { continue }
-            workspaces[i].shown.removeAll { $0 == s.worktree.path }
-            workspaces[i].archived.append(s.worktree.path)
-            done.append(s)
-        }
-        guard !done.isEmpty else { return false }
-        store.saveWorkspaces(workspaces)
-        let what = done.count == 1 ? "\(done[0].title): its pull request merged" : "\(done.count) sessions whose pull requests merged"
-        workbench?.toast.show("Archived \(what). The + menu brings it back.")
-        return true
-    }
-
     /// The + menu of a repository's header: the sessions it does not show, active ones first, then the archived.
     func addMenu(for workspace: URL) -> NSMenu {
         let menu = NSMenu()
@@ -750,7 +729,6 @@ final class SessionsController {
                 self.reopenWhenListed = nil
                 if let s = self.sessions.first(where: { $0.worktree.path == want }), self.newestAPK(for: s) != nil { self.activate(s) }
             }
-            if complete { self.autoArchive() }
             self.onChange?()
             self.mainBuilds.ensureAll()   // at most every ten minutes each, unless asked
             if complete {

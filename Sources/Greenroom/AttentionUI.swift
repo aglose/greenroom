@@ -87,6 +87,8 @@ extension SessionsController {
         case .quiet:
             guard let built = s.builtAt else { return "Not built" }
             return Self.age(built) + (s.isStale ? " · stale" : "")
+        case .completed:
+            return state.line
         }
     }
 
@@ -150,7 +152,8 @@ extension SessionsController {
             icon.setContentHuggingPriority(.required, for: .horizontal)
             header.append(icon)
         }
-        header.append(Self.line(s.title, size: 13, weight: selected ? .semibold : .medium, color: Design.ink))
+        // Done with: its title steps back.
+        header.append(Self.line(s.title, size: 13, weight: selected ? .semibold : .medium, color: state.group == .completed && !selected ? Design.mute : Design.ink))
         let headerSpacer = NSView()
         headerSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
         header.append(headerSpacer)
@@ -164,6 +167,11 @@ extension SessionsController {
             let done = ClosureButton(symbol: "checkmark.circle", tip: "Mark as reviewed: it leaves Ready until its agent does more") { [weak self] in self?.markReviewed(s) }
             done.contentTintColor = .secondaryLabelColor
             overlayButtons.append(done)
+        }
+        if state.group == .completed {
+            let back = ClosureButton(symbol: "arrow.uturn.backward", tip: "Reopen: it leaves Completed until another pull request of it merges") { [weak self] in self?.reopen(s) }
+            back.contentTintColor = .secondaryLabelColor
+            overlayButtons.append(back)
         }
         let remove = ClosureButton(symbol: "xmark", tip: "Remove from the sidebar (the repository's + menu brings it back)") { [weak self] in self?.remove(s) }
         remove.contentTintColor = .tertiaryLabelColor
@@ -314,8 +322,9 @@ extension SessionsController {
         return wrapper
     }
 
-    /// A group's header: its name, a dot of its colour and how many it holds.
-    static func attentionHeader(_ group: Attention, count: Int, inset: CGFloat) -> NSView {
+    /// A group's header: its name, a dot of its colour and how many it holds. `collapsed` (Completed only) adds the
+    /// mark that says a click folds or unfolds it.
+    static func attentionHeader(_ group: Attention, count: Int, inset: CGFloat, collapsed: Bool? = nil) -> NSView {
         let dot = NSView()
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 3
@@ -329,11 +338,24 @@ extension SessionsController {
         let n = NSTextField(labelWithString: "\(count)")
         n.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
         n.textColor = .tertiaryLabelColor
-        let stack = NSStackView(views: [dot, label, n])
+        var views: [NSView] = [dot, label, n]
+        if let collapsed {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+            let chevron = NSImageView(image: NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil) ?? NSImage())
+            chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8.5, weight: .semibold)
+            chevron.contentTintColor = .tertiaryLabelColor
+            chevron.setContentHuggingPriority(.required, for: .horizontal)
+            // Folded, it points at the title; the header is redrawn when that changes, so it is set, not turned.
+            chevron.frameCenterRotation = collapsed ? 90 : 0
+            views += [spacer, chevron]
+        }
+        let stack = NSStackView(views: views)
         stack.spacing = 6
         stack.alignment = .centerY
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: inset, bottom: 0, right: 6)
-        stack.setAccessibilityLabel("\(group.title), \(count)")
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: inset, bottom: 0, right: 8)
+        stack.setAccessibilityLabel("\(group.title), \(count)" + (collapsed.map { $0 ? ", collapsed" : ", expanded" } ?? ""))
+        if let collapsed { stack.toolTip = collapsed ? "Show the sessions whose pull request merged" : "Hide them" }
         return stack
     }
 }

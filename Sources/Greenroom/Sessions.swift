@@ -33,6 +33,9 @@ struct Workspace: Codable, Equatable {
     var hidden: [String] = []
     /// Worktrees put away because their pull request merged: not suggested again, listed apart in the + menu.
     var archived: [String] = []
+    /// Sessions the person took back out of Completed, by worktree, with the number of the merged pull request it
+    /// was done for (0 when none is known): it stays out until another pull request of it merges.
+    var reopened: [String: Int] = [:]
     /// "Share screen maps through git" (off by default): each walk's map is kept as refs under refs/greenroom/maps in
     /// this repository and pushed to origin, and teammates' maps are fetched from it (History, `Workspace.shareExplanation`).
     var shareMaps = false
@@ -67,7 +70,7 @@ struct Workspace: Codable, Equatable {
     init(root: URL) { self.root = root }
 
     // A file written before a field existed still reads: every key but the root has a default.
-    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, shareMaps, shareSignedInMaps, keepMain, unsignedBaseline, prFetchScript, skipLocalAPKScan, disableLocalBuilds, skin, launchOptions, launchAsked }
+    private enum Keys: String, CodingKey { case root, module, variant, baseRef, recipes, auto, ci, remote, walkWithData, quickWalk, recordAgent, shown, hidden, archived, reopened, shareMaps, shareSignedInMaps, keepMain, unsignedBaseline, prFetchScript, skipLocalAPKScan, disableLocalBuilds, skin, launchOptions, launchAsked }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -85,6 +88,7 @@ struct Workspace: Codable, Equatable {
         shown = (try? c.decodeIfPresent([String].self, forKey: .shown)) ?? shown
         hidden = (try? c.decodeIfPresent([String].self, forKey: .hidden)) ?? hidden
         archived = (try? c.decodeIfPresent([String].self, forKey: .archived)) ?? archived
+        reopened = (try? c.decodeIfPresent([String: Int].self, forKey: .reopened)) ?? reopened
         shareMaps = (try? c.decodeIfPresent(Bool.self, forKey: .shareMaps)) ?? shareMaps
         shareSignedInMaps = (try? c.decodeIfPresent(Bool.self, forKey: .shareSignedInMaps)) ?? shareSignedInMaps
         keepMain = (try? c.decodeIfPresent(Bool.self, forKey: .keepMain)) ?? keepMain

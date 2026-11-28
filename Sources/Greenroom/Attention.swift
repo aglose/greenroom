@@ -1,10 +1,11 @@
 import AppKit
 import UserNotifications
 
-/// The sidebar's four groups (docs/AGENT-FIRST-SPEC.md, "Sessions, by what they need"), in the order shown: a
-/// session is filed by what it needs from the person, not by its repository.
+/// The sidebar's groups (docs/AGENT-FIRST-SPEC.md, "Sessions, by what they need"), in the order shown: a
+/// session is filed by what it needs from the person, not by its repository. The last, Completed, holds the sessions
+/// whose pull request merged; it is at the very bottom of the sidebar, under everything else.
 enum Attention: Int, CaseIterable {
-    case ready, needs, working, quiet
+    case ready, needs, working, quiet, completed
 
     var title: String {
         switch self {
@@ -12,6 +13,7 @@ enum Attention: Int, CaseIterable {
         case .needs: return "Needs you"
         case .working: return "Working"
         case .quiet: return "Quiet"
+        case .completed: return "Completed"
         }
     }
 
@@ -22,6 +24,7 @@ enum Attention: Int, CaseIterable {
         case .needs: return n == 1 ? "1 needs you" : "\(n) need you"
         case .working: return "\(n) working"
         case .quiet: return "\(n) quiet"
+        case .completed: return "\(n) completed"
         }
     }
 
@@ -31,6 +34,7 @@ enum Attention: Int, CaseIterable {
         case .needs: return Design.warning
         case .working: return NSColor(srgbRed: 0.616, green: 0.569, blue: 1.0, alpha: 1)
         case .quiet: return Design.mute
+        case .completed: return NSColor(srgbRed: 0.72, green: 0.56, blue: 1.0, alpha: 0.75)   // a merged pull request's purple, dimmed
         }
     }
 
@@ -75,6 +79,8 @@ struct AttentionFacts: Equatable {
     var failed = 0
     /// The person took this session's device over, and has not handed it back.
     var taken = false
+    /// Its pull request merged, and the person has not reopened it since.
+    var completed = false
 }
 
 /// Where a session is filed, and the few words its card says about it.
@@ -89,7 +95,9 @@ struct AttentionState: Equatable {
     /// A session's group, from what is known of it. The order is the spec's: a session that asked for a review is
     /// ready whatever else is true of it (its agent's turn is still running, waiting in that call); then what only
     /// the person can clear; then work under way; then a turn that ended on a current build with a check on it
-    /// (the owner's decision 5). Everything else is quiet.
+    /// (the owner's decision 5). Everything else is quiet. A session whose pull request merged is completed unless
+    /// something above is true of it: what waits on the person or is under way is never filed as done, but a turn
+    /// that ended before the merge no longer asks for a review.
     static func judge(_ f: AttentionFacts) -> AttentionState {
         let checks = f.passed + f.failed
         func verdict() -> (String, Tone) {
@@ -106,6 +114,7 @@ struct AttentionState: Equatable {
         if let detail = f.building { return AttentionState(group: .working, line: detail, tone: .go) }
         if let who = f.working { return AttentionState(group: .working, line: "\(who) is working", tone: .go) }
         if f.calls { return AttentionState(group: .working, line: "An agent is driving", tone: .go) }
+        if f.completed { return AttentionState(group: .completed, line: "Pull request merged", tone: .plain) }
         if f.turnEnded, f.buildCurrent, checks > 0 { let v = verdict(); return AttentionState(group: .ready, line: v.0, tone: v.1) }
         return AttentionState(group: .quiet, line: "", tone: .plain)
     }
@@ -192,7 +201,49 @@ extension SessionsController {
         let counted = work.checks(on: currentBuild(of: s)?.key).filter { $0.at > settled }
         f.passed = counted.filter(\.passed).count
         f.failed = counted.count - f.passed
+        f.completed = isCompleted(s)
         return f
+    }
+
+    // MARK: Completed
+
+    /// Whether a session whose pull request merged moves to Completed by itself.
+    static let completeOnMergeKey = "sessionsAutoArchive"   // the key of the setting this replaced: a no stays a no
+    var completeOnMerge: Bool {
+        // A check reads its own answer, never the person's (and never changes theirs).
+        get { CheckedDefault.inCheck ? !CheckedDefault.bool(Self.completeOnMergeKey + "Off") : UserDefaults.standard.object(forKey: Self.completeOnMergeKey) as? Bool ?? true }
+        set {
+            if CheckedDefault.inCheck { CheckedDefault.set(!newValue, Self.completeOnMergeKey + "Off") } else { UserDefaults.standard.set(newValue, forKey: Self.completeOnMergeKey) }
+            noteAttention()
+            onChange?()
+        }
+    }
+
+    /// The work is in: every pull request known of the session is closed and one merged, and the person has not
+    /// reopened it since that one. Never a main checkout. A new pull request of the session ends it by itself.
+    func isCompleted(_ s: Session) -> Bool {
+        guard completeOnMerge, !s.isMain, s.prMerged, !s.hasOpenPR else { return false }
+        return workspace(of: s)?.reopened[s.worktree.path] != (s.prNumber ?? 0)
+    }
+
+    /// Takes the session back out of Completed. It returns there only when another pull request of it merges.
+    func reopen(_ s: Session) {
+        guard let i = workspaces.firstIndex(where: { $0.root.path == s.workspace.path }) else { return }
+        workspaces[i].reopened[s.worktree.path] = s.prNumber ?? 0
+        store.saveWorkspaces(workspaces)
+        noteAttention()
+        onChange?()
+    }
+
+    static let completedCollapsedKey = "sessionsCompletedCollapsed"
+    /// The Completed section shows only its header.
+    var completedCollapsed: Bool {
+        get { CheckedDefault.bool(Self.completedCollapsedKey) }
+        set {
+            guard newValue != completedCollapsed else { return }
+            CheckedDefault.set(newValue, Self.completedCollapsedKey)
+            onChange?()
+        }
     }
 
     func attention(of s: Session) -> AttentionState { AttentionState.judge(facts(for: s)) }
@@ -295,7 +346,7 @@ extension SessionsController {
             let sorted: [(AttentionRow, Date, Int)]
             switch g {
             case .ready, .needs, .working: sorted = list.sorted { ($0.1, $0.2) < ($1.1, $1.2) }
-            case .quiet:
+            case .quiet, .completed:
                 func rank(_ r: AttentionRow) -> Int {
                     guard case .session(let s, _) = r else { return Int.max }
                     return used.firstIndex(of: s.worktree.path) ?? (Int.max - 1)
@@ -308,7 +359,11 @@ extension SessionsController {
 
     /// The session rows in the order the sidebar shows them, whichever way it groups: what ⌘1-9 pick.
     func orderedSessions() -> [Session] {
-        if groupByRepository { return groups().flatMap(\.sessions) }
+        if groupByRepository {
+            // Completed sessions are under the repositories, in one section of their own.
+            let all = groups().flatMap(\.sessions)
+            return all.filter { !isCompleted($0) } + all.filter(isCompleted)
+        }
         return attentionGroups().flatMap { $0.rows.compactMap { row -> Session? in if case .session(let s, _) = row { return s }; return nil } }
     }
 

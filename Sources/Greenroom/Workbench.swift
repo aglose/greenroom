@@ -172,6 +172,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// What each row showed when it was drawn (`key(of:)`): a reload redraws only the rows whose key moved.
     private var rowKeys: [String] = []
     private var sidebarPending = false
+    /// Rows are on their way to new places (a session going to Completed): the next look at them waits for that.
+    private var sidebarMoving = 0
+    private var sidebarWaiting = false
     private(set) var selected: Simulator?
     /// The Sessions section of the sidebar (SessionsController.swift).
     let sessions = SessionsController()
@@ -575,6 +578,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     /// redrawn.
     private func reloadSidebar() {
         sidebarPending = false
+        if sidebarMoving != 0 { sidebarWaiting = true; return }
         let sims = Engine.shared.simulators
         // Built aside and swapped in at once: groups() can run the run loop (Git.available waits for xcode-select), and
         // the table laying out there would read rows it was never told about.
@@ -584,6 +588,8 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         sessions.noteAttention()   // which group each session is in, since when, and the news of it
         attentionChip.show(sessions.lastCounts)
         reloadReview()
+        // The sessions whose pull request merged: one section at the very bottom, however the rest is grouped.
+        var completed: [Session] = []
         if sessions.groupByRepository {
             for group in groups {
                 guard let ws = group.workspace else { rows.append(.header(group.header)); continue }
@@ -591,11 +597,17 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
                 let main = sessions.mainRow(for: ws)
                 if let main { rows.append(.main(main)) }
                 if group.sessions.isEmpty && main == nil { rows.append(.addSession(ws, hidden: group.hidden)) }
-                rows += group.sessions.map { .session($0) }
+                for s in group.sessions {
+                    if sessions.attention(of: s).group == .completed { completed.append(s) } else { rows.append(.session(s)) }
+                }
             }
         } else {
             // By what they need (Attention.swift): the groups, then the repositories, each with its + menu.
             for (group, list) in sessions.attentionGroups() {
+                if group == .completed {
+                    completed = list.compactMap { row -> Session? in if case .session(let s, _) = row { return s }; return nil }
+                    continue
+                }
                 rows.append(.attentionHeader(group, list.count))
                 for row in list {
                     switch row {
@@ -634,13 +646,26 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             rows.append(.header("Recent"))
             rows += recents.map { .recent($0) }
         }
-        let keys = rows.map(key(of:))
+        if !completed.isEmpty {
+            rows.append(.attentionHeader(.completed, completed.count))
+            if !sessions.completedCollapsed { rows += completed.map { .session($0) } }
+        }
+        var keys = rows.map(key(of:))
         let sameShape = keys.count == rowKeys.count && zip(rows, self.rows).allSatisfy { Self.identity($0) == Self.identity($1) }
         let changed = IndexSet(keys.indices.filter { !sameShape || keys[$0] != rowKeys[$0] })
+        let old = self.rows.map(Self.identity)
+        let oldKeys = Dictionary(zip(old, rowKeys), uniquingKeysWith: { a, _ in a })
         self.rows = rows
-        self.rowKeys = keys
-        if !sameShape { table.reloadData() }
+        if !sameShape, moveRows(from: old, to: rows.map(Self.identity)) {
+            // A row that stayed or moved still shows what it did: it is drawn again when it has arrived.
+            for (i, row) in rows.enumerated() { if let was = oldKeys[Self.identity(row)] { keys[i] = was } }
+            self.rowKeys = keys
+        } else if !sameShape {
+            self.rowKeys = keys
+            table.reloadData()
+        }
         else if !changed.isEmpty {
+            self.rowKeys = keys
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0
                 // New cells first, then their heights: inside one update block the fresh cell was framed at the
@@ -662,6 +687,57 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let alive = sims.filter(\.isAlive).count
         let notes = [ClaudeSessions.shared.note, groups.isEmpty ? nil : T3Sessions.shared.note].compactMap { $0 }
         status.stringValue = "\(alive == 0 ? "No simulators" : alive == 1 ? "1 simulator" : "\(alive) simulators") · engine \(Engine.shared.version)\nYour APKs stay on this Mac" + notes.map { "\n" + $0 }.joined()
+    }
+
+    /// Takes the table from the rows `old` to the rows `new` (their identities) with each row travelling to its
+    /// place: a session that completed slides down to Completed, the ones under it close the gap, a section that
+    /// appears fades in. `self.rows` is already the new rows. Answers false, having done nothing, when the change
+    /// is not one to animate (the first rows, reduced motion, a check, which reads the rows at once, unless it was
+    /// asked to run in slow motion so that this can be looked at).
+    private func moveRows(from old: [String], to new: [String]) -> Bool {
+        guard !old.isEmpty, !new.isEmpty, !Design.reduceMotion, !CheckedDefault.inCheck || Design.slow != 1, table.window != nil,
+              table.numberOfRows == old.count, Set(old).count == old.count, Set(new).count == new.count else { return false }
+        let before = Set(old), after = Set(new)
+        // The rows that keep their order among themselves stay put; the others are the ones that travel.
+        let kept = new.filter(before.contains)
+        var out = Set<String>()
+        for change in kept.difference(from: old.filter(after.contains)) { if case .insert(_, let id, _) = change { out.insert(id) } }
+        let travelling = kept.filter(out.contains)
+        sidebarMoving += 1
+        let move = sidebarMoving
+        let arrived: () -> Void = { [weak self] in
+            guard let self, self.sidebarMoving == move else { return }
+            self.sidebarMoving = 0
+            self.sidebarWaiting = false
+            self.reloadSidebar()   // the rows that moved are drawn as what they now are, and whatever waited is shown
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = Design.move
+            ctx.timingFunction = Design.moveTiming()
+            table.beginUpdates()
+            var now = old
+            for i in now.indices.reversed() where !after.contains(now[i]) {
+                table.removeRows(at: [i], withAnimation: .effectFade)
+                now.remove(at: i)
+            }
+            // Each traveller goes to just under the row it follows in the new order (already in place: the ones
+            // before it were moved first).
+            for id in travelling {
+                guard let from = now.firstIndex(of: id), let at = kept.firstIndex(of: id) else { continue }
+                now.remove(at: from)
+                let to = at == 0 ? 0 : (now.firstIndex(of: kept[at - 1]) ?? -1) + 1
+                now.insert(id, at: to)
+                if from != to { table.moveRow(at: from, to: to) }
+            }
+            for (i, id) in new.enumerated() where !before.contains(id) {
+                table.insertRows(at: [i], withAnimation: .effectFade)
+                now.insert(id, at: i)
+            }
+            table.endUpdates()
+        }, completionHandler: arrived)
+        // Should the table never say it finished (its window closed meanwhile), the sidebar is not left waiting.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Design.move + 0.4, execute: arrived)
+        return true
     }
 
     /// Which thing a row stands for (not how it looks): rows that keep their identities in place are redrawn one by one.
@@ -690,7 +766,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             let appTag = sessions.apps(for: ws).count > 1 ? (sessions.selectedApp(for: ws)?.id ?? "") : ""
             let scanning = sessions.scanningWorkspaces.contains(ws.path) ? "1" : "0"
             return Self.identity(row) + "|\(hidden)|\(sessions.apps(for: ws).count)|\(appTag)|\(scanning)"
-        case .attentionHeader(_, let count): return Self.identity(row) + "|\(count)"
+        case .attentionHeader(let g, let count): return Self.identity(row) + "|\(count)" + (g == .completed ? "|\(sessions.completedCollapsed)" : "")
         case .addSession(_, let hidden): return Self.identity(row) + "|\(hidden)"
         case .session(let s):
             if sessions.groupByRepository { return Self.identity(row) + "|R|" + sessions.rowKey(for: s) }
@@ -2098,6 +2174,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         let menu = NSMenu()
         menu.addItem(withTitle: "Close Simulator", action: #selector(closeClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Mark as Reviewed", action: #selector(markReviewedClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Reopen", action: #selector(reopenClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Open the Agent's App", action: #selector(openAgentClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove from Sidebar", action: #selector(removeSessionClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove Repository from Sessions", action: #selector(removeRepositoryClicked), keyEquivalent: "").target = self
@@ -2198,7 +2275,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             inset.edgeInsets = NSEdgeInsets(top: 0, left: Self.headerInset, bottom: 0, right: 6)
             return inset
         case .attentionHeader(let group, let count):
-            return SessionsController.attentionHeader(group, count: count, inset: Self.headerInset)
+            return SessionsController.attentionHeader(group, count: count, inset: Self.headerInset, collapsed: group == .completed ? sessions.completedCollapsed : nil)
         case .sessionsHeader(let title, let ws, let hidden), .repository(let title, let ws, let hidden):
             var asRow = false
             if case .repository = rows[row] { asRow = true }
@@ -2333,6 +2410,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     @objc private func rowClicked() {
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
+        if case .attentionHeader(.completed, _) = rows[row] { sessions.completedCollapsed.toggle() }
         if case .simulator(let sim) = rows[row] { select(sim) }
         if case .session(let session) = rows[row] { sessions.activate(session) }
         if case .main(let m) = rows[row] { sessions.openMain(m.workspace) }
@@ -2375,6 +2453,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         for item in menu.items where item.action == #selector(markReviewedClicked) {
             if case .session(let s) = rows[row], sessions.attention(of: s).group == .ready { item.isHidden = false } else { item.isHidden = true }
         }
+        // "Reopen": only on a session whose pull request merged (wherever it is filed: work under way shows it as working).
+        for item in menu.items where item.action == #selector(reopenClicked) {
+            if case .session(let s) = rows[row], sessions.isCompleted(s) { item.isHidden = false } else { item.isHidden = true }
+        }
         for item in menu.items where item.action == #selector(closeClicked) { item.isHidden = isWorkspaceOnly }
         var items: [NSMenuItem] = []
         if case .session(let session) = rows[row] { items = sessions.buildMenuItems(for: session) + [.separator()] }
@@ -2410,6 +2492,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         if let s = clickedSession { sessions.markReviewed(s) }
     }
 
+    @objc private func reopenClicked() {
+        if let s = clickedSession { sessions.reopen(s) }
+    }
+
     /// Window > Next Session That Needs You (⌘'): the next one that is ready for review or needs the person.
     @objc func nextNeedingYou(_ sender: Any?) { sessions.goToNextNeedingAttention() }
 
@@ -2420,12 +2506,15 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     var attentionText: String? { attentionChip.text }
     /// The sidebar's rows in a few words each (for a check): a group's header as "# Title n", a session by its title.
     var sidebarOutline: [String] {
-        // The sessions' part of the sidebar: what is suggested, to review, running loose or recent comes after it.
+        // The sessions' part of the sidebar: what is suggested, to review, running loose or recent comes after it,
+        // and under those the completed sessions, which are the sessions' again.
         let own = rows.prefix { row in
             if case .header(let t) = row { return !["Suggested", "Review", "Running", "Recent"].contains(t) }
+            if case .attentionHeader(.completed, _) = row { return false }
             return true
         }
-        return own.compactMap { row in
+        let done = rows.firstIndex { if case .attentionHeader(.completed, _) = $0 { return true }; return false }.map { rows[$0...] } ?? []
+        return (own + done).compactMap { row in
             switch row {
             case .attentionHeader(let g, let n): return "# \(g.title) \(n)"
             case .sessionsHeader(let t, _, _): return "## \(t)"

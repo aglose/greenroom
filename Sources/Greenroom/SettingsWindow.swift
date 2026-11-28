@@ -139,7 +139,7 @@ struct SettingsView: View {
     @State private var claudeSessions = ClaudeSessions.shared.enabled
     @State private var t3Sessions = T3Sessions.shared.enabled
     @State private var reopenLast = LastOpened.enabled
-    @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.autoArchiveKey) as? Bool ?? true
+    @State private var autoArchive = UserDefaults.standard.object(forKey: SessionsController.completeOnMergeKey) as? Bool ?? true
     @State private var notifySessions = Notifier.enabled
     @State private var groupByRepository = CheckedDefault.bool(SessionsController.groupByRepositoryKey)
     @State private var watchCI = CIWatch.enabled
@@ -428,12 +428,11 @@ struct SettingsView: View {
                 .onChange(of: claudeSessions) { _, on in ClaudeSessions.shared.enabled = on }
 
                 settingsToggleRow(
-                    title: "Auto-archive session when its pull request merges",
-                    subtitle: "Moves finished sessions to Archived in the + menu; worktree and data stay.",
+                    title: "Move a session to Completed when its pull request merges",
+                    subtitle: "Completed is at the bottom of the sidebar. Reopening a session, or a new pull request of it, brings it back.",
                     isOn: $autoArchive
                 )
-                .disabled(!claudeSessions && !t3Sessions)
-                .onChange(of: autoArchive) { _, on in UserDefaults.standard.set(on, forKey: SessionsController.autoArchiveKey) }
+                .onChange(of: autoArchive) { _, on in (NSApp.delegate as? AppDelegate)?.workbench?.sessions.completeOnMerge = on }
             }
 
             SettingsCard {

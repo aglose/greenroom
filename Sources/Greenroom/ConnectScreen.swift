@@ -815,6 +815,7 @@ struct ConnectFlowView: View {
         case .needs: return "The agent waits on a permission, the app on a sign-in, or a remote build on your yes."
         case .working: return "A turn is running, a build is going, or calls are arriving."
         case .quiet: return "Nothing for a while, and each repository's base branch."
+        case .completed: return "Its pull request merged. Reopen it, or a new pull request brings it back."
         }
     }
 

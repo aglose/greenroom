@@ -99,7 +99,7 @@ extension AgentTools {
         return n
     }
 
-    private static let appSettingKeys = "sessions_warm, auto_archive, jobs_at_once, evidence_cap_gb, build_timeout_minutes, reopen_last, app_icon, update_checks"
+    private static let appSettingKeys = "sessions_warm, complete_on_merge, jobs_at_once, evidence_cap_gb, build_timeout_minutes, reopen_last, app_icon, update_checks"
 
     /// Main thread.
     private func appSettings() -> [AppSetting] {
@@ -109,9 +109,9 @@ extension AgentTools {
             AppSetting(key: "sessions_warm", about: "session simulators kept running at once (1-6)",
                        get: { String(sessions?.warmLimit ?? 3) },
                        set: { sessions?.warmLimit = Int(try Self.number($0, 1...6)) }),
-            AppSetting(key: "auto_archive", about: "archive a session once its pull request is merged",
-                       get: { (sessions?.autoArchiveEnabled ?? true) ? "on" : "off" },
-                       set: { sessions?.autoArchiveEnabled = try Self.flag($0) }),
+            AppSetting(key: "complete_on_merge", about: "move a session to Completed, at the bottom of the sidebar, once its pull request is merged",
+                       get: { (sessions?.completeOnMerge ?? true) ? "on" : "off" },
+                       set: { sessions?.completeOnMerge = try Self.flag($0) }),
             AppSetting(key: "jobs_at_once", about: "jobs (builds, walks, comparisons) run at once, 0 for no limit",
                        get: { String(JobQueue.shared.limit) },
                        set: { JobQueue.shared.limit = Int(try Self.number($0, 0...16)) }),

@@ -572,6 +572,7 @@ final class ReviewController {
                     if case .success(var done?) = self.pulls[path]?.result { done.state = "MERGED"; self.pulls[path]?.result = .success(done) }
                 }
                 self.refreshPull(s, force: true)
+                if why == nil { self.sessions.pullsChanged(in: s.workspace) }   // its row moves to Completed
                 self.reload()
             }
         }

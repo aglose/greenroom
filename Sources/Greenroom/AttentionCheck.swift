@@ -263,6 +263,51 @@ enum AttentionCheck {
             await settle()
             expect(wb.sidebarOutline.first == "# Needs you 2", "and back")
 
+            // Completed: a session whose pull request merged goes to the bottom of the sidebar, until it is reopened
+            // or has a new pull request.
+            func pull(_ number: Int, _ state: String) {
+                guard let s = row("total-rounding"), let branch = s.branch else { return }
+                sessions.checkedOutPRs[s.workspace.path] = [branch: GH.BranchPull(number: number, title: "Round totals", branch: branch, state: state, isDraft: false)]
+                sessions.onChange?()
+            }
+            func tail(_ n: Int) -> [String] { Array(wb.sidebarOutline.suffix(n)) }
+            pull(41, "MERGED")
+            await settle()
+            expect(group("total-rounding") == .completed && tail(2) == ["# Completed 1", "#41 Round totals"], "a merged pull request: the session is under Completed, at the bottom: \(tail(3))")
+            expect(sessions.orderedSessions().last?.worktree.lastPathComponent == "total-rounding" && !wb.sidebarOutline.dropLast(2).contains("#41 Round totals"), "... and nowhere else, the last that ⌘1-9 reach")
+            hook("claude", "total-rounding", "UserPromptSubmit")
+            _ = await wait("working") { group("total-rounding") == .working }
+            expect(group("total-rounding") == .working, "an agent at work in it again: it is shown as working, not as done")
+            hook("claude", "total-rounding", "Stop")
+            _ = await wait("completed again") { group("total-rounding") == .completed }
+            expect(group("total-rounding") == .completed, "... and done again when its turn ends")
+            sessions.completedCollapsed = true
+            await settle()
+            expect(tail(1) == ["# Completed 1"], "folded, Completed is its header: \(tail(2))")
+            sessions.completedCollapsed = false
+            sessions.groupByRepository = true
+            await settle()
+            expect(tail(2) == ["# Completed 1", "#41 Round totals"] && wb.sidebarOutline.filter { $0 == "#41 Round totals" }.count == 1, "by repository too, it is under Completed and not under its repository: \(tail(3))")
+            sessions.groupByRepository = false
+            if let s = row("total-rounding") { sessions.reopen(s) }
+            await settle()
+            expect(group("total-rounding") == .quiet && !wb.sidebarOutline.contains("# Completed 1"), "Reopen takes it back among the others, and Completed goes with its last session")
+            pull(42, "OPEN")
+            await settle()
+            expect(group("total-rounding") == .quiet, "a new pull request of it: not done")
+            pull(42, "MERGED")
+            await settle()
+            expect(group("total-rounding") == .completed, "... until that one merges too: reopening held only for the one before")
+            sessions.completeOnMerge = false
+            await settle()
+            expect(group("total-rounding") == .quiet, "with the setting off, a merge moves nothing")
+            sessions.completeOnMerge = true
+            await settle(0.2)   // under GREENROOM_SLOW_MOTION the card is on its way down here
+            capture(dir.appendingPathComponent("completing.png"))
+            await settle(1.5)
+            expect(tail(2) == ["# Completed 1", "#42 Round totals"], "and with it on again the session goes back down: \(tail(3))")
+            capture(dir.appendingPathComponent("completed.png"))
+
             // Kept across a restart of the app: what was noted is in the state folder.
             let path = row("trip-rename")?.worktree.path ?? ""
             let kept = WorkStore.shared.work(path)
