@@ -125,7 +125,7 @@ final class EmptyStage: NSView {
         reload()
     }
 
-    private static var sampleAPK: URL {
+    static var sampleAPK: URL {
         Engine.shared.root.deletingLastPathComponent().appendingPathComponent("engine-testapp.apk")
     }
 

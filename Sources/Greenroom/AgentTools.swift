@@ -38,7 +38,12 @@ final class AgentTools {
     private var ids: [ObjectIdentifier: String] = [:]
     private var nextID = 1
 
-    static let instructions = "Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. "
+    /// What the server tells an agent about itself (`initialize`). The Debug copy says what it is first, so an
+    /// agent that has both servers does not pick it to test an app. Some clients cut this at 4,096 characters.
+    static let instructions = instructions(debug: Variant.isDebug)
+    static let debugNotice = "This is Greenroom Debug, the development build of Greenroom itself. Use it only when asked to test the debug build; for testing an Android app use the greenroom server. "
+    static func instructions(debug: Bool) -> String { (debug ? debugNotice : "") + releaseInstructions }
+    static let releaseInstructions = "Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. "
         + "launch an APK, then tap/type/key/swipe: each action answers with the nodes that changed (+ added, - removed, "
         + "~ changed; refs like e3 stay the same while a node is on screen), so call screen or screenshot only when you "
         + "need all of it. check verifies texts in one call. APKs and their data stay on this Mac. "
@@ -117,7 +122,7 @@ final class AgentTools {
     static let core: [(name: String, description: String, schema: [String: Any])] = [
         ("launch", "Start an APK in Greenroom. Without apk, starts (or selects) this worktree's own simulator from its newest build, "
             + "with its own app data. Answers with the screen's nodes.", schema([
-            "apk": ["type": "string", "description": "path of the .apk (omit in a worktree of an Android app's repository: the first call from one adds it to Greenroom)"],
+            "apk": ["type": "string", "description": "path of the .apk, or \"sample\" for the sample app that comes with Greenroom (omit in a worktree of an Android app's repository: the first call from one adds it to Greenroom)"],
             "device": ["type": "string", "enum": devices],
             "appearance": ["type": "string", "enum": ["light", "dark"]],
             "locale": str, "font_scale": ["type": "number"],
@@ -454,7 +459,12 @@ final class AgentTools {
                 Thread.sleep(forTimeInterval: 0.05)
             }
         }
-        if let path = args["apk"] as? String {
+        var asked = args["apk"] as? String
+        if asked == "sample" {   // the app that comes with Greenroom: no project and no build
+            guard FileManager.default.isReadableFile(atPath: EmptyStage.sampleAPK.path) else { throw Failure(message: "this copy of Greenroom has no sample app: pass the path of an .apk") }
+            asked = EmptyStage.sampleAPK.path
+        }
+        if let path = asked {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             guard url.pathExtension.lowercased() == "apk", FileManager.default.isReadableFile(atPath: url.path) else {
                 throw Failure(message: "\(path) is not a readable .apk file")

@@ -4,7 +4,7 @@ import AppKit
 /// agent. No drop target: the work arrives when an agent calls, so the stage holds the words to give the agent,
 /// whether one has called, and small ways to do it by hand (the APK screen, adding a repository).
 final class WaitingStage: NSView {
-    /// "Connect an Agent…": the Agents settings, until the Connect screen exists.
+    /// "Connect an Agent…": the Connect screen (File > Connect Agents…).
     var onConnect: (() -> Void)?
     /// "Run an APK Yourself…": the APK screen (File > Run an APK…).
     var onRunAPK: (() -> Void)?
@@ -17,6 +17,7 @@ final class WaitingStage: NSView {
     private let statusDot = NSView()
     private let status = NSTextField(labelWithString: "")
     private var copy: GlassButton!
+    private var connect: GlassButton!
     private var copied: Timer?
 
     override init(frame: NSRect) {
@@ -81,7 +82,7 @@ final class WaitingStage: NSView {
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let statusSpacer = NSView()
         statusSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let connect = GlassButton(symbol: nil, title: "Connect an Agent…", label: "Connect a coding agent to Greenroom", style: .accent, target: nil, action: nil)
+        connect = GlassButton(symbol: nil, title: "Connect an Agent…", label: "Connect a coding agent to Greenroom", style: .accent, target: nil, action: nil)
         connect.onPress = { [weak self] in self?.onConnect?() }
         let statusRow = NSStackView(views: [statusDot, status, statusSpacer, connect])
         statusRow.alignment = .centerY
@@ -135,21 +136,26 @@ final class WaitingStage: NSView {
             statusDot.heightAnchor.constraint(equalToConstant: 8),
             connect.heightAnchor.constraint(equalToConstant: 30),
         ])
-        reload(client: nil, listening: false)
+        reload(client: nil, listening: false, connected: [])
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// What the status line says for the agent endpoint's state and the last agent heard from since the app started.
-    static func statusText(client: String?, listening: Bool) -> String {
+    /// What the status line says for the agent endpoint's state, the harnesses connected, and the last agent heard
+    /// from since the app started.
+    static func statusText(client: String?, listening: Bool, connected: [String] = []) -> String {
         guard listening else { return "The agent endpoint is not running" }
-        if let client, !client.isEmpty { return "Listening · last heard from \(client)" }
+        if let client, !client.isEmpty { return "Listening · last heard from \(ConnectModel.displayName(client: client))" }
+        if !connected.isEmpty { return "Listening · \(ConnectModel.list(connected)) connected" }
         return "Listening · no agent has called yet"
     }
 
-    func reload(client: String?, listening: Bool) {
-        status.stringValue = Self.statusText(client: client, listening: listening)
+    func reload(client: String?, listening: Bool, connected: [String]) {
+        status.stringValue = Self.statusText(client: client, listening: listening, connected: connected)
         statusDot.layer?.backgroundColor = (listening ? Design.accent : Design.warning).cgColor
+        // With an agent connected, connecting another is the smaller thing to do.
+        connect.title = connected.isEmpty ? "Connect an Agent…" : "Agents…"
+        connect.style = connected.isEmpty ? .accent : .well
     }
 
     private func copyPrompt() {

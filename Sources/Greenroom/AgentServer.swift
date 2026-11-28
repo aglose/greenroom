@@ -9,7 +9,7 @@ import Network
 final class AgentServer {
     static let modern = "2026-07-28"
     static let legacy = ["2025-11-25", "2025-06-18"]
-    static let info: [String: Any] = ["name": "greenroom", "title": "Greenroom", "version": "1"]
+    static let info: [String: Any] = ["name": "greenroom", "title": Variant.name, "version": "1"]
 
     let tools = AgentTools()
     private var listener: NWListener?

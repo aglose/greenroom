@@ -38,6 +38,16 @@ expect("its script is inside the plugin", os.path.isfile(script) and os.path.rea
 expect("the plugin's files name no home folder", not any(re.search(r"/Users/|/home/", open(os.path.join(d, f), errors="replace").read())
                                                          for d, _, fs in os.walk(plugin) for f in fs))
 
+# The repository's own .mcp.json: the Debug copy, for agents working in this repository and its worktrees only.
+project = json.load(open(root + "/.mcp.json"))
+expect("the repository's .mcp.json declares one server, greenroom-debug", list(project.get("mcpServers", {})) == ["greenroom-debug"], list(project.get("mcpServers", {})))
+debug = project["mcpServers"].get("greenroom-debug", {})
+debug_argv = [debug.get("command", "")] + debug.get("args", [])
+debug_script = root + "/scripts/greenroom-debug-mcp.sh"
+expect("it runs scripts/greenroom-debug-mcp.sh from the worktree's own root", "git rev-parse --show-toplevel" in debug_argv[-1] and "scripts/greenroom-debug-mcp.sh" in debug_argv[-1] and os.access(debug_script, os.X_OK), debug_argv)
+expect(".mcp.json and its script name no home folder", not any(re.search(r"/Users/|/home/", open(f).read()) for f in (root + "/.mcp.json", debug_script)))
+expect("the Debug copy is never added for every project", "repositoryOnly" in connect and '"--scope", "user"' in connect)
+
 # The skill: skills/verify/SKILL.md is /greenroom:verify, and it names the loop's tools.
 skill = open(plugin + "/skills/verify/SKILL.md").read()
 front = skill.split("---")[1] if skill.startswith("---") else ""
@@ -56,6 +66,8 @@ def launch(env, stdin=""):
 plain = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/")}
 r = launch(dict(plain, GREENROOM_APP="/nowhere/Greenroom.app"))
 expect("a GREENROOM_APP that is no app is refused, in words", r.returncode == 1 and "not a Greenroom.app" in r.stderr and r.stdout == "", r.stderr)
+r = subprocess.run(debug_argv, capture_output=True, text=True, timeout=60, cwd=root, env=dict(plain, GREENROOM_DEBUG_APP="/nowhere/Greenroom Debug.app"))
+expect("the Debug launcher refuses a GREENROOM_DEBUG_APP that is no app, in words", r.returncode == 1 and "not a Greenroom Debug.app" in r.stderr and r.stdout == "", r.stderr)
 empty = tempfile.mkdtemp(prefix="grplugin-")
 fake = empty + "/bin"
 os.makedirs(fake)
@@ -103,6 +115,14 @@ try:
         if names:
             expect("... and every tool the skill names is one of the app's", named <= names, sorted(named - names))
     served(dict(plain, GREENROOM_APP=app, GREENROOM_MCP_ARGS="--agent-check", GREENROOM_STATE=state), "from GREENROOM_APP")
+    # The repository's .mcp.json, as Claude Code would run it from a subfolder of a worktree.
+    r = subprocess.run(debug_argv, input=messages, capture_output=True, text=True, timeout=60, cwd=root + "/scripts",
+                       env=dict(plain, GREENROOM_DEBUG_APP=app, GREENROOM_MCP_ARGS="--agent-check", GREENROOM_STATE=state))
+    try:
+        debug_names = {t["name"] for t in [json.loads(l) for l in r.stdout.splitlines() if l.strip()][-1]["result"]["tools"]}
+    except Exception:
+        debug_names = set()
+    expect("the repository's .mcp.json serves MCP from a subfolder of the worktree", {"launch", "check"} <= debug_names, (r.returncode, r.stdout[:300], r.stderr[:300]))
     if found:
         served({"PATH": fake + ":/usr/bin:/bin", "HOME": empty, "GREENROOM_MCP_ARGS": "--agent-check", "GREENROOM_STATE": state}, "from the app Spotlight names, past a translocated copy")
 finally:

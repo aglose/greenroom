@@ -687,6 +687,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         file.addItem(to(workbench: #selector(Workbench.compareWithAPK(_:)), "Compare With APK…", "O", [.command, .shift]))
         file.addItem(item("Clear Recent APKs", #selector(clearRecents(_:)), ""))
         file.addItem(.separator())
+        file.addItem(to(workbench: #selector(Workbench.connectAgents(_:)), "Connect Agents…", ""))
         file.addItem(to(workbench: #selector(Workbench.addRepository(_:)), "Add Repository…", "o", [.command, .option]))
         file.addItem(to(workbench: #selector(Workbench.openProjectFolder(_:)), "Open Project Folder…", ""))
         file.addItem(to(workbench: #selector(Workbench.cloneFromGitHub(_:)), "Clone from GitHub…", ""))

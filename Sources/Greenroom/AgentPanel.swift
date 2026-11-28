@@ -64,8 +64,9 @@ final class AgentPanel: NSViewController, NSTableViewDataSource, NSTableViewDele
     /// Reports a short status message to the window (text, isProblem).
     var onSay: ((String, Bool) -> Void)?
 
-    /// The command that connects Claude Code to this copy of Greenroom.
-    static var setupCommand: String { ClaudeConnect.displayCommand() }
+    /// The command that connects Claude Code to this copy of Greenroom. The Debug copy is never added to every
+    /// project (its repository's .mcp.json registers it), so it gives the plain stdio command.
+    static var setupCommand: String { ClaudeConnect.repositoryOnly ? Harnesses.stdioCommand : ClaudeConnect.displayCommand() }
 
     init(activity: AgentActivity, tools: AgentTools, selected: @escaping () -> (path: String, label: String)? = { nil }) {
         self.activity = activity

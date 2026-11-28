@@ -166,6 +166,7 @@ extension AgentTools {
                      "state: \(Self.tilde(Engine.shared.state.path))"]
         let (sims, repos) = mainSync { (Engine.shared.simulators.filter(\.isAlive).count, workbench?.sessions.workspaces.count ?? 0) }
         lines.append("\(sims) simulator\(sims == 1 ? "" : "s") running, \(repos) repositor\(repos == 1 ? "y" : "ies") added")
+        lines.append("stage: " + mainSync { workbench?.stageSummary ?? "unknown" })
         lines.append("settings:")
         lines += mainSync { appSettings().map { "  \($0.key) = \($0.get())  (\($0.about)\($0.set == nil ? "; read only" : ""))" } }
         return lines.joined(separator: "\n")

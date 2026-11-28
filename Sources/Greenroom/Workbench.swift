@@ -130,6 +130,9 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     private let emptyStage = EmptyStage(frame: .zero)
     /// What the stage shows with nothing running: waiting for an agent.
     private let waitingStage = WaitingStage(frame: .zero)
+    /// The Connect screen (first run, and File > Connect Agents…): on the stage only while `showingConnect`.
+    private let connectStage = ConnectStage(frame: .zero)
+    private var showingConnect = false
     private var showingAPK = false
     private var simulatorsSeen = 0
     private var stageWanted: [ObjectIdentifier: Bool] = [:]
@@ -204,13 +207,17 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         let content = NSViewController()
         let stack = StageBackground()
-        for v in [grid, waitingStage, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
+        for v in [grid, waitingStage, connectStage, emptyStage, overrideBar, agentHud, bottomDock, toast] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; stack.addSubview(v) }
         emptyStage.isHidden = true
+        connectStage.isHidden = true
+        connectStage.flow.onDone = { [weak self] in self?.leaveConnectScreen() }
+        connectStage.flow.onRunAPK = { [weak self] in self?.runAPK(nil) }
+        ConnectModel.shared.onChange = { [weak self] in self?.reloadWaitingStage() }
         emptyStage.onOpen = { [weak self] in self?.open($0) }
         emptyStage.onBack = { [weak self] in self?.leaveAPKScreen() }
         waitingStage.onRunAPK = { [weak self] in self?.runAPK(nil) }
         waitingStage.onAddRepo = { [weak self] in self?.addRepository(nil) }
-        waitingStage.onConnect = { SettingsWindow.shared.show(tab: .agents) }
+        waitingStage.onConnect = { [weak self] in self?.connectAgents(nil) }
         DevHooks.shared.install(workbench: self, in: stack, over: grid)   // developer hooks (DevHooks.swift)
         emptyStage.onChoose = { NSApp.sendAction(Selector(("openDocument:")), to: nil, from: nil) }
         bottomDock.isHidden = true
@@ -236,6 +243,10 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
             waitingStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
             waitingStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
             waitingStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
+            connectStage.topAnchor.constraint(equalTo: grid.topAnchor),
+            connectStage.bottomAnchor.constraint(equalTo: grid.bottomAnchor),
+            connectStage.leadingAnchor.constraint(equalTo: grid.leadingAnchor),
+            connectStage.trailingAnchor.constraint(equalTo: grid.trailingAnchor),
             overrideBar.trailingAnchor.constraint(equalTo: grid.trailingAnchor, constant: -14),
             overrideBar.topAnchor.constraint(equalTo: grid.topAnchor, constant: 12),
             agentHud.leadingAnchor.constraint(equalTo: grid.leadingAnchor, constant: 14),
@@ -288,6 +299,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         reload()
         sessions.onChange = { [weak self] in self?.setNeedsSidebar() }   // the rows only: the stage did not change
         sessions.install(workbench: self)
+        lookAtFirstRun()   // after the repositories are loaded: someone who has one is past first run
         let quick = QuickSignIn(workbench: self)
         quickSignIn = quick
         ScriptWindow.onOffersChanged = { [weak quick] in quick?.refresh() }
@@ -454,10 +466,18 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         refreshGrid()
         memoryMeter.watch(sims)
         // An app that opens takes the stage back from the APK screen. With nothing running the stage waits for an agent.
-        if sims.count > simulatorsSeen { showingAPK = false }
+        if sims.count > simulatorsSeen {
+            showingAPK = false
+            if showingConnect {   // the agent's app is here: the screens have done their work
+                showingConnect = false
+                ConnectModel.firstRunDone = true
+                toast.show("You are set: what agents bring shows in the sidebar, and File > Connect Agents… connects more")
+            }
+        }
         simulatorsSeen = sims.count
         setStage(emptyStage, shown: showingAPK) { self.emptyStage.reload() }
-        setStage(waitingStage, shown: sims.isEmpty && !showingAPK) { self.reloadWaitingStage() }
+        setStage(connectStage, shown: showingConnect && !showingAPK) { self.reloadConnectStage() }
+        setStage(waitingStage, shown: sims.isEmpty && !showingAPK && !showingConnect) { self.reloadWaitingStage() }
         if showingLog { logPanel.follow(selected) }
         if showingNetwork { networkPane.follow(selected) }
         if showingDevice { devicePane.follow(selected) }
@@ -1513,6 +1533,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
         }
         // Apps.
         add("open", "Run an APK…", "App", "folder", "⌘O", keywords: "open apk file drop") { [weak self] in self?.runAPK(nil) }
+        add("connect", "Connect agents…", "App", "dot.radiowaves.left.and.right", keywords: "claude codex cursor mcp harness onboarding") { [weak self] in self?.connectAgents(nil) }
         add("compare.apk", "Compare with another build…", "App", "square.on.square.dashed", "⇧⌘O") { [weak self] in self?.compareWithAPK(nil) }
         add("matrix", "Matrix wall: every device, appearance, language and text size", "App", "square.grid.3x3", "⌥⌘X", keywords: "grid locale dark font rtl") { [weak self] in self?.showMatrix(nil) }
         if !matrixSims.isEmpty { add("matrix.close", "Close the matrix wall", "App", "xmark.square") { [weak self] in self?.closeMatrix(nil) } }
@@ -2696,8 +2717,63 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
     }
 
     private func reloadWaitingStage() {
-        waitingStage.reload(client: agentActivity.client, listening: (NSApp.delegate as? AppDelegate)?.agentListening ?? false)
+        waitingStage.reload(client: agentActivity.client, listening: (NSApp.delegate as? AppDelegate)?.agentListening ?? false,
+                            connected: ConnectModel.shared.connectedNames)
     }
+
+    /// What the listening step of the Connect screen has heard: the agent's name and its last calls.
+    private func reloadConnectStage() {
+        let flow = connectStage.flow
+        if flow.client != agentActivity.client { flow.client = agentActivity.client }
+        let lines = agentActivity.entries(session: nil, all: true).suffix(4).map { e in
+            (e.label.map { $0 + " · " } ?? "") + e.tool + (e.summary.isEmpty ? "" : ": " + e.summary)
+        }
+        if flow.lines != lines { flow.lines = lines }
+    }
+
+    /// The first time, with no repository added and nothing running, the Connect screen comes first. Otherwise the
+    /// harnesses are looked at once, so the waiting stage can name what is connected.
+    private func lookAtFirstRun() {
+        guard Engine.shared.simulators.isEmpty else { return }
+        ConnectModel.shared.refresh()
+        guard !ConnectModel.firstRunDone, sessions.workspaces.isEmpty else { return }
+        showingConnect = true
+        reload()
+        DispatchQueue.main.async { [weak self] in   // Escape leaves it
+            guard let self, self.showingConnect, self.window.firstResponder === self.window else { return }
+            self.window.makeFirstResponder(self.connectStage)
+        }
+    }
+
+    /// File > Connect Agents…: the Connect screen takes the stage, over running devices too.
+    @objc func connectAgents(_ sender: Any?) {
+        if showingAPK { showingAPK = false }
+        guard !showingConnect else { reload(); return }
+        showingConnect = true
+        connectStage.flow.step = 1
+        ConnectModel.shared.refresh()
+        reload()
+        window.makeFirstResponder(connectStage)
+    }
+
+    private func leaveConnectScreen() {
+        guard showingConnect else { return }
+        showingConnect = false
+        ConnectModel.firstRunDone = true
+        reload()
+        if let sel = selected, let v = grid.view(for: sel) { window.makeFirstResponder(v) }
+    }
+
+    /// What the person sees on the stage, in a few words (the `app` tool says it).
+    var stageSummary: String {
+        if showingAPK { return "the APK screen" }
+        if showingConnect { return "the Connect screen (step \(connectStage.flow.step) of 2: \(connectStage.flow.step == 1 ? "connecting agents" : "waiting for an agent's first call"))" }
+        return Engine.shared.simulators.isEmpty ? "waiting for an agent" : "the devices"
+    }
+
+    /// Whether the Connect screen has the stage, and its step (for a check).
+    var connectShown: Bool { showingConnect && (stageWanted[ObjectIdentifier(connectStage)] ?? false) }
+    var connectFlow: ConnectFlow { connectStage.flow }
 
     /// File > Run an APK… (⌘O): the APK screen takes the stage, over running devices too.
     @objc func runAPK(_ sender: Any?) {
@@ -2726,6 +2802,7 @@ final class Workbench: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableVie
 
     func agentChanged() {
         reloadWaitingStage()
+        if showingConnect { reloadConnectStage() }
         agentPanel?.refresh()
         updateAgentHud()
         updateChrome()

@@ -1,8 +1,9 @@
 # Greenroom, agent-first: the spec
 
-A spec (2026-11-27). The owner's decisions are at the end. **A1 is built** (`AgentAdoption.swift`,
-`WaitingStage.swift`, the APK screen in `EmptyStage.swift`, `--waiting-check`, `mcp-check.py --sessions`); the rest
-is not. It changes what Greenroom is for, what a new user sees first, and how the
+A spec (2026-11-27). The owner's decisions are at the end. **A1 and A2 are built**: A1 in `AgentAdoption.swift`,
+`WaitingStage.swift` and the APK screen in `EmptyStage.swift`; A2 in `Harnesses.swift`, `ClaudeConnect.swift` and
+`ConnectScreen.swift` (checked by `--connect-check`, `--waiting-check` and `mcp-check.py`). What A2 left for later
+steps is said where it applies. The rest is not built. It changes what Greenroom is for, what a new user sees first, and how the
 window is arranged. The engine, the simulators, the tools in [AGENTS-INTERFACE.md](AGENTS-INTERFACE.md) and the
 sessions model in [SESSIONS-PLAN.md](SESSIONS-PLAN.md) stay; most of this is a new front on what they already do.
 The clickable prototype is [prototype/agent-first.html](prototype/agent-first.html).
@@ -83,7 +84,13 @@ MCP Apps panel that puts the simulator inside Cursor's or VS Code's chat.
 ### Installing, per harness
 
 The Connect screen finds what is installed and connects each with that harness's own command where it has one,
-shown before it runs, as Connect Claude Code does today. It writes a config file only where there is no command.
+shown before it runs. It writes a config file only where there is no command.
+
+Built in A2: the Tools column for Claude Code (`claude mcp add`; an enabled plugin counts as connected and is not
+installed by Greenroom), Codex (`codex mcp add`) and Cursor (`~/.cursor/mcp.json`: the install link cannot be seen
+to have worked, so the file is written, with every other entry kept). The Status and Skill columns are A3 and A4,
+so a row says "Adds Greenroom's tools" and no more. Every other harness found is named under "Another agent", with
+the stdio command and the JSON to paste.
 
 | Harness | Tools | Status (hooks) | Skill |
 | --- | --- | --- | --- |
@@ -111,7 +118,11 @@ connecting, then goes.
 ### To check before building
 
 - Whether a Claude Code plugin's hooks and `bin/` load for a plugin installed by `claude plugin install` from our
-  marketplace as documented (the CLI flags in `ClaudeConnect.swift` were never run for real either).
+  marketplace as documented. (`claude mcp get` and `claude plugin list` were read from a real Claude Code 2.1 in A2
+  and answer as `ClaudeConnect.swift` expects; `mcp add` and `mcp remove` are still only run against a stand-in.)
+- Codex's `mcp add`, `mcp get --json` and `mcp remove` against a real Codex: A2 took them from its documentation,
+  which does not give the JSON's shape or what `get` answers for a missing server. `CodexConnect` reads `command`
+  wherever it sits in the answer and treats a failing `get` as not connected.
 - Codex's hook trust step: what the person sees, and whether a hook can be offered without it.
 - Antigravity's file names and skills folder: sources disagree.
 - Whether Cursor and VS Code show pictures from a tool result. Only Claude Code documents it.
@@ -133,6 +144,17 @@ left at any time.
    agent's pointer moving on a device within a minute of installing.
 3. **You are set.** What the sidebar's states mean, the key that jumps to the next session that needs you, and
    whether to notify.
+
+A2 built steps 1 and 2 as screens on the stage (first run when no repository was ever added; File > Connect
+Agents… at any time; the list of step 1 is also Settings > Agents). Step 3 describes what A5 builds, so until then
+the screens end when the agent's app opens, with one line saying where things are.
+
+**The Debug copy is not for testing apps.** The release copy is the default everywhere; Greenroom Debug is for
+developing Greenroom itself. So the Debug copy is never registered for every project: this repository's `.mcp.json`
+registers it, which covers every worktree of the repository and nothing else, and its server instructions open by
+saying what it is. Its Connect screen connects nothing and offers to remove an entry at user scope left by an
+earlier build. (An agent that could call the Debug copy from another app's repository would add that repository
+to the Debug copy's Sessions too.)
 
 Below all three, small: "Run an APK yourself…" (⌘O).
 
@@ -272,7 +294,7 @@ Each step ends in a build that can be installed, and each has its own `--…-che
 | | Step | Closes |
 | --- | --- | --- |
 | A1 | A repository adds itself on an agent's first call; the empty stage becomes "Waiting for an agent"; the APK screen behind File > Run an APK… | 2, part of 1 |
-| A2 | The Connect screen: detection, a connector per harness (Claude Code, Codex, Cursor first), first-run steps 1 to 3, the sample-app prompt | 1, 3 |
+| A2 | The Connect screen: detection, a connector per harness (Claude Code, Codex, Cursor first), first-run steps 1 and 2, the sample-app prompt (`launch` with `apk: "sample"`); the Debug copy kept to this repository | 1, 3 |
 | A3 | `greenroom` CLI (`mcp`, `hook`, `open`, and the driving tools), the skill in each harness's folder, `greenroom://` | 11 |
 | A4 | Hooks in for Claude Code, Codex and Cursor; one status model for every harness; `onTurnEnd` wired; renames | 4, 13 |
 | A5 | Sidebar by attention, top-bar counts, notification, Dock badge, next-ready key | 7 |

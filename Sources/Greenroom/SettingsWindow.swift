@@ -162,10 +162,7 @@ struct SettingsView: View {
         variableCount = Variables.shared.names().count
         let scripts = Scripts.list(in: Scripts.folder)
         hasModifiedScripts = scripts.contains { Scripts.approval($0) == .changed }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let connected = ClaudeConnect.status() == .connected
-            DispatchQueue.main.async { claudeConnected = connected }
-        }
+        ConnectModel.shared.refresh { claudeConnected = !ConnectModel.shared.connectedNames.isEmpty }
     }
 
     var body: some View {
@@ -275,7 +272,7 @@ struct SettingsView: View {
                 .help("A script changed since you approved it for agents")
         case .agents where claudeConnected:
             Circle().fill(SettingsTheme.accent).frame(width: 7, height: 7)
-                .help("Claude Code connected")
+                .help("An agent is connected")
         default:
             EmptyView()
         }
@@ -386,8 +383,11 @@ struct SettingsView: View {
             }
 
             SettingsCard {
-                ClaudeConnectView(onStatusChange: { claudeConnected = ($0 == .connected) })
-                Divider().overlay(SettingsTheme.stroke)
+                HarnessList(model: ConnectModel.shared, ticks: false)
+            }
+            .onAppear { ConnectModel.shared.refresh() }
+
+            SettingsCard {
                 settingsToggleRow(
                     title: "Show Claude Code sessions in sidebar",
                     subtitle: "Reads local Claude Code transcripts and read-only git status. Sent nowhere.",

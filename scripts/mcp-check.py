@@ -708,6 +708,9 @@ def running_pid():
     except Exception:
         return None
 was_running = running_pid()
+# A state folder of the check's own with nothing in it yet: the app this starts is on its first run.
+first_run = bool(os.environ.get("GREENROOM_STATE")) and not was_running and not os.path.exists(os.path.dirname(state) + "/connect-seen") \
+    and not os.path.exists(os.path.dirname(state) + "/sessions/workspaces.json")
 started = None
 if not was_running:
     # Started here rather than by the shim (which uses LaunchServices: on CI's runners the app it opened never served
@@ -749,6 +752,25 @@ def expect(what, ok, got=""):
 try:
     r = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp-check", "version": "1"}})
     expect("initialize answers with the asked version", r["result"]["protocolVersion"] == "2025-06-18", json.dumps(r))
+    # What the server says about itself. The release copy's words are as they were; the Debug copy (Info.plist's
+    # GreenroomVariant) says what it is first, so an agent that has both does not pick it to test an app.
+    words, title = r["result"].get("instructions", ""), r["result"].get("serverInfo", {}).get("title")
+    release_words = ("Drives Android apps in Greenroom on this Mac; the person there sees the same simulators. launch an APK, then tap/type/key/swipe: "
+                     "each action answers with the nodes that changed (+ added, - removed, ~ changed; refs like e3 stay the same while a node is on screen), "
+                     "so call screen or screenshot only when you need all of it. check verifies texts in one call. APKs and their data stay on this Mac. "
+                     "Sign-ins are the owner's: never ask for or type passwords. To sign in, run_script a script the owner allowed (scripts lists them): "
+                     "it types their stored credentials, which you never see.")
+    try:
+        import plistlib
+        variant = plistlib.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(exe))), "Info.plist"), "rb")).get("GreenroomVariant", "release")
+    except Exception:
+        variant = "release"
+    if variant == "debug":
+        expect("the Debug copy's instructions open by saying what it is, then say the same",
+               words.startswith("This is Greenroom Debug, the development build of Greenroom itself. Use it only when asked to test the debug build")
+               and words.endswith(release_words) and len(words) < 4096 and title == "Greenroom Debug", (title, words))
+    else:
+        expect("the release copy's instructions are as they were", words == release_words and title == "Greenroom", (title, words))
     p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()
     listed = rpc("tools/list")
     if "result" not in listed:
@@ -762,8 +784,13 @@ try:
     r = rpc("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "1999-01-01"}})
     expect("an unknown protocol version is refused", r.get("error", {}).get("code") == -32022, json.dumps(r))
 
+    # First run (a state folder with nothing in it): the window shows the Connect screen until an agent's app opens.
+    stage = lambda: next((l for l in call("app")[0].split("\n") if l.startswith("stage: ")), "")
+    if first_run:
+        expect("on first run the window shows the Connect screen", stage().startswith("stage: the Connect screen"), stage())
     t, err, _ = call("launch", apk=apk, fresh=True)
     expect("launch answers with the screen", not err and "launched" in t and '"FAB clicks: 0"' in t, t)
+    expect("the agent's app takes the stage", stage() == "stage: the devices", stage())
     t, err, _ = call("tap", text="Add")
     expect("a tap answers with what changed", not err and '"FAB clicks: 0" -> "FAB clicks: 1"' in t, t)
     ref = next((l.split()[1] for l in t.split("\n") if l.startswith("~ ") and "FAB clicks" in l), "")
@@ -793,9 +820,9 @@ try:
     expect("wait_for gives up at its timeout", err and "not on screen after" in t, t)
     call("set", setting="rotate", value="portrait")
     call("tap", text="Home")
-    t, err, _ = call("launch", apk=apk, fresh=True)
+    t, err, _ = call("launch", apk="sample", fresh=True)   # the app that comes with Greenroom, by name
     second = t.split()[0]
-    expect("a second launch runs beside the first", not err and second == "s2", t)
+    expect("a second launch, of the sample app by name, runs beside the first", not err and second == "s2" and '"FAB clicks: 0"' in t, t)
     call("tap", sim="s2", text="Add")
     call("tap", sim="s2", text="Add")
     # s1 was tapped twice at the start of the session: both now show "FAB clicks: 2".

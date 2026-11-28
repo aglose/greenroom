@@ -19,27 +19,42 @@ hand as `/greenroom:verify`. This repository is its own marketplace; inside Clau
 The plugin's server is a script, `plugin/scripts/greenroom-mcp.sh`, that runs `Greenroom --mcp` from
 `/Applications/Greenroom.app`, else `~/Applications`, else the copy Spotlight finds by bundle id, and says so on
 standard error when there is none. `GREENROOM_APP` names another copy (a build of your own). Its tools are named
-`mcp__plugin_greenroom_greenroom__launch` and so on. Settings > Claude Code shows the two lines; Greenroom does not
-run them, and its "connected" line is about Connect alone. `scripts/plugin-check.py` checks the manifests and runs
+`mcp__plugin_greenroom_greenroom__launch` and so on. The Connect screen shows the two lines; Greenroom does not
+run them, but it counts an enabled plugin as connected (`claude plugin list`) and does not offer to add the server
+a second time. `scripts/plugin-check.py` checks the manifests and runs
 the script against a built app; to try the plugin from a checkout without installing it,
 `claude --plugin-dir plugin` (not with `--strict-mcp-config`, which leaves out a plugin's servers too).
 
-**Connect**: Settings > Claude Code > Connect Claude Code shows the exact command and runs it on a click, with
-your own `claude` program found on your login shell's PATH. It says when Greenroom is already connected, when
-`claude` is not installed, and shows `claude`'s own words when the command fails; Disconnect runs the matching
-`claude mcp remove`. By hand it is:
+**Connect**: the Connect screen (first run, File > Connect Agents…, and the same list in Settings > Agents) lists
+the harnesses found on this Mac, shows what connecting each would run or write, and connects the ticked ones on
+one button. It says when Greenroom is already connected, when a harness is not installed, and shows the harness's
+own words when a command fails; each row's details have Disconnect.
 
-```bash
-claude mcp add --scope user greenroom -- "/Applications/Greenroom.app/Contents/MacOS/Greenroom" --mcp
-```
+| Harness | Connect runs or writes | Found by |
+| --- | --- | --- |
+| Claude Code | `claude mcp add --scope user greenroom -- "<Greenroom>" --mcp`; removed with `claude mcp remove --scope user greenroom` | `claude` on your login shell's PATH |
+| Codex | `codex mcp add greenroom -- "<Greenroom>" --mcp`; read with `codex mcp get greenroom --json`, removed with `codex mcp remove greenroom` | `codex` on the PATH, else inside Codex.app or ChatGPT.app |
+| Cursor | the `greenroom` entry under `mcpServers` in `~/.cursor/mcp.json` (the other entries are kept; a file that is not plain JSON is left alone) | Cursor.app, or `cursor-agent` on the PATH |
+| any other | nothing: "Another agent" shows the stdio command and the JSON to paste | |
 
-If `claude` already has a `greenroom` entry that runs another copy of the app, Settings says so and offers
-Reconnect (remove, then add). The `claude mcp` flags were checked against the CLI's `--help` and exercised only
-against a stand-in `claude`, never run for real; they are in one place, `ClaudeConnect.swift`. Each call is stopped
-at a deadline, and none runs on the app's main thread.
+`<Greenroom>` is this copy's program, `/Applications/Greenroom.app/Contents/MacOS/Greenroom` when installed there.
+If a harness already has a `greenroom` entry that runs another copy of the app, the row says so and offers
+Reconnect. The `claude mcp` lines and the shape of their answers were read from a real Claude Code (2.1); Codex's
+are from its documentation and were never run against a real Codex; every check runs stand-ins
+(`--connect-check`). The command lines are in `ClaudeConnect.swift` and `Harnesses.swift`. Each call is stopped at
+a deadline, and none runs on the app's main thread.
 
 Any other MCP client: run that program with `--mcp` as a stdio server. The toolbar's Agent button (✦) has the
 command for this copy of the app, a log of what agents did, and a switch that pauses them.
+
+**The Debug copy** (`scripts/bundle.sh --variant debug`) is for developing Greenroom itself, and is never added to
+every project: this repository's `.mcp.json` registers it as `greenroom-debug` (through
+`scripts/greenroom-debug-mcp.sh`, which finds the installed Greenroom Debug.app, else this checkout's build), so
+agents working in the repository or one of its worktrees have it and no others. Claude Code asks once per worktree
+whether to use a project's servers. Its Connect screen connects nothing; it looks for a `greenroom-debug` entry
+at user scope left by an earlier build and offers to remove it. Its server instructions open with "This is
+Greenroom Debug, the development build of Greenroom itself. Use it only when asked to test the debug build; for
+testing an Android app use the greenroom server."
 
 `Greenroom --mcp` holds no simulators itself. It passes each message to the running app, starting Greenroom in
 the background if it is not open, so what an agent launches appears in the window and what the person opened is
@@ -63,7 +78,7 @@ The answers are built to be cheap to read:
 
 | Tool | |
 | --- | --- |
-| `launch` | start an APK: `apk` (left out inside a worktree of a repository added to Greenroom: see below), and optionally `device`, `appearance`, `locale`, `font_scale`, `fresh`, `skin` (a stored device skin) and `options` (further apksim options as one line; Greenroom's own `--headless`, `--window`, `--control`, `--data-slots` are left out). In a worktree the repository's own skin and options come first |
+| `launch` | start an APK: `apk` (a path, or `sample` for the sample app that comes with Greenroom; left out inside a worktree of a repository added to Greenroom: see below), and optionally `device`, `appearance`, `locale`, `font_scale`, `fresh`, `skin` (a stored device skin) and `options` (further apksim options as one line; Greenroom's own `--headless`, `--window`, `--control`, `--data-slots` are left out). In a worktree the repository's own skin and options come first |
 | `simulators`, `close` | what is running; stop one |
 | `tap` | by `ref`, by `text`, or at `x`,`y` |
 | `type` | `text`, into the field named by `ref` or `tap_text`; `enter` |
@@ -100,7 +115,7 @@ The answers are built to be cheap to read:
 
 | Tool | |
 | --- | --- |
-| `app` | the version, the engine's, the state folder, and every app setting with its value. `setting` and `value` change `sessions_warm`, `auto_archive`, `jobs_at_once`, `evidence_cap_gb`, `build_timeout_minutes`, `reopen_last`, `app_icon`, `update_checks`. `crash_reports`, `usage_reports`, `claude_sessions`, `t3_sessions` and `agents_paused` are answered and never set |
+| `app` | the version, the engine's, the state folder, what the person sees on the stage (the devices, waiting for an agent, the Connect screen, the APK screen), and every app setting with its value. `setting` and `value` change `sessions_warm`, `auto_archive`, `jobs_at_once`, `evidence_cap_gb`, `build_timeout_minutes`, `reopen_last`, `app_icon`, `update_checks`. `crash_reports`, `usage_reports`, `claude_sessions`, `t3_sessions` and `agents_paused` are answered and never set |
 | `workspace` | a repository's settings (default: the connection's; `repo` names another by folder name or path, so an agent outside every worktree can use it). Settable: `base_ref`, `module`, `variant`, `default_recipe`, `auto`, `walk_with_data`, `quick_walk`, `keep_main`, `unsigned_baseline`, `skip_local_apk_scan`, `disable_local_builds`, `ci_workflow`, `ci_artifact`, `ci_apk`. The skin and options are `launch_settings` |
 | `sessions` | every repository with its sessions (branch, title, build and whether it is stale, simulator, pull request, the walk of its newest build), its main build and the pull requests Greenroom holds |
 | `session_action` | by `session` (a branch, title or worktree path; default the connection's): `open`, `close`, `build` (queued, not waited for), `cancel_build`, `walk`, `stop_walk`, `show`, `hide`; and `add_repository` with `path` |

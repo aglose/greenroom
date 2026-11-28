@@ -61,9 +61,15 @@ calls (`agent-*.mp4` and `steps.jsonl`), kept on this Mac under that build's evi
 The list holds only the shape of each call: the tool, how many characters were typed, a link without its query,
 the name of a setting without its value, the length of a text tapped or awaited; not the text itself. The video is
 the screen, so it shows what was on screen. Nothing is sent anywhere. It can be turned off for each repository in
-the Agent popover, which ends a running recording at once; a paused agent is not recorded. "Connect Claude Code"
-(Settings) runs `claude mcp add` with your own `claude` program, which changes Claude Code's own list of servers on
-this Mac and nothing else.
+the Agent popover, which ends a running recording at once; a paused agent is not recorded. The Connect screen
+(first run, File > Connect Agents…, Settings > Agents, and once at launch when nothing is running, so the window
+can say which agents are connected) looks for the agent programs on this Mac: it asks your login
+shell for its PATH, looks for their applications, and asks each one found whether it has a `greenroom` server
+(`claude mcp get`, `claude plugin list`, `codex mcp get`; for Cursor it reads `~/.cursor/mcp.json`, of which it
+uses only the `greenroom` entry). Connecting runs `claude mcp add` or `codex mcp add` with your own program, which
+changes that program's own list of servers on this Mac, or adds the `greenroom` entry to `~/.cursor/mcp.json` and
+leaves the rest of that file's contents as they were. The command or the change is shown before it happens, and
+nothing is connected until you press the button. None of it is sent anywhere.
 
 ## Repositories an agent brings
 
